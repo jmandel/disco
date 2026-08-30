@@ -1,0 +1,208 @@
+#!/usr/bin/env bun
+// `disco` — thin command surface over the daemon RPC and the store (GUIDANCE §3.1). Every convenience
+// here is sugar over `disco sql` / `disco eval` / the library; see README for desugarings.
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, copyFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { RpcClient } from "../src/rpc.ts";
+import { openStore, readManifest, blobPath } from "../src/store.ts";
+import { launchChromium } from "../src/launch.ts";
+import { defaults } from "../defaults.ts";
+
+const argv = process.argv.slice(2);
+const flags: Record<string, string | boolean> = {};
+const pos: string[] = [];
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a.startsWith("--")) { const k = a.slice(2); const nxt = argv[i + 1]; if (nxt !== undefined && !nxt.startsWith("--")) { flags[k] = nxt; i++; } else flags[k] = true; }
+  else pos.push(a);
+}
+const f = (k: string): string | undefined => (typeof flags[k] === "string" ? (flags[k] as string) : undefined);
+const has = (k: string) => flags[k] !== undefined;
+const sessionsDir = () => resolve(f("dir") ?? process.env.DISCO_SESSIONS_DIR ?? join(process.cwd(), "sessions"));
+const out = (o: unknown) => console.log(typeof o === "string" ? o : JSON.stringify(o, null, has("compact") ? 0 : 2));
+const die = (m: string, code = 1): never => { console.error(m); process.exit(code); };
+
+function sessionDir(nameOrDir?: string): string {
+  const s = nameOrDir ?? f("session") ?? process.env.DISCO_SESSION;
+  if (s) { if (existsSync(join(s, "manifest.json"))) return resolve(s); const d = join(sessionsDir(), s); if (existsSync(join(d, "manifest.json"))) return d; die(`no session "${s}" (looked in ${sessionsDir()})`); }
+  const cur = join(sessionsDir(), ".current");
+  if (existsSync(cur)) { const d = join(sessionsDir(), readFileSync(cur, "utf8").trim()); if (existsSync(join(d, "manifest.json"))) return d; }
+  return die(`no current session; run \`disco session new <name> --attach <port> --scope <url-part>\` or pass --session`);
+}
+async function client(dir = sessionDir()): Promise<RpcClient> {
+  const sock = join(dir, "daemon.sock");
+  if (!existsSync(sock)) die(`daemon not running for ${dir} (no daemon.sock). Store queries still work: disco sql "…"`);
+  return RpcClient.connect(sock);
+}
+async function withClient<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> { const c = await client(); try { return await fn(c); } finally { c.close(); } }
+
+const HELP = `disco — discovery daemon CLI
+
+session new <name> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--fg]
+session end [name]            stop the daemon (store stays)
+session ls | info             list sessions / show current session info
+targets                       scoped targets + frames
+tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
+sql "<query>" [--json]        query the store directly (read-only; works with the daemon down)
+note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
+families [--mark-read F] [--ambient F] [--not-ambient F]
+idle [ms]                     idle-observe to warm the ambient classifier
+screenshot [--out file.jpg]   capture now; prints the blob hash
+blob <hash> [--out file]      copy a blob out / print text
+eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
+cdp <Method> [json params] [--target id | --browser]
+act ... settle ... watch ...  (Slice 2)
+All session-selecting commands accept --session <name|dir> or DISCO_SESSION; sessions live in --dir / DISCO_SESSIONS_DIR / ./sessions.`;
+
+const cmd = pos[0];
+switch (cmd) {
+  case undefined: case "help": case "--help": out(HELP); break;
+
+  case "session": {
+    const sub = pos[1];
+    if (sub === "new") {
+      const name = pos[2] ?? die("session new <name>");
+      const dir = join(sessionsDir(), name);
+      if (existsSync(join(dir, "manifest.json"))) die(`session "${name}" already exists at ${dir}`);
+      mkdirSync(dir, { recursive: true });
+      const daemonArgs = ["--dir", dir, "--name", name];
+      let launchedPid: number | undefined;
+      if (has("launch")) {
+        const l = await launchChromium({ headless: has("headless"), userDataDir: join(dir, "profile"), url: f("url") });
+        launchedPid = l.pid;
+        daemonArgs.push("--attach", String(l.port), "--launched-pid", String(l.pid), "--user-data-dir", l.userDataDir, "--mode", "launch");
+        if (has("headless")) daemonArgs.push("--headless");
+        console.error(`launched chromium pid=${l.pid} port=${l.port}`);
+        l.proc.unref();
+      } else if (has("attach")) {
+        daemonArgs.push("--attach", String(f("attach")));
+        if (f("host")) daemonArgs.push("--host", f("host")!);
+        if (!f("scope")) console.error("warning: attach mode without --scope instruments EVERY tab in that browser (GUIDANCE §3.2). Pass --scope <url-part>.");
+      } else die("session new needs --attach <port> or --launch");
+      if (f("scope")) daemonArgs.push("--scope", f("scope")!);
+      if (f("dialogs")) daemonArgs.push("--dialogs", f("dialogs")!);
+      const daemonPath = join(import.meta.dir, "..", "src", "daemon.ts");
+      if (has("fg")) {
+        const p = Bun.spawn(["bun", daemonPath, ...daemonArgs, "--fg"], { stdout: "inherit", stderr: "inherit", stdin: "ignore" });
+        writeFileSync(join(sessionsDir(), ".current"), name);
+        await p.exited; break;
+      }
+      const setsid = Bun.which("setsid");
+      const logFile = Bun.file(join(dir, "daemon.out"));
+      const p = Bun.spawn([...(setsid ? [setsid] : []), "bun", daemonPath, ...daemonArgs], { stdout: logFile, stderr: logFile, stdin: "ignore" });
+      p.unref();
+      const sock = join(dir, "daemon.sock");
+      const t0 = Date.now();
+      while (!existsSync(sock)) { if (Date.now() - t0 > 15000) die(`daemon did not start; see ${join(dir, "daemon.out")}`); await new Promise((r) => setTimeout(r, 100)); }
+      writeFileSync(join(sessionsDir(), ".current"), name);
+      const c = await RpcClient.connect(sock);
+      const info = await c.call("session.info");
+      console.error(`session "${name}" started (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
+      for (const t of info.targets) console.error(`  ${t.targetId.slice(0, 8)} ${t.type} ${t.url}`);
+      if (!has("no-idle")) {
+        const ms = Number(f("idle-ms") ?? defaults.idleObserveMs);
+        console.error(`idle-observing ${ms}ms to learn ambient traffic (--no-idle to skip)…`);
+        const r = await c.call("idle", { ms }, ms + 10000);
+        console.error(`families: ${r.families.length}, ambient: ${r.families.filter((x: any) => x.ambient).length}${r.immature ? " (classifier still immature)" : ""}`);
+        for (const fam of r.families) console.error(`  ${fam.ambient ? "ambient " : "        "} ${fam.family} ×${fam.count}${fam.reason ? " " + fam.reason : ""}`);
+      }
+      c.close();
+      out({ name, dir, pid: launchedPid, sock });
+    } else if (sub === "end") {
+      const dir = sessionDir(pos[2]);
+      const c = await client(dir); await c.call("session.end"); c.close();
+      const t0 = Date.now(); while (existsSync(join(dir, "daemon.sock")) && Date.now() - t0 < 10000) await new Promise((r) => setTimeout(r, 100));
+      console.error(`session ended: ${dir}`);
+    } else if (sub === "ls") {
+      const root = sessionsDir();
+      if (!existsSync(root)) { out([]); break; }
+      const cur = existsSync(join(root, ".current")) ? readFileSync(join(root, ".current"), "utf8").trim() : null;
+      for (const n of readdirSync(root)) { if (!existsSync(join(root, n, "manifest.json"))) continue; const m = readManifest(join(root, n)); console.log(`${n === cur ? "*" : " "} ${n.padEnd(24)} ${m.mode.padEnd(7)} ${existsSync(join(root, n, "daemon.sock")) ? "running" : "stopped"} ${m.startedWall} scope=${m.scope ?? "all"}`); }
+    } else if (sub === "info") {
+      out(await withClient((c) => c.call("session.info")));
+    } else die("session new|end|ls|info");
+    break;
+  }
+
+  case "targets": out(await withClient((c) => c.call("targets"))); break;
+
+  case "tail": {
+    const c = await client();
+    c.onEvent((ev) => console.log(JSON.stringify(ev)));
+    const r = await c.call("subscribe");
+    console.error(`tailing from seq ${r.lastSeq} (Ctrl-C to stop)`);
+    await new Promise(() => {});
+    break;
+  }
+
+  case "sql": {
+    const q = pos[1] ?? die('sql "<query>"');
+    const s = openStore(sessionDir());
+    const rows = s.sql(q);
+    if (has("json")) out(rows);
+    else if (!rows.length) console.log("(no rows)");
+    else {
+      const cols = Object.keys(rows[0]);
+      const w = cols.map((c) => Math.min(60, Math.max(c.length, ...rows.map((r: any) => String(r[c] ?? "").length))));
+      console.log(cols.map((c, i) => c.padEnd(w[i])).join("  "));
+      for (const r of rows) console.log(cols.map((c, i) => String(r[c] ?? "").replace(/\n/g, " ").slice(0, 60).padEnd(w[i])).join("  "));
+      console.log(`(${rows.length} rows)`);
+    }
+    s.close();
+    break;
+  }
+
+  case "note": {
+    const text = pos[1] ?? die('note "<text>"');
+    out(await withClient((c) => c.call("note", { kind: f("kind") ?? "note", name: f("name"), action: f("action"), text, data: f("data") ? JSON.parse(f("data")!) : undefined })));
+    break;
+  }
+
+  case "families": {
+    await withClient(async (c) => {
+      if (f("mark-read")) await c.call("family.mark", { family: f("mark-read"), read: true });
+      if (f("ambient")) await c.call("family.mark", { family: f("ambient"), ambient: true });
+      if (f("not-ambient")) await c.call("family.mark", { family: f("not-ambient"), ambient: false });
+      const fams = await c.call("families");
+      for (const x of fams) console.log(`${x.ambient ? "ambient " : "        "} ${x.writeKind.padEnd(7)} ${String(x.count).padStart(4)}  ${x.family}${x.reason ? "  (" + x.reason + ")" : ""}`);
+    });
+    break;
+  }
+
+  case "idle": { const ms = Number(pos[1] ?? defaults.idleObserveMs); out(await withClient((c) => c.call("idle", { ms }, ms + 10000))); break; }
+
+  case "screenshot": {
+    const r = await withClient((c) => c.call("screenshot", { targetId: f("target") }));
+    if (f("out")) { copyFileSync(blobPath(sessionDir(), r.hash), f("out")!); console.error(`wrote ${f("out")}`); }
+    out(r);
+    break;
+  }
+
+  case "blob": {
+    const hash = pos[1] ?? die("blob <hash>");
+    const p = blobPath(sessionDir(), hash);
+    if (!existsSync(p)) die(`no blob ${hash}`);
+    if (f("out")) { copyFileSync(p, f("out")!); console.error(`wrote ${f("out")}`); }
+    else process.stdout.write(readFileSync(p));
+    break;
+  }
+
+  case "eval": {
+    const fn = pos[1] ?? die('eval "<function source>"');
+    out(await withClient((c) => c.call("evaluate", { fn, frame: f("frame"), world: f("world"), args: f("args") ? JSON.parse(f("args")!) : [] })));
+    break;
+  }
+
+  case "cdp": {
+    const method = pos[1] ?? die("cdp <Method> [json]");
+    out(await withClient((c) => c.call("cdp.send", { method, params: pos[2] ? JSON.parse(pos[2]) : {}, targetId: f("target"), browser: has("browser") })));
+    break;
+  }
+
+  default: {
+    // Slice 2+ commands are registered in cli/commands.ts
+    const mod = await import("./commands.ts").catch(() => null);
+    if (mod && (mod as any).run) { await (mod as any).run(cmd, pos.slice(1), flags, { client, sessionDir, out, die }); break; }
+    die(`unknown command "${cmd}"\n\n${HELP}`);
+  }
+}

@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Discovery daemon: observation-first browser instrumentation for agents (see GUIDANCE.md)",
-  "bin": { "disco": "./cli/disco.ts" },
+  "bin": {
+    "disco": "./cli/disco.ts"
+  },
   "scripts": {
     "gauntlet": "bun run gauntlet/server.ts",
     "test": "bun test",
@@ -16,5 +18,8 @@
     "@types/bun": "latest",
     "typescript": "^5.6.0",
     "playwright-core": "^1.50.0"
+  },
+  "dependencies": {
+    "jpeg-js": "^0.4.4"
   }
 }
