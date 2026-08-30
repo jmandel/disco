@@ -122,7 +122,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
 
   // If resolution scrolled the target into view, the whole viewport repaints ~tens of ms later; absorb
   // that BEFORE opening the causality window so the scroll (pre-action adjustment) is not an "effect".
-  if (didScroll) await absorbVisual(d, root, 450);
+  if (didScroll) await absorbVisual(d, root, 800);
   const pre = await snapshot(d, sel, frame, root, "pre");
   try { await d.callInFrame(frame, "function(t){ return window.__discoApi ? window.__discoApi.armTask(t) : 0; }", [TASK_EVENT[p.kind] ?? "click"]); } catch {}
   const t0 = d.now();
@@ -233,7 +233,9 @@ async function absorbVisual(d: Daemon, root: TargetState, maxMs: number): Promis
   for (;;) {
     await new Promise((r) => setTimeout(r, 60));
     const cast = root.cast;
-    if (!cast || d.now() - cast.lastChangedT >= 130 || d.now() - t0 >= maxMs) return;
+    if (!cast || d.now() - t0 >= maxMs) return;
+    // quiet = no decoded change recently AND no rate-capped frame still awaiting its deferred decode
+    if (d.now() - cast.lastChangedT >= 180 && !cast.pending) return;
   }
 }
 
