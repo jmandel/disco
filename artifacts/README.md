@@ -1,38 +1,39 @@
-# artifacts/ — where discovered knowledge lives
+# artifacts/ — the per-product packs
 
-Three kinds of knowledge come out of a discovery session, and they go to three different homes decided
-by one question: **is this true of the tool, true of this app, or true of the class of apps?**
-(BRIEF §5 names the fork: the friction log "feeds both code fixes and … the advice-and-quirks content
-of the eventual skill.") This directory is home #2 — **per-app knowledge**. The other two live elsewhere:
+This directory is **Layer 2** (see `PLATFORM.md`): one subdir per system we explore, `artifacts/<target>/`.
+A pack is **not a template** — it's a loose home that accretes whatever *ways of knowing* the product
+needs. Packs differ on purpose (`gauntlet/` is function/script-heavy; `openemr/` is understanding-heavy,
+partial). The other two homes for knowledge live elsewhere: truths about the **tool** → `src/` +
+`DECISIONS.md`; truths about the **class / the craft** → the methodology & usage docs (`GUIDANCE.md`,
+and the usage guides). One observation can split across all three (see the promotion path below).
 
-| home | what belongs here | where |
-|---|---|---|
-| **the framework** | truths about the *tool* — bugs, missing capabilities, tuning that helps *any* app | `src/`, `defaults.ts`, logged in `DECISIONS.md` |
-| **per-app site packs** | truths about *this app* — states, transitions, quirks, wire endpoints, reusable scripts | **here**, one subdir per target |
-| **the methodology** | truths about the *class / the craft* — priors and procedures for EHR-class SPAs | `GUIDANCE.md` §7–8, and the eventual skill |
+## Ways of knowing a pack can hold (take any subset)
 
-## What's here
+1. **Raw debug sessions** — the captured store(s) + blobs. *Empirical, retroactively re-queryable* — you can ask new questions of an old run. (Normally in `sessions/`; archive a run into the pack when it's worth keeping.)
+2. **Ledger / notes** — observed-vs-inferred, variability with n-counts, open questions + the probe that resolves each. *Interpreted, with confidence and honest unknowns.* (`nav-and-quirks.md` narrative + `ledger.md`.)
+3. **Navigation notes** — how to drive it, the rough edges, how to recover, and the **known anchor points** workflows start from. *Explanatory — for a human or agent to read in.*
+4. **A function library** — plain TypeScript: job-specific, robust functions that navigate to anchor states and perform specific steps (`login`, `openPatient(pid)`, `goToProblemList`, …). Composable, decomposed/refined over time. **The growing asset** — and the future basis for MCP/agent tools and for automated test loops that run over them. The engineering goes into *robustness*, not file format; they're just `.ts` files.
+5. **Evidence** — screenshots, reports, cited act ids / store cursors. *Provenance — every claim points back to what was observed.*
 
-- **`openemr/`** — the OpenEMR site pack (dogfood #1). A site pack is:
-  - `nav-and-quirks.md` — narrative map: states, transitions with settlement profiles, selector strategy, quirks, wire-available facts, honest coverage/gaps.
-  - `site.json` — the same, machine-readable: a **hint pack** a future session (or the framework) can preload to skip re-learning (heartbeat families, read-POST families, login recipe, states). Confirm, don't trust.
-  - `ledger.md` — the variability ledger: observed-vs-inferred with n-counts and the experiment that resolves each.
-  - `scripts/` — reusable, defensive subtask scripts (each tested against a live session at least once).
-  - `dogfood-1.md` + `screenshots/` — the session report and evidence.
-- **`gauntlet/`** — the site pack for the gauntlet-as-unknown-app (the Slice-8 dry-run handover). Same shape as any target: `nav-and-quirks.md`, `ledger.md`, `friction.md`, `scripts/`.
+Optional and un-fancy: a pack *may* keep a small machine-readable hints file (e.g. `openemr/site.json`
+lists the known ambient families / read-POST families / login recipe from dogfood #1), but that's a
+convenience, not a required shape — such knowledge is usually better expressed as functions (#4) + notes
+(#3), and will fold into them over time.
 
-Every target gets its own subdir `artifacts/<target>/`; there is no top-level per-target file.
+## The two current instances
+
+- **`gauntlet/`** — instance #1, the synthetic app (our known-answer control). `nav-and-quirks.md`, `ledger.md`, `friction.md`, `scripts/` (early functions, as standalone runnables — will lift toward composable importable functions).
+- **`openemr/`** — instance #2, OpenEMR 8.3.0 demo (dogfood #1, partial). `nav-and-quirks.md`, `ledger.md`, `site.json` (optional hints), `dogfood-1.md`, `screenshots/`. Function library: TODO (slice 2).
 
 ## The promotion path (raw → durable)
 
-Knowledge starts raw and gets distilled:
+1. **store** (`sessions/<name>/`) — empirical ground truth; nothing is "known" that isn't recorded here.
+2. **notes/ledger** (`disco note`) — interpretations, cited to act ids, with confidence.
+3. **in-session learned models** (ambient classifier, DOM-churn roots, visual ignore mask) — learned *during* the run, then thrown away. Their *conclusions* (e.g. "these 3 endpoints are the heartbeat") are durable product facts → promote them into the pack (as functions/notes) so the next session confirms instead of re-learning.
+4. **the pack** (this dir) — the distilled, portable product knowledge that survives the run.
+5. **framework + DECISIONS** — distilled *tool* competence, cross-product.
 
-1. **store** (`sessions/<name>/store.sqlite` + blobs) — empirical ground truth, append-only, retroactively queryable. Nothing is "known" that isn't recorded here.
-2. **notes/ledger** (`disco note`) — the agent's interpretations, cited to act ids, with confidence.
-3. **in-session learned models** (ambient classifier, DOM-churn roots, visual ignore mask) — learned *during* the session, then thrown away. Their *conclusions* (e.g. "these 3 endpoints are the heartbeat") are durable app facts and should be **promoted** into `site.json` so the next session preloads instead of re-learning.
-4. **site pack** (this dir) — the distilled, portable app knowledge that survives the session and hands off to automation or a future agent.
-5. **framework + DECISIONS** — distilled *tool* competence, cross-app.
-
-A single observation can split across homes: "OpenEMR renders reads via POST" became (a) the specific
-read-POST families → `openemr/site.json`, (b) the prior "EHRs POST for reads, do a mark-read recon pass"
-→ methodology, and (c) an open question about a better write-flag heuristic → `DECISIONS.md` (OPEN).
+A single observation splits by altitude: "OpenEMR renders reads via POST" became (a) the specific
+read-POST families → the OpenEMR pack, (b) the prior "EHRs POST for reads, do a mark-read recon pass" →
+the methodology (`GUIDANCE.md §8`), and (c) an open question about a better write-flag heuristic →
+`DECISIONS.md` (OPEN).
