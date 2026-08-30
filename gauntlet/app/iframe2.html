@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Nested depth-2 frame</title>
+<style>body{font-family:system-ui;margin:12px;background:#fff8ef}</style>
+<p>depth-2 island</p>
+<input id="deep-name" placeholder="deep name">
+<button id="deep-submit">Deep Submit</button>
+<div id="deep-result"></div>
+<script>
+document.getElementById("deep-submit").addEventListener("click", async () => {
+  const name = document.getElementById("deep-name").value;
+  const res = await fetch("/api/iframe-submit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, depth: 2 }) });
+  const j = await res.json();
+  document.getElementById("deep-result").textContent = "Deep submitted: " + (j.name ?? name);
+});
+</script>

@@ -82,6 +82,23 @@ Playwright's language, vendored (`role=button[name="Save"]`, `text=`, `css=`/bar
 `main`. Cross-origin iframes resolve in their own target; input is dispatched on the root page with
 translated coordinates.
 
+## Capture limits (recorded, never hidden)
+
+Streaming bodies (`streaming`), unread fire-and-forget bodies (`unread` — fetched when Chromium still
+has them buffered), evicted bodies (`evicted`), late-attached targets (`targets.late=1` — anything
+before `observed_from` is an unobserved prefix, including **WebSockets opened pre-attach**, which CDP
+cannot enumerate retroactively; reload the tab if you need their frames). Requests that begin within
+~1.5s after a window closes on the same root are tagged `attribution=trailing` — causally downstream
+(delayed validations) but not part of settlement.
+
+## Report & watch shapes (the fields scripts should rely on)
+
+`report.wire.attributed[i]` = `{ line, m, p, s, ms, body, id, family, a }` — use the structured
+fields (`m`ethod, `p`ath, `s`tatus, `ms`, `body` = 16-char blob prefix), not the display `line`.
+`report.settle = { ms, reportedMs, timeline, counts, pending? }`; `report.cursor = { from, to }`.
+`watch(pred, {budgetMs})` → `{ matched, elapsedMs, preview?, request?, diagnosis? }`; predicates:
+`{selector}` | `{urlLike}` (request started OR response landed) | `{fn}` (in-page, no args, truthy = match).
+
 ## Timing model (GUIDANCE §4.2 + DECISIONS #16)
 
 Settlement = quiescence race (network scoped to attributed-non-ambient requests / DOM minus ambient

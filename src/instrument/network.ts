@@ -74,16 +74,26 @@ function onRequest(d: Daemon, t: TargetState, p: RequestWillBeSent) {
   }
   d.reqAlias.set(p.requestId, id);
   const a = d.attrib.observeRequest({ id, method: p.request.method, url: p.request.url, tStart, targetId: t.targetId, initiatorType: p.initiator?.type, redirectFrom, postData: p.request.postData ?? null, resourceType: p.type });
+  // Trailing attribution (dry-run friction #3): a non-ambient request starting shortly after a window
+  // closed on this root — with no new window open — is causally downstream of that action (delayed
+  // validations, optimistic-save status checks). Tagged "trailing"; never fed to settlement.
+  let actionId = a.actionId; let attribution: string = a.attribution;
+  if (!actionId && attribution === "none" && !d.attrib.isAmbient(a.family)) {
+    const rootId = d.targets.get(t.targetId)?.rootTargetId ?? t.targetId;
+    const lc = d.lastClosed.get(rootId);
+    if (lc && tStart - lc.tClosed <= defaults.trailingAttributionMs && !d.windows.get(rootId)) { actionId = lc.actionId; attribution = "trailing"; }
+  }
   const initiator = p.initiator ? { type: p.initiator.type, url: p.initiator.url, line: p.initiator.lineNumber, stack: p.initiator.stack?.callFrames?.slice(0, 6).map((f) => `${f.functionName || "(anon)"}@${short(f.url, 80)}:${f.lineNumber}`) } : null;
   d.store.insert("requests", {
     id, target_id: t.targetId, frame_id: p.frameId ?? null, t_start: tStart, method: p.request.method, url: p.request.url, host: a.host, path: a.path, family: a.family,
     resource_type: p.type ?? null, initiator_type: p.initiator?.type ?? null, initiator: initiator ? JSON.stringify(initiator) : null,
     req_headers: JSON.stringify(p.request.headers ?? {}), req_body: p.request.postData ? p.request.postData.slice(0, 100_000) : null,
-    body_state: "pending", redirect_from: redirectFrom, action_id: a.actionId, attribution: a.attribution, write_kind: a.writeKind,
+    body_state: "pending", redirect_from: redirectFrom, action_id: actionId, attribution, write_kind: a.writeKind,
   });
-  const inf: InflightRequest = { id, targetId: t.targetId, frameId: p.frameId ?? null, url: p.request.url, family: a.family, tStart, actionId: a.actionId, attribution: a.attribution, resourceType: p.type, method: p.request.method, writeKind: a.writeKind };
+  const inf: InflightRequest = { id, targetId: t.targetId, frameId: p.frameId ?? null, url: p.request.url, family: a.family, tStart, actionId, attribution, resourceType: p.type, method: p.request.method, writeKind: a.writeKind };
   d.inflight.set(id, inf);
-  d.publish({ kind: "request", t: tStart, targetId: t.targetId, frameId: p.frameId, actionId: a.actionId, ref: id, summary: { m: p.request.method, u: short(p.request.url), f: a.family, a: a.attribution, rt: p.type, ...(a.writeKind !== "read" ? { w: a.writeKind } : {}) } });
+  d.capMap(d.reqAlias); d.capMap(d.redirectCount as Map<string, unknown>); d.capMap(d.wsUrls); // review F12
+  d.publish({ kind: "request", t: tStart, targetId: t.targetId, frameId: p.frameId, actionId, ref: id, summary: { m: p.request.method, u: short(p.request.url), f: a.family, a: attribution, rt: p.type, ...(a.writeKind !== "read" ? { w: a.writeKind } : {}) } });
 }
 
 function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
@@ -112,12 +122,20 @@ function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
  *  the eventual (possible) completion. */
 function armStallTimer(d: Daemon, t: TargetState, inf: InflightRequest) {
   if (inf.stallTimer) clearTimeout(inf.stallTimer);
-  inf.stallTimer = setTimeout(() => {
+  inf.stallTimer = setTimeout(async () => {
     if (!d.inflight.has(inf.id) || inf.stalled) return;
     inf.stalled = true;
     const at = d.now();
-    d.store.update("requests", { body_state: "unread" }, "id=? AND t_end IS NULL", [inf.id]);
+    // The body may already be buffered even though the page never read it — try before giving up
+    // (dry-run friction #5: a 401 body is premium discovery data).
+    try {
+      const res = await d.send<{ body: string; base64Encoded: boolean }>(t, "Network.getResponseBody", { requestId: inf.id.split(":")[0] });
+      const bytes = res.base64Encoded ? Buffer.from(res.body, "base64") : new TextEncoder().encode(res.body);
+      const stored = d.store.storeBody(new Uint8Array(bytes), inf.mime ?? null);
+      d.store.update("requests", { body_hash: stored.hash, resp_size: stored.size, body_state: "unread" }, "id=? AND t_end IS NULL", [inf.id]);
+    } catch { d.store.update("requests", { body_state: "unread" }, "id=? AND t_end IS NULL", [inf.id]); }
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: inf.id, summary: { s: inf.status, u: short(inf.url), a: inf.attribution, stalled: true, bs: "unread" } });
+    setTimeout(() => { d.inflight.delete(inf.id); }, 60_000); // review F4: do not haunt diagnoses forever
   }, defaults.unreadBodyGraceMs);
 }
 

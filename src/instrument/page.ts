@@ -183,15 +183,26 @@ async function onScreencastFrame(d: Daemon, t: TargetState, p: ScreencastFrame) 
   const bytes = new Uint8Array(Buffer.from(p.data, "base64"));
   const at = p.metadata?.timestamp ? d.store.fromEpochMs(p.metadata.timestamp * 1000) : d.now();
   const hash = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-  const c = t.cast ?? (t.cast = { lastHash: null, lastSig: null, lastChangedT: -1, lastPersistT: -1, lastDecodeT: -1, lastBytes: null, lastT: -1, ignore: new IgnoreMask(), boxes: [], frames: 0, decoded: 0, w: 0, h: 0, viewW: 0, viewH: 0 });
+  const c = t.cast ?? (t.cast = { lastHash: null, lastSig: null, lastChangedT: -1, lastPersistT: -1, lastDecodeT: -1, lastBytes: null, lastT: -1, ignore: new IgnoreMask(), boxes: [], frames: 0, decoded: 0, w: 0, h: 0, viewW: 0, viewH: 0, pending: null, decodeTimer: null });
   if (p.metadata?.deviceWidth) { c.viewW = p.metadata.deviceWidth; c.viewH = p.metadata.deviceHeight; }
   c.frames++;
   c.lastT = at; c.lastBytes = bytes;
-  if (hash === c.lastHash) return;
-  c.lastHash = hash;
+  if (hash === c.lastHash) { c.pending = null; return; }
   const now = d.now();
-  if (c.lastSig && now - c.lastDecodeT < defaults.visualDecodeMinGapMs) return; // rate-capped: skip; not counted as change
-  c.lastDecodeT = now;
+  if (c.lastSig && now - c.lastDecodeT < defaults.visualDecodeMinGapMs) {
+    // Rate-capped: defer, never drop — an unsurfaced delta would make "visually quiet" a lie
+    // (it bit absorbVisual: a scrolled viewport surfaced as a whole-screen change mid-window).
+    c.pending = { bytes, hash, at };
+    if (!c.decodeTimer) c.decodeTimer = setTimeout(() => { c.decodeTimer = null; const pd = c.pending; c.pending = null; if (pd && pd.hash !== c.lastHash) decodeCastFrame(d, t, c, pd.bytes, pd.hash, pd.at); }, defaults.visualDecodeMinGapMs);
+    return;
+  }
+  c.pending = null;
+  decodeCastFrame(d, t, c, bytes, hash, at);
+}
+
+function decodeCastFrame(d: Daemon, t: TargetState, c: NonNullable<TargetState["cast"]>, bytes: Uint8Array, hash: string, at: number) {
+  c.lastHash = hash;
+  c.lastDecodeT = d.now();
   let changedTiles = 0, boxes = c.boxes;
   try {
     const sig = tileSignature(bytes);

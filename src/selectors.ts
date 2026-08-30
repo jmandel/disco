@@ -125,7 +125,7 @@ export class Selectors {
 export function ariaDiff(pre: string, post: string, cap = 24): { added: string[]; removed: string[]; addedMore: number; removedMore: number } {
   const count = (s: string) => {
     const m = new Map<string, number>();
-    for (const raw of s.split("\n")) { const l = raw.trim(); if (l && l !== "-") m.set(l, (m.get(l) ?? 0) + 1); }
+    for (const raw of s.split("\n")) { let l = raw.trim(); if (!l || l === "-") continue; if (l.length > 160) l = l.slice(0, 157) + "…"; m.set(l, (m.get(l) ?? 0) + 1); } // 160-char cap (review F7)
     return m;
   };
   const a = count(pre), b = count(post);

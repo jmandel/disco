@@ -44,9 +44,13 @@ function isGraphQLMutation(url: string, postData: string | null | undefined): bo
 export class Attributor {
   families = new Map<string, FamilyState>();
   private byId = new Map<string, { family: string; attribution: Attribution; actionId: string | null }>();
-  constructor(private opts: { now: () => number; windowFor: (targetId: string, t: number) => WindowInfo | null; onFamily: (f: FamilyState) => void; startT?: number }) {}
+  constructor(private opts: { now: () => number; windowFor: (targetId: string, t: number) => WindowInfo | null; onFamily: (f: FamilyState) => void; startT?: number; idleObservedMs?: () => number }) {}
 
-  immature(): boolean { return this.opts.now() - (this.opts.startT ?? 0) < defaults.classifierWarmupMs; }
+  /** Immature until the session has OBSERVED enough idle time (BRIEF §1.13; review F8). */
+  immature(): boolean {
+    const idle = this.opts.idleObservedMs ? this.opts.idleObservedMs() : this.opts.now() - (this.opts.startT ?? 0);
+    return idle < defaults.classifierWarmupMs;
+  }
 
   markRead(family: string) { const f = this.families.get(family); if (f) { f.writeKind = "read"; this.opts.onFamily(f); } }
   markAmbient(family: string, ambient: boolean) { const f = this.families.get(family); if (f) { f.ambient = ambient; f.ambientReason = ambient ? "manual" : null; this.opts.onFamily(f); } }
@@ -68,9 +72,8 @@ export class Attributor {
       const m = r.method.toUpperCase();
       if (m === "GET" || m === "HEAD" || m === "OPTIONS") f.writeKind = "read";
       else { const gq = isGraphQLMutation(r.url, r.postData); f.writeKind = gq === null ? "write" : gq ? "write" : "read"; }
-    } else if (f.writeKind === "read" && /graphql/i.test(r.url) && isGraphQLMutation(r.url, r.postData) === true) {
-      // same endpoint carries both; a mutation on a read-marked graphql family still flags
     }
+    // Same endpoint can carry both: a mutation on a read-marked graphql family still flags per-request.
     const gqNow = isGraphQLMutation(r.url, r.postData);
     const writeKind: WriteKind = gqNow === true ? "write" : f.writeKind;
     this.classify(f);

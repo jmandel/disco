@@ -262,3 +262,9 @@ CREATE TABLE IF NOT EXISTS sse_events (
   data TEXT,
   action_id TEXT
 );
+
+-- Drill-down join indexes (review nits, 2026-08-30). New sessions only; existing stores unaffected.
+CREATE INDEX IF NOT EXISTS ws_frames_ws ON ws_frames(ws_id);
+CREATE INDEX IF NOT EXISTS sse_events_req ON sse_events(request_id);
+CREATE INDEX IF NOT EXISTS mutations_action ON mutations(action_id);
+CREATE INDEX IF NOT EXISTS console_action ON console(action_id);

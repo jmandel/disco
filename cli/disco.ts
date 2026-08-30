@@ -77,7 +77,21 @@ switch (cmd) {
       } else if (has("attach")) {
         daemonArgs.push("--attach", String(f("attach")));
         if (f("host")) daemonArgs.push("--host", f("host")!);
-        if (!f("scope")) console.error("warning: attach mode without --scope instruments EVERY tab in that browser (GUIDANCE §3.2). Pass --scope <url-part>.");
+        if (has("pick") && !f("pick")) { // list tabs and exit (review F2 / BRIEF §1.15)
+          const pages = (await (await fetch(`http://${f("host") ?? "127.0.0.1"}:${f("attach")}/json/list`)).json() as any[]).filter((x) => x.type === "page");
+          for (const [i2, t] of pages.entries()) console.log(`${i2 + 1}. ${t.title?.slice(0, 40) ?? ""}  ${t.url}`);
+          die("re-run with --pick <n> (or --scope <url-part>)");
+        }
+        if (f("pick")) {
+          const pages = (await (await fetch(`http://${f("host") ?? "127.0.0.1"}:${f("attach")}/json/list`)).json() as any[]).filter((x) => x.type === "page");
+          const t = pages[Number(f("pick")) - 1] ?? pages.find((x) => x.id.startsWith(f("pick")!) || x.url.includes(f("pick")!));
+          if (!t) die(`--pick ${f("pick")}: no such tab`);
+          daemonArgs.push("--scope-target", t.id);
+          console.error(`picked tab: ${t.url}`);
+        } else if (!f("scope") && !has("all-targets")) {
+          die("attach mode requires --scope <url-part> or --pick (or explicit --all-targets to record EVERY tab — GUIDANCE §3.2)");
+        }
+        if (has("all-targets")) daemonArgs.push("--all-targets");
       } else die("session new needs --attach <port> or --launch");
       if (f("scope")) daemonArgs.push("--scope", f("scope")!);
       if (f("dialogs")) daemonArgs.push("--dialogs", f("dialogs")!);
@@ -195,8 +209,9 @@ switch (cmd) {
   }
 
   case "blob": {
-    const hash = pos[1] ?? die("blob <hash>");
-    const p = blobPath(sessionDir(), hash);
+    const hash = pos[1] ?? die("blob <hash-or-prefix>");
+    const st = openStore(sessionDir());
+    let p: string; try { p = st.blobPath(hash); } finally { st.close(); }
     if (!existsSync(p)) die(`no blob ${hash}`);
     if (f("out")) { copyFileSync(p, f("out")!); console.error(`wrote ${f("out")}`); }
     else process.stdout.write(readFileSync(p));

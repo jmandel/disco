@@ -64,8 +64,8 @@ export class Settler {
   feed(s: SettleSignal) {
     if (this.done) return;
     switch (s.kind) {
-      case "request-start": this.inflight.add(s.id); this.lastNet = s.t; this.counts.requests++; this.mark(s.t, `req+ ${s.id}`); break;
-      case "request-end": if (this.inflight.delete(s.id)) { this.lastNet = s.t; this.mark(s.t, `req- ${s.id}`); } break;
+      case "request-start": this.inflight.add(s.id); this.lastNet = s.t; this.counts.requests++; if (this.counts.requests <= 3) this.mark(s.t, `req+ ${s.id}`); break;
+      case "request-end": if (this.inflight.delete(s.id)) { this.lastNet = s.t; if (this.inflight.size === 0) this.mark(s.t, "net idle"); } break;
       case "mutation": this.lastDom = s.t; this.counts.mutations++; if (this.counts.mutations <= 3 || this.counts.mutations % 25 === 0) this.mark(s.t, "dom"); break;
       case "visual": this.lastVis = s.t; this.counts.visuals++; if (this.counts.visuals <= 3 || this.counts.visuals % 25 === 0) this.mark(s.t, "pixels"); break;
       case "navigated": this.navigatedUrl = s.url ?? this.navigatedUrl ?? ""; this.lastDom = s.t; this.mark(s.t, `navigated ${s.url ?? ""}`); break;
@@ -78,7 +78,7 @@ export class Settler {
 
   cancel() { if (this.timer) this.clock.clearTimeout(this.timer); this.done = true; }
 
-  private mark(t: number, what: string) { if (this.timeline.length < 60) this.timeline.push({ t: Math.round(t * 10) / 10, what }); }
+  private mark(t: number, what: string) { if (this.timeline.length < 14) this.timeline.push({ t: Math.round(t * 10) / 10, what }); }
   private lastActivity(): number { return Math.max(this.lastNet, this.lastDom, this.lastVis); }
   private anyActivity(): boolean { return this.counts.requests + this.counts.mutations + this.counts.visuals > 0 || this.navigatedUrl !== null; }
 

@@ -6,23 +6,40 @@ import type { Daemon, FrameInfo, TargetState } from "./daemon.ts";
 export interface Point { x: number; y: number }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Translate a point from a frame's own viewport space to the root page target's viewport space. */
+/** Translate a point from a frame viewport to the root page target viewport.
+ *  DOM.getBoxModel returns coordinates in the TARGET MAIN-FRAME space (it already folds in any
+ *  same-process ancestor iframes), so we add exactly one owner box per hop to the target main
+ *  frame, then one per TARGET boundary (OOPIF) — never one per frame (review F1: per-frame addition
+ *  double-counts at nesting depth >= 2 and clicks the wrong element in deeply nested EHRs). */
 export async function pointToRoot(d: Daemon, frame: FrameInfo, p: Point): Promise<{ point: Point; root: TargetState }> {
-  let f = frame; let x = p.x, y = p.y;
-  for (let hops = 0; f.parentFrameId && hops < 20; hops++) {
-    const parent = d.frames.get(f.parentFrameId);
-    if (!parent) break;
-    const parentTarget = d.targets.get(parent.targetId);
-    if (!parentTarget) break;
+  let x = p.x, y = p.y;
+  let f: FrameInfo | undefined = frame;
+  for (let hops = 0; f && hops < 20; hops++) {
+    const t = d.targets.get(f.targetId);
+    if (!t) break;
+    if (f.frameId !== t.mainFrameId) {
+      // Same-target nested frame: one owner box brings us to this target main-frame space.
+      try {
+        const { backendNodeId } = await d.send<{ backendNodeId: number }>(t, "DOM.getFrameOwner", { frameId: f.frameId });
+        await d.send(t, "DOM.getDocument", { depth: 0 }).catch(() => {});
+        const bm = await d.send<{ model: { content: number[] } }>(t, "DOM.getBoxModel", { backendNodeId });
+        x += bm.model.content[0]; y += bm.model.content[1];
+      } catch { break; }
+      f = t.mainFrameId ? d.frames.get(t.mainFrameId) : undefined;
+      continue;
+    }
+    if (!t.parentTargetId) break;
+    const pt = d.targets.get(t.parentTargetId);
+    if (!pt) break;
     try {
-      const { backendNodeId } = await d.send<{ backendNodeId: number }>(parentTarget, "DOM.getFrameOwner", { frameId: f.frameId });
-      await d.send(parentTarget, "DOM.getDocument", { depth: 0 }).catch(() => {}); // ensure DOM agent is up
-      const bm = await d.send<{ model: { content: number[] } }>(parentTarget, "DOM.getBoxModel", { backendNodeId });
+      const { backendNodeId } = await d.send<{ backendNodeId: number }>(pt, "DOM.getFrameOwner", { frameId: f.frameId });
+      await d.send(pt, "DOM.getDocument", { depth: 0 }).catch(() => {});
+      const bm = await d.send<{ model: { content: number[] } }>(pt, "DOM.getBoxModel", { backendNodeId });
       x += bm.model.content[0]; y += bm.model.content[1];
     } catch { break; }
-    f = parent;
+    f = pt.mainFrameId ? d.frames.get(pt.mainFrameId) : undefined;
   }
-  const owner = d.targets.get(f.targetId);
+  const owner = d.targets.get(f?.targetId ?? frame.targetId);
   const root = owner ? d.targets.get(owner.rootTargetId) ?? owner : d.primary();
   return { point: { x, y }, root };
 }

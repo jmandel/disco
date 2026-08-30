@@ -38,13 +38,15 @@ export function registerActions(d: Daemon): Selectors {
  *  focus ring) is expected affordance feedback, not an effect. Visual changes confined to the target box
  *  are dropped from the feed; big targets (canvases, panels) keep their in-element pixel signal. */
 function feedFromEvent(d: Daemon, rootId: string, actionId: string, s: Settler, selfBox?: { x: number; y: number; w: number; h: number } | null) {
-  const pad = defaults.selfFeedbackInflatePx;
   const selfContained = (ev: any): boolean => {
     if (!selfBox) return false;
     const boxes = ev.summary?.boxes as Array<{ x: number; y: number; w: number; h: number }> | undefined;
     if (!boxes?.length) return false;
     const cast = d.targets.get(rootId)?.cast;
     const scale = cast && cast.viewW > 0 && cast.w > 0 ? cast.w / cast.viewW : 1;
+    // Changed regions are TILE-aligned (32px grid in cast pixels), so the tolerance must cover a full
+    // tile in CSS pixels on every edge, or a button hugging a tile boundary escapes its own box.
+    const pad = defaults.selfFeedbackInflatePx + defaults.visualTilePx / scale;
     return boxes.every((b) => b.x / scale >= selfBox.x - pad && b.y / scale >= selfBox.y - pad && (b.x + b.w) / scale <= selfBox.x + selfBox.w + pad && (b.y + b.h) / scale <= selfBox.y + selfBox.h + pad);
   };
   return d.listen((ev) => {
@@ -123,12 +125,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   if (didScroll) await absorbVisual(d, root, 450);
   const pre = await snapshot(d, sel, frame, root, "pre");
   try { await d.callInFrame(frame, "function(t){ return window.__discoApi ? window.__discoApi.armTask(t) : 0; }", [TASK_EVENT[p.kind] ?? "click"]); } catch {}
-
-  // ---- causality window opens at dispatch (GUIDANCE §4.1) ----
   const t0 = d.now();
-  d.openWindow(root.rootTargetId, actionId, t0);
-  d.store.insert("actions", { id: actionId, n, t_start: t0, target_id: root.targetId, frame_id: frame.frameId, kind: p.kind, spec: JSON.stringify(spec), resolved: resolved ? JSON.stringify({ selector: p.target, preview: resolved.preview, generated: resolved.generated, count: resolved.count }) : null, pre_shot: pre.shot ?? null, pre_aria: pre.aria ?? null });
-  d.publish({ kind: "action", t: t0, targetId: root.targetId, actionId, summary: { kind: p.kind, target: p.target ?? p.url ?? p.key, state: "dispatch" } });
 
   let selfBox: { x: number; y: number; w: number; h: number } | null = null;
   if (resolved?.box && POINTER[p.kind] && resolved.box.w * resolved.box.h <= defaults.selfFeedbackMaxArea && point) {
@@ -137,7 +134,13 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
     selfBox = { x: resolved.box.x + dx, y: resolved.box.y + dy, w: resolved.box.w, h: resolved.box.h };
   }
   const settler = new Settler({ t0, quietMs: p.quietMs, noEffectMs: p.noEffectMs, budgetMs: p.budgetMs, maxBudgetMs: p.maxBudgetMs }, sessionClock(d));
-  const unsub = feedFromEvent(d, root.rootTargetId, actionId, settler, selfBox);
+  const unsub = feedFromEvent(d, root.rootTargetId, actionId, settler, selfBox); // subscribed BEFORE the window opens (review F10)
+
+  // ---- causality window opens at dispatch (GUIDANCE §4.1) ----
+  
+  d.openWindow(root.rootTargetId, actionId, t0);
+  d.store.insert("actions", { id: actionId, n, t_start: t0, target_id: root.targetId, frame_id: frame.frameId, kind: p.kind, spec: JSON.stringify(spec), resolved: resolved ? JSON.stringify({ selector: p.target, preview: resolved.preview, generated: resolved.generated, count: resolved.count }) : null, pre_shot: pre.shot ?? null, pre_aria: pre.aria ?? null });
+  d.publish({ kind: "action", t: t0, targetId: root.targetId, actionId, summary: { kind: p.kind, target: p.target ?? p.url ?? p.key, state: "dispatch" } });
 
   // ---- dispatch ----
   try {
@@ -165,7 +168,11 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
       const { point: rp, root: rt } = await pointToRoot(d, frame, at);
       await wheelAt(d, rt, rp, p.deltaY ?? 400);
     } else if (p.kind === "select") {
-      await d.callInFrame(frame, `function(sel, value){ const el = document.querySelector(sel) || null; const target = el; if (!target) throw new Error("select: element not found in main world; use a css selector"); target.value = value; target.dispatchEvent(new Event("input", {bubbles:true})); target.dispatchEvent(new Event("change", {bubbles:true})); return target.value; }`, [cssOf(p.target!), p.value ?? ""], "main");
+      // Use the already-resolved element handle so role=/text=/shadow selectors work (review F14);
+      // events dispatched from the isolated world cross into the page (shared DOM).
+      const t = d.targetOfFrame(frame);
+      const res = await d.send<{ result: any; exceptionDetails?: any }>(t, "Runtime.callFunctionOn", { objectId: resolved!.objectId, functionDeclaration: `function(value){ this.value = value; this.dispatchEvent(new Event("input", {bubbles:true})); this.dispatchEvent(new Event("change", {bubbles:true})); return this.value; }`, arguments: [{ value: p.value ?? "" }], returnByValue: true });
+      if (res.exceptionDetails) throw new RpcError(-32010, `select failed: ${res.exceptionDetails.exception?.description ?? res.exceptionDetails.text}`);
     } else if (p.kind === "navigate") {
       await d.send(root, "Page.navigate", { url: p.url! });
     }
@@ -178,6 +185,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   unsub();
   const stillActive = result.verdict === "still-active";
   if (!stillActive) d.closeWindow(root.rootTargetId); // still-active keeps the window open for awaitSettlement (GUIDANCE §5.1)
+  else backgroundSettle(d, root.rootTargetId, actionId, t0); // review F3: eventually close it even if the agent never asks
 
   const postFrame = d.frames.get(frame.frameId) ?? frame; // frame may have navigated
   const post = await snapshot(d, sel, postFrame, root, "post");
@@ -197,6 +205,29 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   return report;
 }
 
+/** After still-active, keep watching in the background: close the window (and fix the action row) at
+ *  eventual quiescence, so hours of later traffic are not misattributed (review F3). awaitSettlement
+ *  and any new act() on the same root take over by closing/replacing the window. */
+function backgroundSettle(d: Daemon, rootId: string, actionId: string, originalT0: number) {
+  const bg = new Settler({ t0: d.now(), budgetMs: defaults.budgetMs, maxBudgetMs: defaults.maxBudgetMs }, sessionClock(d));
+  bg.seed([...d.inflight.values()].filter((x) => x.actionId === actionId && x.attribution !== "ambient" && !x.stalled).map((x) => x.id));
+  const unsub = d.listen((ev) => {
+    if (d.windows.get(rootId)?.actionId !== actionId) { unsub(); bg.cancel(); return; } // superseded
+    const tin = ev.targetId ? d.targets.get(ev.targetId)?.rootTargetId === rootId || ev.targetId === rootId : false;
+    if (ev.kind === "request" && ev.actionId === actionId && (ev.summary as any)?.a !== "ambient") bg.feed({ kind: "request-start", t: ev.t, id: String(ev.ref) });
+    else if (ev.kind === "response" && ev.actionId === actionId) bg.feed({ kind: "request-end", t: ev.t, id: String(ev.ref) });
+    else if (ev.kind === "mutation" && tin && !(ev.summary as any)?.amb) bg.feed({ kind: "mutation", t: ev.t });
+    else if (ev.kind === "visual" && tin) bg.feed({ kind: "visual", t: ev.t });
+  });
+  void bg.result.then((res) => {
+    unsub();
+    if (d.windows.get(rootId)?.actionId !== actionId) return;
+    d.closeWindow(rootId);
+    d.store.update("actions", { t_settled: res.tSettled, settle_ms: res.tSettled - originalT0, verdict: res.verdict === "still-active" ? "still-active" : "settled:late" }, "id=? AND verdict='still-active'", [actionId]);
+    d.publish({ kind: "settle", t: res.tReported, targetId: rootId, actionId, summary: { verdict: res.verdict, background: true, ms: Math.round(res.tSettled - originalT0) } });
+  });
+}
+
 async function absorbVisual(d: Daemon, root: TargetState, maxMs: number): Promise<void> {
   const t0 = d.now();
   for (;;) {
@@ -208,7 +239,7 @@ async function absorbVisual(d: Daemon, root: TargetState, maxMs: number): Promis
 
 function failReport(d: Daemon, i: { actionId: string; n: number; kind: string; spec: unknown; frame: FrameInfo; root: TargetState; seqStart: number; resolvedInfo?: Resolved; diagnosis: Report["diagnosis"] }): Report {
   const t0 = d.now();
-  d.closeWindow(i.root.rootTargetId);
+  if (d.windows.get(i.root.rootTargetId)?.actionId === i.actionId) d.closeWindow(i.root.rootTargetId); // review F6: never destroy another action's open window
   const report = buildReport(d, { actionId: i.actionId, kind: i.kind, spec: i.spec as any, frame: i.frame, root: i.root, verdict: "diagnosis", t0, tEnd: t0, seqStart: i.seqStart, diagnosis: i.diagnosis });
   d.store.upsert("actions", { id: i.actionId, n: i.n, t_start: t0, target_id: i.root.targetId, frame_id: i.frame.frameId, kind: i.kind, spec: JSON.stringify(i.spec), verdict: "diagnosis", report: JSON.stringify(report), seq_start: i.seqStart, seq_end: report.cursor.to });
   d.publish({ kind: "action", t: t0, targetId: i.root.targetId, actionId: i.actionId, summary: { kind: i.kind, state: "diagnosis", reason: i.diagnosis?.reason } });
@@ -220,12 +251,13 @@ export async function awaitSettlement(d: Daemon, sel: Selectors, p: { action?: s
   const frame = d.resolveFrame(p.frame, p.targetId);
   const root = d.targets.get(d.targetOfFrame(frame).rootTargetId) ?? d.primary();
   const open = d.windows.get(root.rootTargetId);
-  let actionId: string; let t0: number; let seed: string[] = []; let n: number; let seqStart: number; let kind = "settle";
+  let actionId: string; let t0: number; let seed: string[] = []; let n: number; let seqStart: number; let kind = "settle"; let originalT0: number | null = null;
   if (open && (!p.action || open.actionId === p.action)) {
     actionId = open.actionId; t0 = d.now();
     seed = [...d.inflight.values()].filter((x) => x.actionId === actionId && x.attribution !== "ambient" && !x.stalled).map((x) => x.id);
-    const row = d.store.get<any>("SELECT n, kind, seq_start FROM actions WHERE id=?", actionId);
+    const row = d.store.get<any>("SELECT n, kind, seq_start, t_start FROM actions WHERE id=?", actionId);
     n = row?.n ?? d.store.nextActionN(); seqStart = row?.seq_start ?? d.store.lastSeq() + 1; kind = row?.kind ?? "settle";
+    originalT0 = row?.t_start ?? null; // review F11: settlement profile stays relative to the ORIGINAL dispatch
   } else {
     n = d.store.nextActionN(); actionId = `act:${n}`; t0 = d.now(); seqStart = d.store.lastSeq() + 1;
     d.openWindow(root.rootTargetId, actionId, t0);
@@ -239,7 +271,8 @@ export async function awaitSettlement(d: Daemon, sel: Selectors, p: { action?: s
   if (result.verdict !== "still-active") d.closeWindow(root.rootTargetId);
   const post = await snapshot(d, sel, frame, root, "post");
   const report = buildReport(d, { actionId, kind, spec: p as any, frame, root, verdict: result.verdict, settle: result, t0, tEnd: result.tReported, post: { shot: post.shot, aria: post.aria, url: post.url, focused: post.focused }, seqStart });
-  d.store.update("actions", { t_settled: result.tSettled, verdict: result.verdict, settle_ms: result.tSettled - t0, timeline: JSON.stringify(result.timeline), post_shot: post.shot ?? null, post_aria: post.aria ?? null, report: JSON.stringify(report), seq_end: report.cursor.to }, "id=?", [actionId]);
+  if (originalT0 !== null) (report as any).extended = true;
+  d.store.update("actions", { t_settled: result.tSettled, verdict: result.verdict, settle_ms: result.tSettled - (originalT0 ?? t0), timeline: JSON.stringify(result.timeline), post_shot: post.shot ?? null, post_aria: post.aria ?? null, report: JSON.stringify(report), seq_end: report.cursor.to }, "id=?", [actionId]);
   d.publish({ kind: "settle", t: result.tReported, targetId: root.targetId, actionId, summary: { verdict: result.verdict, ms: Math.round(result.tSettled - t0) } });
   return report;
 }
@@ -254,7 +287,7 @@ export async function watch(d: Daemon, sel: Selectors, p: { selector?: string; f
 
   const check = async (): Promise<{ ok: boolean; preview?: string; request?: string }> => {
     if (p.urlLike) {
-      const r = d.store.get<any>("SELECT id, url FROM requests WHERE url LIKE ? AND t_start>=? ORDER BY t_start DESC LIMIT 1", `%${p.urlLike}%`, t0 - 50);
+      const r = d.store.get<any>("SELECT id, url FROM requests WHERE url LIKE ? AND (t_start>=? OR t_end>=?) ORDER BY t_start DESC LIMIT 1", `%${p.urlLike}%`, t0 - 50, t0 - 50);
       if (r) return { ok: true, request: r.id };
     }
     if (p.selector) {
@@ -291,4 +324,3 @@ export async function watch(d: Daemon, sel: Selectors, p: { selector?: string; f
   });
 }
 
-function cssOf(selector: string): string { return selector.replace(/^css=/, ""); }

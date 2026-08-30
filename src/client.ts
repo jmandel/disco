@@ -11,7 +11,7 @@ import type { ActParams } from "./act.ts";
 export type PageFn = ((...args: any[]) => unknown) | string;
 const src = (f: PageFn): string => (typeof f === "string" ? f : f.toString());
 
-export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco" }
+export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco"; expect?: (report: Report) => boolean }
 
 export function resolveSessionDir(nameOrDir?: string): string {
   const sessionsDir = resolve(process.env.DISCO_SESSIONS_DIR ?? join(process.cwd(), "sessions"));
@@ -42,10 +42,22 @@ export class Session {
   /** Direct read-only store access, in-process (GUIDANCE §6.2). Works even after the daemon stops. */
   get store(): StoreReader { return (this._store ??= openStore(this.dir)); }
 
-  act(p: Omit<ActParams, "evaluateAfter"> & { evaluateAfter?: PageFn }): Promise<Report> {
-    const q: any = { ...p };
+  /** `expect` (GUIDANCE §4.1) runs CLIENT-side over the returned report (no daemon-side functions,
+   *  BRIEF §1.4): a false expectation does not change waiting — it marks the report surprising and
+   *  drops a ledger note, feeding the variability ledger (§7.5). */
+  async act(p: Omit<ActParams, "evaluateAfter"> & { evaluateAfter?: PageFn; expect?: (report: Report) => boolean }): Promise<Report & { surprise?: boolean }> {
+    const { expect: expectation, ...rest } = p;
+    const q: any = { ...rest };
     if (q.evaluateAfter) q.evaluateAfter = src(q.evaluateAfter);
-    return this.rpc.call("act", q, (p.maxBudgetMs ?? 30000) + 30000);
+    const report: Report & { surprise?: boolean } = await this.rpc.call("act", q, (p.maxBudgetMs ?? 30000) + 30000);
+    if (expectation) {
+      let ok = false; try { ok = !!expectation(report); } catch { ok = false; }
+      if (!ok) {
+        report.surprise = true;
+        await this.note(`surprise: expectation failed for ${report.action} (${report.kind} ${(p as any).target ?? ""} → ${report.verdict})`, { kind: "ledger", action: report.action }).catch(() => {});
+      }
+    }
+    return report;
   }
   click(target: string, o: ActOptions = {}) { return this.act({ kind: "click", target, ...o }); }
   rightclick(target: string, o: ActOptions = {}) { return this.act({ kind: "rightclick", target, ...o }); }

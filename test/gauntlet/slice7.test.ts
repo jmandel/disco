@@ -45,6 +45,15 @@ describe("slice 7: selector engine everywhere", () => {
     expect(String(res.value)).toContain("inner");
   }, 15000);
 
+  test("depth-2 nested iframe: coordinates translate once per hop-to-main, not per frame (review F1)", async () => {
+    await A({ kind: "type", target: "#deep-name", frame: "iframe2.html", text: "deep" });
+    const r = await A({ kind: "click", target: "role=button[name=\"Deep Submit\"]", frame: "iframe2.html" });
+    expect(r.verdict).toBe("settled:network");
+    expect(r.wire!.attributed.some((w: any) => w.family.includes("iframe-submit"))).toBe(true);
+    const res = await env.daemon.callInFrame(env.daemon.resolveFrame("iframe2.html"), "function(){ return document.getElementById('deep-result').textContent; }");
+    expect(String(res.value)).toContain("deep");
+  }, 15000);
+
   test("cross-origin iframe: role= resolves in the OOPIF", async () => {
     const r = await A({ kind: "click", target: 'role=button[name="Submit"]', frame: "xframe.html" });
     expect(["settled:network", "settled:dom"]).toContain(r.verdict);

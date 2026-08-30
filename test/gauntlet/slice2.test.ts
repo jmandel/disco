@@ -11,7 +11,7 @@ const A = (p: any) => act(env.daemon, sel, p);
 
 beforeAll(async () => {
   env = await startEnv();
-  sel = (env.daemon as any).extraSel ?? registerActions(env.daemon); // daemon already registered; make a bridge for direct calls
+  sel = registerActions(env.daemon); // re-registering overwrites the RPC entries with our Selectors instance
   tab = await env.open("/");
   await sleep(3000); // idle observation (GUIDANCE §7.2): lets the ambient classifiers (network families,
   // DOM churn roots, visual ignore mask) learn the page baseline before any window opens.
@@ -94,8 +94,7 @@ describe("slice 2: act + settlement", () => {
     await sleep(300); // arrange: let trailing scroll mutations flush outside the click window
     const r = await A({ kind: "click", target: "#grid" });
     if (r.verdict !== "settled:visual") console.error("canvas report:", JSON.stringify({ verdict: r.verdict, settle: r.settle, ui: r.ui, wire: r.wire }, null, 1));
-    expect(["settled:visual", "no-effect"]).toContain(r.verdict); // must not hang; pixels are the only signal
-    expect(r.verdict).toBe("settled:visual");
+    expect(r.verdict).toBe("settled:visual"); // pixels are the only signal; must not hang
     expect(r.wire!.attributed.length).toBe(0);
     const sel2 = await env.evalIn(tab, "window.__gridSelected ? JSON.stringify(window.__gridSelected) : null");
     expect(sel2).toBeTruthy();

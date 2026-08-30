@@ -17,7 +17,7 @@ import { registerActions } from "./act.ts";
 import { AmbientDom } from "./ambient-dom.ts";
 
 export interface FrameInfo { frameId: string; targetId: string; parentFrameId: string | null; url: string; name?: string; contexts: Map<string, number>; observerReady: boolean }
-export interface CastState { lastHash: string | null; lastSig: TileSig | null; lastChangedT: number; lastPersistT: number; lastDecodeT: number; lastBytes: Uint8Array | null; lastT: number; ignore: IgnoreMask; boxes: Box[]; frames: number; decoded: number; w: number; h: number; viewW: number; viewH: number }
+export interface CastState { lastHash: string | null; lastSig: TileSig | null; lastChangedT: number; lastPersistT: number; lastDecodeT: number; lastBytes: Uint8Array | null; lastT: number; ignore: IgnoreMask; boxes: Box[]; frames: number; decoded: number; w: number; h: number; viewW: number; viewH: number; pending: { bytes: Uint8Array; hash: string; at: number } | null; decodeTimer: ReturnType<typeof setTimeout> | null }
 export interface TargetState {
   targetId: string; sessionId: string; type: string; url: string; title: string;
   parentTargetId: string | null; openerId: string | null; rootTargetId: string;
@@ -28,7 +28,7 @@ export interface TargetState {
 export interface DaemonEvent { kind: string; t: number; targetId?: string; frameId?: string; actionId?: string | null; ref?: string | number | null; summary?: unknown; seq?: number }
 export interface ActionWindow extends WindowInfo { taskSpans: Array<{ t0: number; t2: number }>; rootTargetId: string }
 export interface DaemonOptions {
-  dir: string; name: string; mode: "attach" | "launch"; port?: number; host?: string; wsUrl?: string; scope?: string;
+  dir: string; name: string; mode: "attach" | "launch"; port?: number; host?: string; wsUrl?: string; scope?: string; scopeTarget?: string; allTargets?: boolean;
   dialogPolicy?: "accept" | "dismiss"; contract?: unknown; launched?: SessionManifest["launched"]; log?: (line: string) => void;
 }
 
@@ -44,6 +44,7 @@ export class Daemon {
   redirectCount = new Map<string, number>();
   wsUrls = new Map<string, string>();
   windows = new Map<string, ActionWindow>(); // rootTargetId → open causality window
+  lastClosed = new Map<string, { actionId: string; tClosed: number }>(); // for trailing attribution (friction #3)
   attrib!: Attributor;
   ambientDom = new AmbientDom();
   primaryTargetId: string | null = null;
@@ -54,6 +55,9 @@ export class Daemon {
   private logPath!: string;
   private scopeRe: RegExp | null = null;
   private scopeSub: string | null = null;
+  scopeTargetId: string | null = null;
+  private idleAccumMs = 0;
+  private idleTimer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
   private extraRpc = new Map<string, (params: any, conn: RpcConn) => Promise<unknown> | unknown>();
   private observerSrc = observerSource(defaults.observerBatchMs);
@@ -73,6 +77,9 @@ export class Daemon {
     d.manifest = { name: prior?.name ?? opts.name, dir: opts.dir, anchorEpochMs: anchor, startedWall: prior?.startedWall ?? new Date(anchor).toISOString(), mode: prior?.mode ?? opts.mode, scope: opts.scope ?? prior?.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? prior?.dialogPolicy ?? "accept", contract: opts.contract ?? prior?.contract, pid: process.pid, launched: opts.launched ?? prior?.launched };
     if (prior) delete d.manifest.endedWall;
     if (opts.scope) { const m = opts.scope.match(/^\/(.+)\/([a-z]*)$/); if (m) d.scopeRe = new RegExp(m[1], m[2]); else d.scopeSub = opts.scope; }
+    d.scopeTargetId = opts.scopeTarget ?? null;
+    // GUIDANCE §3.2: recording an unscoped desktop browser is never the default (review F2).
+    if ((opts.mode ?? "attach") === "attach" && !(prior?.scope) && !opts.scope && !opts.scopeTarget && !opts.allTargets && !opts.launched) throw new Error("attach mode requires --scope <url-part> or --pick <target> (or explicit --all-targets)");
     let wsUrl = opts.wsUrl;
     if (!wsUrl) {
       if (opts.port === undefined) throw new Error("attach mode needs --attach <port> (or wsUrl)");
@@ -81,7 +88,7 @@ export class Daemon {
     }
     d.writeManifest();
     d.store = new Store(opts.dir, d.manifest);
-    d.attrib = new Attributor({ now: () => d.now(), windowFor: (tid, t) => d.windowFor(tid, t), onFamily: (f) => d.persistFamily(f), startT: 0 });
+    d.attrib = new Attributor({ now: () => d.now(), windowFor: (tid, t) => d.windowFor(tid, t), onFamily: (f) => d.persistFamily(f), startT: 0, idleObservedMs: () => d.idleObservedMs() });
     d.cdp = await Cdp.connect(wsUrl);
     d.connected = true;
     d.cdp.on((e) => d.route(e));
@@ -93,6 +100,7 @@ export class Daemon {
     await d.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
     await d.cdp.send("Browser.setDownloadBehavior", { behavior: "default", eventsEnabled: true }).catch(() => {});
     registerActions(d);
+    d.idleTimer = setInterval(() => { if (d.windows.size === 0) d.idleAccumMs += 500; }, 500);
     d.log(`daemon started: session=${opts.name} mode=${opts.mode} scope=${opts.scope ?? "(all)"} ws=${wsUrl}`);
     d.publish({ kind: "session", t: d.now(), summary: { state: d.resumed ? "resumed" : "started", name: d.manifest.name, mode: d.manifest.mode, scope: d.manifest.scope ?? null } });
     return d;
@@ -104,7 +112,13 @@ export class Daemon {
   now(): number { return this.store.now(); }
   /** CDP MonotonicTime (seconds) → session clock, via the offset learned from (timestamp, wallTime) pairs. */
   monoToT(ts: number): number { return this.monoOffsetMs === null ? this.now() : this.store.fromEpochMs(ts * 1000 + this.monoOffsetMs); }
-  learnClock(ts: number, wall: number) { if (ts && wall) this.monoOffsetMs = wall * 1000 - ts * 1000; }
+  learnClock(ts: number, wall: number) {
+    if (!ts || !wall) return;
+    const next = wall * 1000 - ts * 1000;
+    // Learn once; re-learn only on a large step (suspend/resume, NTP jump) so per-request wall jitter
+    // cannot slide network timestamps relative to the other channels (review F13).
+    if (this.monoOffsetMs === null || Math.abs(next - this.monoOffsetMs) > 1500) this.monoOffsetMs = next;
+  }
   send<T = any>(t: TargetState | null, method: string, params: object = {}): Promise<T> { return this.cdp.send<T>(method, params, t?.sessionId); }
 
   // ---------------- events ----------------
@@ -132,7 +146,11 @@ export class Daemon {
     const w: ActionWindow = { actionId, tStart, targetId: rootTargetId, rootTargetId, taskSpans: [] };
     this.windows.set(rootTargetId, w); return w;
   }
-  closeWindow(rootTargetId: string) { this.windows.delete(rootTargetId); }
+  closeWindow(rootTargetId: string) {
+    const w = this.windows.get(rootTargetId);
+    if (w) this.lastClosed.set(rootTargetId, { actionId: w.actionId, tClosed: this.now() });
+    this.windows.delete(rootTargetId);
+  }
   onTaskMarker(t: TargetState, msg: ObserverTaskMsg) {
     const w = this.windows.get(t.rootTargetId); if (!w) return;
     const span = { t0: this.store.fromEpochMs(msg.t0), t2: this.store.fromEpochMs(msg.t2) };
@@ -152,11 +170,18 @@ export class Daemon {
   isAuthRedirect(url: string, t: TargetState): boolean { return /\/(login|signin|sign-in|auth|sso|logout|session-expired|timeout)\b/i.test(url) && !/\/(login|signin|sign-in|auth|sso)\b/i.test(t.url || ""); }
 
   // ---------------- targets ----------------
-  private matchesScope(url: string): boolean {
-    if (!this.scopeRe && !this.scopeSub) return true;
+  private matchesScope(url: string, targetId?: string): boolean {
+    if (this.scopeTargetId) return targetId === this.scopeTargetId; // children/popups still adopt via opener logic
+    if (!this.scopeRe && !this.scopeSub) return true; // launch mode / explicit --all-targets
     if (!url || url === "about:blank") return false;
     return this.scopeRe ? this.scopeRe.test(url) : url.includes(this.scopeSub!);
   }
+  /** Observed idle time: ms with no causality window open anywhere (review F8). */
+  idleObservedMs(): number { return this.idleAccumMs; }
+  /** Target ids in a root tree (review F15). */
+  treeIds(rootId: string): string[] { return [...this.targets.keys()].filter((id) => this.targets.get(id)!.rootTargetId === rootId || id === rootId); }
+  /** Bound the write-path maps (review F12): insertion-ordered eviction. */
+  capMap(m: Map<string, unknown>, cap = 8000) { while (m.size > cap) { const k = m.keys().next().value; if (k === undefined) break; m.delete(k); } }
   private route(e: CdpEvent) {
     if (e.method.startsWith("Target.")) { void this.onTargetEvent(e); return; }
     if (e.method.startsWith("Browser.")) { this.onBrowserEvent(e); return; }
@@ -187,7 +212,7 @@ export class Daemon {
         if (t && t.scoped && !t.detached) {
           const changed = t.url !== info.url || t.title !== info.title; t.url = info.url; t.title = info.title;
           if (changed) this.store.update("targets", { url: info.url, title: info.title }, "target_id=?", [t.targetId]);
-        } else if (info.type === "page" && !info.attached && !this.stopping && this.matchesScope(info.url)) {
+        } else if (info.type === "page" && !info.attached && !this.stopping && this.matchesScope(info.url, info.targetId)) {
           // A page we previously ignored (or never saw attached) now matches the scope: adopt it late.
           // Auto-attach handles brand-new targets; `info.attached` guards against attaching a second session.
           this.log(`adopting target ${info.targetId} (${info.url})`);
@@ -198,6 +223,7 @@ export class Daemon {
       case "Target.targetDestroyed": {
         const t = this.targets.get(p.targetId);
         if (t && !t.detached) { t.detached = true; this.bySession.delete(t.sessionId); }
+        for (const [fid, fr] of this.frames) if (fr.targetId === p.targetId) this.frames.delete(fid); // review F12
         if (t?.scoped) { const at = this.now(); this.store.update("targets", { detached_t: at }, "target_id=?", [p.targetId]); this.publish({ kind: "target", t: at, targetId: p.targetId, summary: { state: "destroyed", url: t.url } }); }
         return;
       }
@@ -218,7 +244,7 @@ export class Daemon {
     const isPage = info.type === "page";
     const isFrame = info.type === "iframe";
     let scoped: boolean;
-    if (isPage) scoped = this.matchesScope(info.url) || (!!info.openerId && !!this.targets.get(info.openerId)?.scoped);
+    if (isPage) scoped = this.matchesScope(info.url, info.targetId) || (!!info.openerId && !!this.targets.get(info.openerId)?.scoped);
     else if (isFrame) scoped = !!parent?.scoped;
     else scoped = false; // workers, service workers, etc.: run, but don't instrument (v1)
     const t: TargetState = {
@@ -342,6 +368,8 @@ export class Daemon {
       bytes = new Uint8Array(Buffer.from(r.data, "base64")); at = this.now();
     }
     const hash = this.store.writeBlob(bytes);
+    const dup = this.store.get<{ seq: number; t: number }>("SELECT seq, t FROM shots WHERE target_id=? AND hash=? ORDER BY seq DESC LIMIT 1", root.targetId, hash);
+    if (dup) return { hash, t: dup.t, seq: dup.seq }; // static page: same frame re-captured — one row is enough
     const seq = this.store.insert("shots", { t: at, target_id: root.targetId, hash, w: root.cast?.w ?? null, h: root.cast?.h ?? null, kind, reason, changed_tiles: null });
     return { hash, t: at, seq };
   }
@@ -357,6 +385,7 @@ export class Daemon {
       case "ping": return { pong: true, t: this.now() };
       case "session.info": return { manifest: this.manifest, connected: this.connected, targets: this.targetList(), counts: this.counts(), classifier: { immature: this.attrib.immature(), families: this.attrib.families.size, ambient: [...this.attrib.families.values()].filter((f) => f.ambient).length }, lastSeq: this.store.lastSeq() };
       case "session.end": setTimeout(() => void this.stop(), 20); return { ok: true };
+      case "pick.list": return (await this.cdp.send<{ targetInfos: TargetInfo[] }>("Target.getTargets")).targetInfos.filter((x) => x.type === "page").map((x, i) => ({ n: i + 1, targetId: x.targetId, url: x.url, title: x.title }));
       case "subscribe": conn.subscribed = true; return { ok: true, lastSeq: this.store.lastSeq() };
       case "targets": return this.targetList();
       case "focus": { const t = this.targets.get(p.targetId); if (!t?.scoped || t.detached) throw new RpcError(-32602, "unknown/unscoped target"); this.primaryTargetId = t.targetId; return { ok: true }; }
@@ -425,6 +454,7 @@ export class Daemon {
 
   async stop(): Promise<void> {
     if (this.stopping) return; this.stopping = true;
+    if (this.idleTimer) clearInterval(this.idleTimer);
     this.log("stopping");
     this.publish({ kind: "session", t: this.now(), summary: { state: "ending" } });
     if (this.connected) {
@@ -453,7 +483,7 @@ if (import.meta.main) {
   const port = get("--attach") ? Number(get("--attach")) : undefined;
   const launchedPid = get("--launched-pid");
   const d = await Daemon.start({
-    dir, name, mode: (get("--mode") as any) ?? (launchedPid ? "launch" : "attach"), port, host: get("--host"), wsUrl: get("--ws"), scope: get("--scope"),
+    dir, name, mode: (get("--mode") as any) ?? (launchedPid ? "launch" : "attach"), port, host: get("--host"), wsUrl: get("--ws"), scope: get("--scope"), scopeTarget: get("--scope-target"), allTargets: has("--all-targets"),
     dialogPolicy: (get("--dialogs") as any) ?? "accept",
     launched: launchedPid ? { pid: Number(launchedPid), userDataDir: get("--user-data-dir") ?? "", port: port ?? 0, headless: has("--headless") } : undefined,
     log: has("--fg") ? (l) => console.error(l) : undefined,

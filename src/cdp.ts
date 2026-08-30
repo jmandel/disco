@@ -31,13 +31,15 @@ export class Cdp {
   }
 
   /** Send a CDP command; `sessionId` routes to an attached (flattened) target session. */
-  send<T = any>(method: string, params: object = {}, sessionId?: string): Promise<T> {
+  send<T = any>(method: string, params: object = {}, sessionId?: string, timeoutMs = 20000): Promise<T> {
+    // Bounded: a renderer that never answers must not hang the act path (review F5).
     if (this.closed) return Promise.reject(new Error(`CDP closed (${method})`));
     const id = this.nextId++;
     const msg: any = { id, method, params };
     if (sessionId) msg.sessionId = sessionId;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      const timer = timeoutMs > 0 ? setTimeout(() => { if (this.pending.delete(id)) reject(new Error(`CDP ${method}: no response in ${timeoutMs}ms`)); }, timeoutMs) : null;
+      this.pending.set(id, { resolve: (v) => { if (timer) clearTimeout(timer); resolve(v); }, reject: (e) => { if (timer) clearTimeout(timer); reject(e); }, method });
       this.ws.send(JSON.stringify(msg));
     });
   }

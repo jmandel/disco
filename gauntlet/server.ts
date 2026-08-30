@@ -323,7 +323,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       const tpl = await Bun.file(join(APP_DIR, "secure.html")).text();
       return text(tpl.replaceAll("{{USER}}", escapeHtml(authed)), "text/html; charset=utf-8");
     }
-    if (/^\/(iframe|child|away|login)\.html$/.test(path) || path === "/style.css") return staticFile(path.slice(1));
+    if (/^\/(iframe|iframe2|child|away|login)\.html$/.test(path) || path === "/style.css") return staticFile(path.slice(1));
 
     // API
     if (path.startsWith("/api/")) return api(req, url, path, m);

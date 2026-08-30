@@ -11,7 +11,8 @@ export const defaults = {
   taskTierSlackMs: 30,     // requests starting within this of the input task end still count as "task"
   ambientMinCount: 3,      // family occurrences needed before it can be classified ambient
   ambientMaxCv: 0.3,       // coefficient of variation of inter-arrival gaps for "regular cadence"
-  chainedPollGapMs: 250,   // next poll starting within this of previous end => chained (long-poll)
+  chainedPollGapMs: 250,
+  trailingAttributionMs: 1500, // requests this soon after a window closes (same root, no new window) tag "trailing"   // next poll starting within this of previous end => chained (long-poll)
   classifierWarmupMs: 20000, // idle observation before reports stop saying "classifier: immature"
   idleObserveMs: 20000,    // `disco session new` idle observation (skippable with --no-idle)
   // --- capture (GUIDANCE §3.4) ---

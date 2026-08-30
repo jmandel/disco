@@ -1,7 +1,7 @@
 // The session store (GUIDANCE §6, BRIEF §1.5/1.6): SQLite (WAL) + content-addressed blobs.
 // Writer: the daemon only (class Store). Readers: anyone, directly (openStore / bun:sqlite / sqlite3).
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaults } from "../defaults.ts";
 
@@ -126,21 +126,35 @@ export function openStore(dir: string) {
   const manifest = readManifest(dir);
   const q = <T = any>(sql: string, ...args: unknown[]): T[] => db.prepare(sql).all(...(args as any[])) as T[];
   const one = <T = any>(sql: string, ...args: unknown[]): T | null => (db.prepare(sql).get(...(args as any[])) as T) ?? null;
+  /** Report handles are 16-char prefixes; resolve to the full sha256 (review F7). */
+  const fullHash = (h: string): string => {
+    if (h.length >= 64) return h;
+    const row = one<{ hash: string }>("SELECT hash FROM bodies WHERE hash LIKE ? LIMIT 1", h + "%")
+      ?? one<{ hash: string }>("SELECT hash FROM shots WHERE hash LIKE ? LIMIT 1", h + "%")
+      ?? one<{ hash: string }>("SELECT pre_aria hash FROM actions WHERE pre_aria LIKE ? UNION SELECT post_aria FROM actions WHERE post_aria LIKE ? LIMIT 1", h + "%", h + "%")
+      ?? one<{ hash: string }>("SELECT shot hash FROM sentinels WHERE shot LIKE ? LIMIT 1", h + "%");
+    if (row?.hash) return row.hash;
+    const shard = join(dir, "blobs", h.slice(0, 2));
+    if (existsSync(shard)) { const m = readdirSync(shard).find((f) => f.startsWith(h)); if (m) return m; }
+    throw new Error(`no blob matches prefix ${h}`);
+  };
   const api = {
     db, dir, manifest,
     /** Raw SQL, all rows. */
     sql: q,
     one,
-    /** Body bytes by hash (blob). Desugars to: readFileSync(blobPath(dir, hash)). */
-    bodyBytes(hash: string): Uint8Array { return new Uint8Array(readFileSync(blobPath(dir, hash))); },
-    /** Body text by hash — from `bodies.text` when present (fast), else decoded from the blob. */
+    fullHash,
+    /** Body bytes by hash or 16-char prefix (blob). Desugars to: readFileSync(blobPath(dir, hash)). */
+    bodyBytes(hash: string): Uint8Array { return new Uint8Array(readFileSync(blobPath(dir, fullHash(hash)))); },
+    /** Body text by hash/prefix — from `bodies.text` when present (fast), else decoded from the blob. */
     body(hash: string): string {
-      const r = one<{ text: string | null }>("SELECT text FROM bodies WHERE hash=?", hash);
-      return r?.text ?? new TextDecoder().decode(api.bodyBytes(hash));
+      const full = fullHash(hash);
+      const r = one<{ text: string | null }>("SELECT text FROM bodies WHERE hash=?", full);
+      return r?.text ?? new TextDecoder().decode(api.bodyBytes(full));
     },
     /** Parsed JSON body. */
     json<T = any>(hash: string): T { return JSON.parse(api.body(hash)); },
-    blobPath: (hash: string) => blobPath(dir, hash),
+    blobPath: (hash: string) => blobPath(dir, fullHash(hash)),
     /** requests({urlLike, method, actionId, status, since, until}) →
      *  SELECT * FROM requests WHERE url LIKE ? AND method=? AND action_id=? AND status=? AND t_start BETWEEN ? AND ? ORDER BY t_start */
     requests(f: { urlLike?: string; method?: string; actionId?: string; status?: number; since?: number; until?: number; family?: string } = {}): RequestRow[] {
@@ -170,7 +184,7 @@ export function openStore(dir: string) {
       }
       return { bodies, ws, aria };
     },
-    hasBlob(hash: string) { return existsSync(blobPath(dir, hash)); },
+    hasBlob(hash: string) { try { return existsSync(blobPath(dir, fullHash(hash))); } catch { return false; } },
     /** timeline(t0,t1): SELECT seq,t,kind,target_id,action_id,ref,summary FROM events WHERE t BETWEEN ? AND ? ORDER BY seq — plus notes interleaved. */
     timeline(t0: number, t1: number): Array<{ seq: number; t: number; kind: string; target_id: string | null; action_id: string | null; ref: string | null; summary: any }> {
       const ev = q("SELECT seq,t,kind,target_id,action_id,ref,summary FROM events WHERE t BETWEEN ? AND ? ORDER BY seq", t0, t1).map((r: any) => ({ ...r, summary: r.summary ? JSON.parse(r.summary) : null }));
