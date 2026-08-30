@@ -14,8 +14,13 @@
 ## In progress
 - Slice 8: methodology dry run (fresh agent) + artifact gate.
 
+## Slice 8 — PASSED (2026-08-30)
+- Stage (a): a fresh Fable agent ran a full discovery session against the gauntlet-as-unknown-app (51 acts): artifacts/ holds nav-and-quirks.md, ledger.md (interstitial n=5/5 with hypothesis + experiments), friction.md, and 3 tested defensive scripts. Commit 35ad2f6.
+- Stage (b): a SECOND cold agent, given only artifacts/ + README, executed "open a record and extract row names via the wire" FIRST TRY under both modal states with zero fixes (records 2 and 3; interstitial acknowledged then absent; 10,000 rows via the 496KB /api/rows body, task-attributed).
+
 ## Next
-- Slice 8 artifact gate; dogfood against a real EHR (BRIEF §5) (launch mode, storage state, reconnect) → 7 (frame/shadow selector acceptance) → 8 (methodology dry run by a FRESH agent).
+- Dogfood against a real EHR demo environment (BRIEF §5): measure settle-time distributions, tune defaults.ts, test the ambient classifier on real long-polls, judge digests, keep a friction log. Needs Josh to pick the environment.
+- OPEN decisions to revisit with dogfood data: content-based attribution fallback, screencast cost on a real desktop, digest token budget, HTML5 native DnD, diff-highlighted shot variant. (launch mode, storage state, reconnect) → 7 (frame/shadow selector acceptance) → 8 (methodology dry run by a FRESH agent).
 
 ## How to run
 - `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)
