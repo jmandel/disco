@@ -18,7 +18,7 @@ Milestone tag: **`v0.1.0-platform-base`**.
 ## In progress — platform build-out (PLATFORM.md plan)
 - Slice 1 ✅ ways-of-knowing palette named in `artifacts/README.md` (descriptive, not a schema).
 - Slice 2a ✅ function-library pattern on the gauntlet: `lib/wire.ts` + `lib/nav.ts` (generic reusable moves), `artifacts/gauntlet/lib.ts` (reference per-product library), `test/gauntlet/lib.test.ts`. Suite 87/87.
-- Slice 2b ← NEXT: OpenEMR function library (`artifacts/openemr/lib.ts`: login / findPatient / openPatient / extractProblemList, anchor-oriented, wire-first) + a live drift check (`artifacts/openemr/check.ts`, NOT `*.test.ts` so `bun test` never hits the net), against demo.openemr.io (physician).
+- Slice 2b ✅ OpenEMR function library `artifacts/openemr/lib.ts` (login / findPatient [finder search past page 1] / openPatient / extractSummary, anchor-oriented, wire-first, defensive) + `artifacts/openemr/check.ts` live drift loop. Validated vs demo.openemr.io: Belford (page 1) + Stone (page 2 via search) end-to-end, idempotent. Fixed a real daemon bug (prune stale same-target child frames on main-frame re-navigation, DECISIONS #31). Retired site.json → folded into lib.ts + nav-and-quirks.md.
 
 ## Slice 8 — PASSED (2026-08-30)
 - Stage (a): a fresh Fable agent ran a full discovery session against the gauntlet-as-unknown-app (51 acts): artifacts/gauntlet/ holds nav-and-quirks.md, ledger.md (interstitial n=5/5 with hypothesis + experiments), friction.md, and 3 tested defensive scripts. Commit 35ad2f6.

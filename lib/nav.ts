@@ -22,3 +22,15 @@ export async function actIfPresent(s: Session, selector: string, opts: { budgetM
   const r = await s.click(selector, { frame: opts.frame });
   return r.verdict !== "diagnosis";
 }
+
+/** Wait until some frame (in the primary target's tree) has a URL containing `urlLike`; return its id.
+ *  Enterprise apps build tabs/panels as child frames that appear a beat after an action settles. */
+export async function waitForFrame(s: Session, urlLike: string, budgetMs = 8000): Promise<string> {
+  const t0 = Date.now();
+  for (;;) {
+    const targets = await s.targets();
+    for (const t of targets) for (const f of (t.frames ?? [])) if (f.url.includes(urlLike)) return f.frameId;
+    if (Date.now() - t0 > budgetMs) throw new Error(`waitForFrame: no frame url contains ${JSON.stringify(urlLike)} within ${budgetMs}ms`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}

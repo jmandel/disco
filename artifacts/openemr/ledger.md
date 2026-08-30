@@ -11,6 +11,13 @@ Extracted from `sessions/openemr/store.sqlite` notes (act ids cited); refine acr
 | 4 | finder | 31 patients, list fully wire-available (act:4) | 1 | empty result / very large practice paging behavior unknown | search a no-match term; observe `dynamic_finder_ajax` shape |
 | 5 | ambient | 60s heartbeat trio classified periodic | 1 session | token-refresh / session-timeout modal exists but unseen (idle timeout not hit) | idle past the server session timeout; capture the warning modal |
 
+## Update (slice 2b, 2026-08-30)
+
+Ledger #1 (conditional interstitial) — partial support: `Stone, Alex` (pid 30) opened with **no** due-reminders
+alert and an empty chart ("Nothing Recorded" everywhere), while `Belford, Phil` (pid 1, has problems/meds)
+fired the alert. Consistent with "interstitial conditional on due-reminder state," now n=2 (1 fired / 1 not).
+`openPatient` handles both branches. Still not proven which specific state gates it.
+
 ## Correction (a way-of-knowing note)
 
 An early ledger note claimed OpenEMR fired *no* periodic traffic — wrong; it was written before the idle

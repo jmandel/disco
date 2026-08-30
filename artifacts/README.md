@@ -15,15 +15,15 @@ and the usage guides). One observation can split across all three (see the promo
 4. **A function library** — plain TypeScript: job-specific, robust functions that navigate to anchor states and perform specific steps (`login`, `openPatient(pid)`, `goToProblemList`, …). Composable, decomposed/refined over time. **The growing asset** — and the future basis for MCP/agent tools and for automated test loops that run over them. The engineering goes into *robustness*, not file format; they're just `.ts` files.
 5. **Evidence** — screenshots, reports, cited act ids / store cursors. *Provenance — every claim points back to what was observed.*
 
-Optional and un-fancy: a pack *may* keep a small machine-readable hints file (e.g. `openemr/site.json`
-lists the known ambient families / read-POST families / login recipe from dogfood #1), but that's a
-convenience, not a required shape — such knowledge is usually better expressed as functions (#4) + notes
-(#3), and will fold into them over time.
+Optional and un-fancy: a pack *may* keep a small machine-readable hints file, but that's a convenience,
+not a required shape — such knowledge is usually better expressed as functions (#4) + notes (#3). (The
+OpenEMR pack started with a `site.json` and then folded it into `lib.ts` + `nav-and-quirks.md`, which is
+the expected direction.)
 
 ## The two current instances
 
 - **`gauntlet/`** — instance #1, the synthetic app (our known-answer control). `nav-and-quirks.md`, `ledger.md`, `friction.md`, `scripts/` (early functions, as standalone runnables — will lift toward composable importable functions).
-- **`openemr/`** — instance #2, OpenEMR 8.3.0 demo (dogfood #1, partial). `nav-and-quirks.md`, `ledger.md`, `site.json` (optional hints), `dogfood-1.md`, `screenshots/`. Function library: TODO (slice 2).
+- **`openemr/`** — instance #2, OpenEMR 8.3.0 demo. `lib.ts` (function library: `login`/`findPatient`/`openPatient`/`extractSummary`, anchor-oriented, wire-first, defensive), `check.ts` (live drift loop), `nav-and-quirks.md`, `ledger.md`, `dogfood-1.md`, `screenshots/`.
 
 ## The promotion path (raw → durable)
 
