@@ -274,6 +274,8 @@ Discovery's outputs should make the following the *path of least resistance* for
 
 **Deliberately out of v1:** mechanical read-only enforcement (stance + write-flags only); orchestrated N-record sampling (store supports it; agent can do it by hand); capture-time redaction (environmental posture instead); screenshot OCR in `appearances`; request interception/mocking (`Fetch` domain reserved for later); any agent-loop infrastructure.
 
+**Sanctioned growth points:** the deferred items above are known doors, not closed ones — `docs/using-disco.md` (“Extending the core”) catalogs each with its CDP mechanism and the trigger that should make an agent reach for it in a novel case, added to the core Layer with a test and a `DECISIONS.md` note.
+
 **To resolve during build, with real EHR traffic:** default Q and budget values (tune against measured settle-time distributions, not taste); how aggressive the ambient classifier can be before it misclassifies real long-polls that *do* carry action results (some EHRs deliver results over the standing WS/poll/SSE channel — attribution may need a content-based fallback, and SSE bodies are uncaptured in v1, §3.4); whether native-rate screencast is cheap enough attached to a human's desktop Chromium or needs to drop to on-event screenshots; and the report-digest token budget (start ~300 tokens, adjust by feel in supervised sessions). *Resolved at build start:* Playwright's `InjectedScript` vendors cleanly (it is a plain string inside `playwright-core`'s bundle; extraction is a 30-line script), so the selector engine is Playwright's from the first slice and `connectOverCDP` is not needed.
 
 ---

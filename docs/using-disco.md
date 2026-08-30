@@ -138,6 +138,38 @@ graduates from a pack to `lib/` when a second product would copy it.
 - **Warm the classifiers** (`disco idle`) before trusting settlement on a heartbeat-heavy app.
 - Full gotcha list: `STATE.md` "Gotchas" + `DECISIONS.md` #16–31.
 
+## Extending the core — sanctioned growth points
+
+The engine and `lib/` are deliberately small (GUIDANCE §0's forbidden-abstractions list; "simple and
+powerful beats over-engineered"). They are **not** meant to stay frozen. Several capabilities were
+deferred *on purpose*, with the mechanism already understood, to be added to the **core** — not hacked
+into a single pack — the moment a real case needs them. If you're driving a novel app and hit one of
+these walls, this is your cue: reach for the extension, add it to Layer 1 with a test and a `DECISIONS.md`
+note (the promotion path), rather than working around it per-pack. Don't build them speculatively; do
+build them when the need is concrete and general. Each is a known door, not a limitation.
+
+**Input**
+- **Native HTML5 drag-and-drop.** Have: real mouse drag (`dragFromTo`, `act kind:"drag"`) — covers sliders/sortables/resizes. Add when an app uses true HTML5 DnD (`dragstart`/`dragover`/`drop`, `dataTransfer`) that synthetic mouse moves don't fire — CDP `Input.setInterceptDrags` + `Input.dispatchDragEvent`. *Trigger:* a drag that visibly does nothing on an element with `draggable="true"` / `dragstart` listeners.
+- **Touch, file-drop, clipboard paste.** Same shape — `Input.dispatchTouchEvent`, `DOM.setFileInputFiles`, clipboard — add per need.
+
+**Observation**
+- **Streaming / SSE response bodies.** Have: SSE *messages* (`sse_events`); the never-finishing body isn't captured (`getResponseBody` needs `loadingFinished`). Add via the `Fetch` domain (`Fetch.enable` + `takeResponseBodyAsStream`) when an app delivers **results over a stream**. *Trigger:* a request flagged `streaming`/`unread` that carries data you need.
+- **Content-based attribution fallback.** Have: task/window/dependency tiers + periodicity/independence ambient classification. Add a content match (does this standing-channel frame/response correspond to the action's subject?) when an app delivers **action results over a long-poll/WS/SSE** that the periodicity heuristic classifies as ambient. *Trigger:* the result you expected shows up as "non-attributed activity in the window" on a standing channel.
+- **Screencast fallback mode.** Have: native-rate `startScreencast` as the visual signal. Add the sanctioned switch to on-event/interval `captureScreenshot` (GUIDANCE §3.4) when the cast is too costly attached to a heavy real desktop. *Trigger:* measured screencast overhead hurting a human's browser. (A mode switch, not an abstraction layer.)
+- **Diff-highlighted screenshot.** Have: numeric `changedBoxes` in the report. Add a rendered variant (draw the boxes onto the post-shot) when a visual diff artifact earns the pixels. *Trigger:* repeatedly wanting to *see* what changed, not just its coordinates.
+- **Screenshot OCR in `appearances()`.** Have: `appearances` searches bodies + WS frames + aria snapshots. Add OCR over stored frames when facts live only in **canvas/pixels**. *Trigger:* a canvas-rendered region (flowsheet, schedule grid) whose data isn't on the wire or in the DOM.
+
+**Analysis & orchestration**
+- **Orchestrated N-record sampling.** Have: the store + `diffTrace(a, b)` support variability sampling by hand. Add a helper that runs "the same" transition across N records and aggregates the variability. *Trigger:* a ledger question that needs n ≫ 2.
+- **Write-flag heuristic for read-shaped POSTs.** Have: per-family write-flag + manual `family mark-read` + a GraphQL body peek. Add a recon pass / heuristic (a POST returning HTML/JSON with no state change is a read) when an app POSTs for reads at scale (OpenEMR's summary fragments are the type case). *Trigger:* the write-flag firing on obviously-read panels.
+
+**Safety (for real, non-demo targets)**
+- **Capture-time redaction** and **mechanical read-only enforcement.** Have: environmental posture (demo/BAA data) + stance + write-flag surfacing. Add real redaction (hash/drop PHI at capture) and/or an enforce-mode that refuses `write`/`unknown`-family requests when pointing at a **real, PHI-bearing** system. *Trigger:* a target that is not a demo / BAA-covered environment.
+
+Adding one of these is a Layer-1 change: implement the mechanism, prove it against the gauntlet (or the app
+that forced it), and log it in `DECISIONS.md` so the next agent sees why it exists. The current status of
+each (built / partial / deferred) lives in `DECISIONS.md` (the `OPEN` tags) and `STATE.md`.
+
 ## Where outputs go
 
 Everything you learn becomes a pack under `artifacts/<target>/` (the ways-of-knowing palette:
