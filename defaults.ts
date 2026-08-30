@@ -4,7 +4,8 @@ export const defaults = {
   // --- settlement (GUIDANCE §4.2) ---
   quietMs: 300,            // Q: no attributed request / mutation / changed frame for this long => quiet
   noEffectMs: 500,         // nothing at all happened within this => verdict "no-effect"
-  budgetMs: 3000,          // hard cap on the quiescence race => "still-active"
+  budgetMs: 3000,          // caps waiting for quiet; suspended while attributed requests are in flight
+  maxBudgetMs: 20000,      // absolute cap even with requests in flight (hung request => "still-active")
   watchBudgetMs: 1500,     // default budget for watch()
   // --- attribution (GUIDANCE §4.4, BRIEF §1.13) ---
   taskTierSlackMs: 30,     // requests starting within this of the input task end still count as "task"

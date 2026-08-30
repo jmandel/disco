@@ -106,6 +106,10 @@ Required behaviors (each with the guidance claim it exercises):
 20. **GraphQL over POST** — a query and a mutation to the same endpoint → per-family write-flag with body peek (§1.19).
 21. **Cookie login** — `/login.html` + `/secure.html` → storage-state save/restore in Slice 6.
 22. **Long-poll reissue** — the poll from #5 must be able to begin *inside* an action's causality window → the classifier's chained-poll heuristic (§1.13).
+23. **Push-channel content delivery** — one notification object rendered into the page from each standing channel (WS push, persistent SSE, dedicated long-poll), triggered via ctl → between-action content observation on every channel (G§3.4, §10; DECISIONS #18).
+24. **Custom context menu** — right-click opens a role=menu; a plain left click does not → contextmenu input dispatch (DECISIONS #17).
+25. **Double-click editor** — click selects (behind a 250ms single-click timer), dblclick edits → clickCount sequencing.
+26. **Mouse-drag slider + sortable** — down/stepped-move/up dragging with a wire-visible `POST /api/drag-report` on completion → drag input dispatch and its attribution.
 
 **Ambient traffic (#5, #22, spontaneous WS pushes in #6) is OFF by default** and enabled per test via `/ctl`, so Slice 2's timing suite is deterministic and Slice 3 turns it on deliberately.
 
@@ -134,6 +138,7 @@ Vendored Playwright selectors (§1.8), input dispatch incl. frame-chain coordina
 - Occluded target → occlusion reported, no blind click-through.
 - Canvas cell click → settles on the visual signal (frame changed, then quiet); no DOM/network in the report.
 - Cross-origin iframe button → resolved in the OOPIF target, clicked via translated root coordinates, the iframe's POST attributed.
+- Right-click on #ctx-target → custom menu in the UI delta (a plain click must not open it); dblclick on #dbl-target → "editing"; slider drag → #slider-value changed and the drag-report POST attributed.
 - `watch()` for a selector that never comes, budget 1500ms → diagnosis, and elapsed < 1700ms.
 
 ### Slice 3 — Attribution + ambient classifier

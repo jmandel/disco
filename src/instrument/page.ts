@@ -52,7 +52,7 @@ export function handlePage(d: Daemon, t: TargetState, e: CdpEvent): void {
     case "Page.frameNavigated": {
       const f = p.frame;
       const at = d.now();
-      const isMain = !f.parentId;
+      const isMain = !f.parentId || f.id === t.targetId; // OOPIF main frames carry a parentId but their frame id equals their target id
       d.frames.set(f.id, { frameId: f.id, targetId: t.targetId, parentFrameId: f.parentId ?? null, url: f.url, name: f.name, contexts: d.frames.get(f.id)?.contexts ?? new Map(), observerReady: false });
       d.store.upsert("frames", { frame_id: f.id, target_id: t.targetId, parent_frame_id: f.parentId ?? null, url: f.url, name: f.name ?? null, t: at });
       if (isMain) { t.mainFrameId = f.id; t.url = f.url; d.store.update("targets", { url: f.url }, "target_id=?", [t.targetId]); }

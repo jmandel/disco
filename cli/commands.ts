@@ -1,4 +1,92 @@
-// Slice 2+ CLI commands (act, settle, watch). Registered here so cli/disco.ts stays a thin switch.
-export async function run(cmd: string, _pos: string[], _flags: Record<string, string | boolean>, ctx: { die: (m: string) => never }): Promise<void> {
-  ctx.die(`command "${cmd}" is not implemented yet (Slice 2)`);
+// Slice 2 CLI commands: act / settle / watch. Human-readable digest by default; --json for the full report.
+import type { RpcClient } from "../src/rpc.ts";
+
+interface Ctx { client: (dir?: string) => Promise<RpcClient>; sessionDir: (s?: string) => string; out: (o: unknown) => void; die: (m: string) => never }
+
+const KINDS = new Set(["click", "rightclick", "dblclick", "middleclick", "hover", "type", "press", "scroll", "select", "navigate", "drag"]);
+
+export async function run(cmd: string, pos: string[], flags: Record<string, string | boolean>, ctx: Ctx): Promise<void> {
+  const f = (k: string) => (typeof flags[k] === "string" ? (flags[k] as string) : undefined);
+  const num = (k: string) => (f(k) !== undefined ? Number(f(k)) : undefined);
+  const call = async (method: string, params: any, timeout = 90000) => {
+    const c = await ctx.client();
+    try { return await c.call(method, params, timeout); } finally { c.close(); }
+  };
+
+  if (cmd === "act") {
+    const kind = pos[0];
+    if (!kind || !KINDS.has(kind)) ctx.die(`act <${[...KINDS].join("|")}> [target] [--text t] [--key k] [--url u] [--to sel|--to-dx N --to-dy N] [--value v] [--frame f] [--budget ms] [--eval "fn"] [--json]`);
+    const p: any = {
+      kind, target: pos[1], text: f("text"), key: f("key") ?? (kind === "press" ? pos[1] : undefined), url: f("url") ?? (kind === "navigate" ? pos[1] : undefined), value: f("value"),
+      to: f("to"), frame: f("frame"), targetId: f("target-id"), budgetMs: num("budget"), quietMs: num("quiet"), noEffectMs: num("no-effect"), maxBudgetMs: num("max-budget"),
+      evaluateAfter: f("eval"), world: f("world"), deltaY: num("delta-y"),
+    };
+    if (kind === "press") p.target = undefined;
+    if (kind === "navigate") p.target = undefined;
+    if (f("to-dx") || f("to-dy")) p.toOffset = { dx: num("to-dx") ?? 0, dy: num("to-dy") ?? 0 };
+    const report = await call("act", p, (p.maxBudgetMs ?? 30000) + 60000);
+    printReport(report, flags, ctx);
+    return;
+  }
+  if (cmd === "settle") {
+    const report = await call("settle", { action: f("action"), budgetMs: num("budget"), frame: f("frame") });
+    printReport(report, flags, ctx);
+    return;
+  }
+  if (cmd === "watch") {
+    const p: any = { selector: pos[0], urlLike: f("url-like"), fn: f("fn"), budgetMs: num("budget"), frame: f("frame") };
+    if (!p.selector && !p.urlLike && !p.fn) ctx.die('watch <selector> | --url-like part | --fn "()=>…" [--budget ms]');
+    const r = await call("watch", p);
+    if (flags.json) return ctx.out(r);
+    if (r.matched) console.log(`✓ matched in ${r.elapsedMs}ms${r.preview ? "  " + r.preview : ""}${r.request ? "  req " + r.request : ""}`);
+    else {
+      console.log(`✗ no match in ${r.elapsedMs}ms — diagnosis:`);
+      printDiagnosis(r.diagnosis);
+    }
+    return;
+  }
+  ctx.die(`unknown command "${cmd}" (see disco help)`);
+}
+
+export function printReport(r: any, flags: Record<string, string | boolean>, ctx: Ctx) {
+  if (flags.json) return ctx.out(r);
+  const s = r.settle;
+  console.log(`${r.action}  ${r.kind}${r.target?.selector ? " " + r.target.selector : ""}  →  ${r.verdict}${s ? `  (settled ${s.ms}ms, reported ${s.reportedMs}ms${s.counts ? `; ${s.counts.requests} req, ${s.counts.mutations} mut, ${s.counts.visuals} px` : ""})` : ""}`);
+  if (r.target?.detachedRetried) console.log(`  note: element detached mid-dispatch; re-resolved once (re-render race)`);
+  if (r.diagnosis) printDiagnosis(r.diagnosis);
+  if (r.ui && (r.ui.added.length || r.ui.removed.length)) {
+    for (const l of r.ui.added.slice(0, 10)) console.log(`  + ${l}`);
+    if (r.ui.addedMore) console.log(`  + …${r.ui.addedMore} more`);
+    for (const l of r.ui.removed.slice(0, 6)) console.log(`  - ${l}`);
+    if (r.ui.removedMore) console.log(`  - …${r.ui.removedMore} more`);
+  }
+  if (r.wire?.attributed?.length) {
+    for (const w of r.wire.attributed) console.log(`  ⇄ ${w.line}${w.body ? "  body:" + w.body.slice(0, 12) : ""}`);
+    if (r.wire.more) console.log(`  ⇄ +${r.wire.more} more (cursor ev:${r.cursor.from}-${r.cursor.to})`);
+  }
+  if (r.wire?.ambientInWindow) console.log(`  ~ ${r.wire.ambientInWindow} ambient request(s) during window`);
+  if (r.wire?.otherActivity?.length) console.log(`  ? other activity: ${r.wire.otherActivity.join("; ")}`);
+  if (r.wire?.ws) console.log(`  ⇄ ${r.wire.ws} WS frame(s) in window`);
+  if (r.wire?.sse) console.log(`  ⇄ ${r.wire.sse} SSE message(s) in window`);
+  if (r.console?.length) for (const c of r.console) console.log(`  ⚠ ${c}`);
+  for (const sn of r.env?.sentinels ?? []) console.log(`  ⚑ sentinel ${sn.name}${sn.title ? `: "${sn.title}"` : ""}${sn.shot ? "  shot:" + sn.shot.slice(0, 12) : ""}`);
+  if (r.env?.dialogs?.length) console.log(`  ⚑ dialogs: ${r.env.dialogs.join("; ")}`);
+  if (r.env?.urlChanged) console.log(`  → url: ${r.env.urlChanged}`);
+  if (r.env?.newTargets?.length) console.log(`  → new target(s): ${r.env.newTargets.join("; ")}`);
+  if (r.env?.writeFlag) console.log(`  ✎ writes: ${r.env.writeFlag.join("; ")}`);
+  if (r.env?.classifierImmature) console.log(`  (ambient classifier immature — consider \`disco idle\`)`);
+  if (r.env?.castBlind) console.log(`  (tab not visible: screencast blind)`);
+  if (r.evaluateAfter !== undefined) console.log(`  eval: ${JSON.stringify(r.evaluateAfter)?.slice(0, 300)}`);
+  if (s?.pending) console.log(`  still moving: ${[...s.pending.channels, ...s.pending.requests.map((x: string) => "req " + x)].join(", ") || "(nothing identified)"}`);
+  console.log(`  cursor ev:${r.cursor.from}-${r.cursor.to}  shots pre:${r.shots?.pre?.slice(0, 10) ?? "-"} post:${r.shots?.post?.slice(0, 10) ?? "-"}`);
+}
+
+function printDiagnosis(dg: any) {
+  if (!dg) return;
+  console.log(`  ✗ ${dg.reason}${dg.error ? ": " + dg.error : ""}${dg.occludedBy ? " — occluded by " + dg.occludedBy : ""}`);
+  if (dg.candidates?.length) console.log(`    near matches: ${dg.candidates.slice(0, 6).join(" | ")}`);
+  if (dg.census?.dialogs?.length) console.log(`    open dialogs: ${dg.census.dialogs.map((x: any) => x.title || x.sel).join("; ")}`);
+  if (dg.pendingRequests?.length) console.log(`    pending: ${dg.pendingRequests.join("; ")}`);
+  if (dg.domActive) console.log(`    dom mutated within the last second`);
+  if (dg.shot) console.log(`    shot: ${dg.shot.slice(0, 12)}`);
 }

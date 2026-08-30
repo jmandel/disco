@@ -13,6 +13,7 @@ import { fireSentinel } from "./sentinels.ts";
 import { defaults } from "../defaults.ts";
 import type { IgnoreMask, Box, TileSig } from "./visual.ts";
 import type { AttachedToTarget, TargetInfo } from "./protocol.ts";
+import { registerActions } from "./act.ts";
 
 export interface FrameInfo { frameId: string; targetId: string; parentFrameId: string | null; url: string; name?: string; contexts: Map<string, number>; observerReady: boolean }
 export interface CastState { lastHash: string | null; lastSig: TileSig | null; lastChangedT: number; lastPersistT: number; lastDecodeT: number; lastBytes: Uint8Array | null; lastT: number; ignore: IgnoreMask; boxes: Box[]; frames: number; decoded: number; w: number; h: number }
@@ -84,6 +85,7 @@ export class Daemon {
     await d.cdp.send("Target.setDiscoverTargets", { discover: true });
     await d.cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
     await d.cdp.send("Browser.setDownloadBehavior", { behavior: "default", eventsEnabled: true }).catch(() => {});
+    registerActions(d);
     d.log(`daemon started: session=${opts.name} mode=${opts.mode} scope=${opts.scope ?? "(all)"} ws=${wsUrl}`);
     d.publish({ kind: "session", t: d.now(), summary: { state: "started", name: opts.name, mode: opts.mode, scope: opts.scope ?? null } });
     return d;
@@ -324,7 +326,10 @@ export class Daemon {
     const root = this.targets.get(t.rootTargetId) ?? t;
     const now = this.now();
     let bytes: Uint8Array | null = null, at = now, kind = "shot";
-    if (root.cast?.lastBytes && now - root.cast.lastT < 400) { bytes = root.cast.lastBytes; at = root.cast.lastT; kind = "cast"; }
+    // Reuse the last screencast frame when it is fresh OR nothing changed since it was pushed —
+    // on a static page the last frame IS the current screen, and this keeps no-op reports fast.
+    const c0 = root.cast;
+    if (c0?.lastBytes && (now - c0.lastT < 400 || (root.castVisible && c0.lastChangedT <= c0.lastT))) { bytes = c0.lastBytes; at = c0.lastT; kind = "cast"; }
     else {
       const r = await this.send<{ data: string }>(root, "Page.captureScreenshot", { format: "jpeg", quality: 60 });
       bytes = new Uint8Array(Buffer.from(r.data, "base64")); at = this.now();
