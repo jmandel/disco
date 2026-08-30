@@ -243,3 +243,86 @@ test("remaining JSON endpoints: record, chart, delete, child-ping, grid, heartbe
   expect(hb2.n).toBe(hb1.n + 1);
   expect(await (await post("/api/iframe-submit", { name: "bob" })).json()).toEqual({ ok: true, name: "bob" });
 });
+
+/** Poll a predicate with a deadline (for buffers filled by background readers). */
+async function until(pred: () => boolean, timeoutMs = 2000): Promise<void> {
+  const t0 = performance.now();
+  while (!pred()) {
+    if (performance.now() - t0 > timeoutMs) throw new Error("until(): condition not met in time");
+    await Bun.sleep(10);
+  }
+}
+
+test("notify push triggers: channel-exclusive delivery, shared n, notifyPollHoldMs", async () => {
+  // stand up all three channels first, like the page does at load
+  const c = wsClient(`ws://localhost:${g.port}/ws`);
+  await c.open;
+  await c.next((f) => f.type === "hello");
+
+  const sseRes = await get("/api/notify-sse");
+  expect(sseRes.headers.get("content-type")).toContain("text/event-stream");
+  const reader = sseRes.body!.getReader();
+  const dec = new TextDecoder();
+  let sseBuf = "";
+  void (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuf += dec.decode(value);
+    }
+  })().catch(() => {});
+  await until(() => sseBuf.includes(": connected"));
+
+  let pollResult: any = null;
+  const pollPromise = getJson("/api/notify-poll").then((j) => { pollResult = j; return j; });
+  await Bun.sleep(20); // let the poll request register server-side
+
+  // ws trigger: only the socket hears it
+  await post("/ctl", { push: "ws" });
+  const wsNotif = await c.next((f) => f.type === "notify");
+  expect(wsNotif.via).toBe("ws");
+  expect(wsNotif.text).toBe(`Result ${wsNotif.n} via ws`);
+  await Bun.sleep(100);
+  expect(sseBuf).not.toContain("via ws");
+  expect(pollResult).toBeNull();
+
+  // sse trigger: only the EventSource stream hears it
+  await post("/ctl", { push: "sse" });
+  await until(() => sseBuf.includes("via sse"));
+  const sseNotif = JSON.parse(sseBuf.split("data: ").pop()!.split("\n")[0]!);
+  expect(sseNotif.via).toBe("sse");
+  expect(sseNotif.n).toBe(wsNotif.n + 1); // one monotonic counter across channels
+  expect(sseNotif.text).toBe(`Result ${sseNotif.n} via sse`);
+  expect(pollResult).toBeNull();
+
+  // poll trigger: resolves the pending long-poll
+  await post("/ctl", { push: "poll" });
+  const pollNotif = await pollPromise;
+  expect(pollNotif.via).toBe("poll");
+  expect(pollNotif.n).toBe(sseNotif.n + 1);
+  expect(pollNotif.text).toBe(`Result ${pollNotif.n} via poll`);
+
+  // cross-checks: ws got exactly one notify; sse stream saw no ws/poll deliveries
+  await expect(c.next((f) => f.type === "notify", 150)).rejects.toThrow();
+  expect(sseBuf).not.toContain("via poll");
+  // push is write-only: not persisted, and (like wsPush) no ctl broadcast
+  expect((await getJson("/ctl")).push).toBeUndefined();
+  await expect(c.next((f) => f.type === "ctl", 100)).rejects.toThrow();
+
+  // notifyPollHoldMs (read at request time): short hold -> {n:null}
+  g.ctl.set({ notifyPollHoldMs: 200 });
+  const t0 = performance.now();
+  expect(await getJson("/api/notify-poll")).toEqual({ n: null });
+  expect(performance.now() - t0).toBeGreaterThanOrEqual(190);
+  g.ctl.reset();
+
+  await reader.cancel().catch(() => {});
+  c.ws.close();
+});
+
+test("/api/drag-report echoes body + ok", async () => {
+  expect(await (await post("/api/drag-report", { widget: "slider", value: 42 })).json())
+    .toEqual({ ok: true, widget: "slider", value: 42 });
+  expect(await (await post("/api/drag-report", { widget: "sort", order: "b,a,c" })).json())
+    .toEqual({ ok: true, widget: "sort", order: "b,a,c" });
+});

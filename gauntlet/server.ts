@@ -47,6 +47,8 @@ export type State = {
   rerenderOnHover: boolean;
   /** `/` 302s to /login.html without the auth cookie */
   requireAuth: boolean;
+  /** how long /api/notify-poll is held waiting for a push trigger (ms) */
+  notifyPollHoldMs: number;
 };
 
 export const DEFAULTS: Readonly<State> = Object.freeze({
@@ -62,10 +64,11 @@ export const DEFAULTS: Readonly<State> = Object.freeze({
   timeoutMs: 0,
   rerenderOnHover: true,
   requireAuth: false,
+  notifyPollHoldMs: 25000,
 });
 
-/** Patch accepted by POST /ctl and ctl.set(): knobs plus the write-only trigger. */
-export type CtlPatch = Partial<State> & { wsPush?: boolean };
+/** Patch accepted by POST /ctl and ctl.set(): knobs plus the write-only triggers. */
+export type CtlPatch = Partial<State> & { wsPush?: boolean; push?: "ws" | "sse" | "poll" };
 
 /** What GET/POST /ctl and the `ctl` WS frame carry: knobs + the x-origin URL. */
 export type CtlView = State & { xOrigin: string };
@@ -211,7 +214,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
   const view = (): CtlView => ({ ...state, xOrigin });
 
   // monotonic counters
-  const counters = { poll: 0, heartbeat: 0, save: 0, ws: 0, echo: 0, push: 0, sse: 0 };
+  const counters = { poll: 0, heartbeat: 0, save: 0, ws: 0, echo: 0, push: 0, sse: 0, notif: 0 };
   const holds = new Holds();
 
   // --- client bundle (built once, in memory) ---------------------------------
@@ -224,6 +227,26 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
   const TOPIC = "gauntlet";
   const broadcast = (frame: unknown) => { mainServer.publish(TOPIC, JSON.stringify(frame)); };
   const pushOnce = () => { counters.push++; broadcast({ type: "push", n: counters.push, at: Date.now() }); };
+
+  // --- #23 push-channel notifications: one monotonic n, channel-exclusive delivery
+  type Notif = { n: number; via: "ws" | "sse" | "poll"; text: string };
+  const sseEnc = new TextEncoder();
+  const notifySseClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  const notifyPollWaiters = new Set<(v: Notif | null) => void>();
+  const pushNotif = (via: "ws" | "sse" | "poll") => {
+    counters.notif++;
+    const notif: Notif = { n: counters.notif, via, text: `Result ${counters.notif} via ${via}` };
+    if (via === "ws") {
+      broadcast({ type: "notify", ...notif });
+    } else if (via === "sse") {
+      const chunk = sseEnc.encode(`data: ${JSON.stringify(notif)}
+
+`);
+      for (const c of [...notifySseClients]) { try { c.enqueue(chunk); } catch { notifySseClients.delete(c); } }
+    } else {
+      for (const w of [...notifyPollWaiters]) w(notif); // each waiter removes itself
+    }
+  };
 
   // periodic WS push while ambient is on; re-armed whenever ctl changes
   let pushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -252,6 +275,8 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       broadcast({ type: "ctl", state: view() }); // live pages apply without reload
     }
     if (patch.wsPush === true) pushOnce(); // write-only trigger, never persisted, no ctl frame
+    const via = patch.push;
+    if (via === "ws" || via === "sse" || via === "poll") pushNotif(via); // ditto
   };
   const ctl = {
     get: (): State => ({ ...state }),
@@ -360,6 +385,35 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
     if (path === "/api/child-ping") return json({ pong: true });
     if (path === "/api/grid") return json(GRID);
 
+    if (path === "/api/notify-sse") {
+      // persistent stream, held open until the client goes away or stop(); one event per push trigger
+      let ctrl: ReadableStreamDefaultController<Uint8Array> | null = null;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          ctrl = controller;
+          notifySseClients.add(controller);
+          controller.enqueue(sseEnc.encode(": connected\n\n")); // comment line so EventSource fires `open`
+        },
+        cancel() { if (ctrl) notifySseClients.delete(ctrl); },
+      });
+      return new Response(body, {
+        headers: { "Content-Type": "text/event-stream", Connection: "keep-alive", ...NO_STORE },
+      });
+    }
+    if (path === "/api/notify-poll") {
+      // held until a push:"poll" trigger, or notifyPollHoldMs (read at request time) -> {n:null}
+      const notif = await new Promise<Notif | null>((resolve) => {
+        const done = (v: Notif | null) => { clearTimeout(t); notifyPollWaiters.delete(done); resolve(v); };
+        const t = setTimeout(() => done(null), state.notifyPollHoldMs);
+        notifyPollWaiters.add(done);
+      });
+      return json(notif ?? { n: null });
+    }
+    if (path === "/api/drag-report" && m === "POST") {
+      const body = await readJson(req);
+      return json({ ...(body ?? {}), ok: true });
+    }
+
     if (path === "/api/sse") {
       counters.sse++;
       const stream = counters.sse;
@@ -459,6 +513,9 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
     async stop() {
       if (pushTimer) clearTimeout(pushTimer);
       holds.releaseAll();
+      for (const w of [...notifyPollWaiters]) w(null);
+      for (const c of [...notifySseClients]) { try { c.close(); } catch { /* already closed */ } }
+      notifySseClients.clear();
       await Promise.all([mainServer.stop(true), xServer.stop(true)]);
     },
   };

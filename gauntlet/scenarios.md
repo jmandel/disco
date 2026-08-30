@@ -50,7 +50,9 @@ State and defaults. **All ambient traffic is OFF by default** so timing tests ar
 | `timeoutMs` | 0 | client | idle time before the session-timeout dialog; 0 = off |
 | `rerenderOnHover` | true | client | replace `#rerender` synchronously on mousemove/mouseover |
 | `requireAuth` | false | server | `/` 302s to `/login.html?next=/` without the cookie |
+| `notifyPollHoldMs` | 25000 | server | how long `/api/notify-poll` is held awaiting a `push` trigger |
 | `wsPush` | — | trigger | write-only: `true` pushes one `{type:"push"}` frame immediately; never persisted and does not emit a `ctl` frame |
+| `push` | — | trigger | write-only: `"ws"`/`"sse"`/`"poll"` delivers one notification over exactly that channel (see 23); never persisted, no `ctl` frame |
 
 Effective page state = `GET /ctl` on load → URL query overrides → live `ctl` frames
 (last write wins; a later `ctl` frame replaces query overrides). Query overrides are
@@ -67,8 +69,8 @@ Effective page state = `GET /ctl` on load → URL query overrides → live `ctl`
 | `?timeout=N` | `timeoutMs` | |
 | `?rerender=0` | `rerenderOnHover` | |
 
-Server-side knobs (`saveFails`, `pollHoldMs`, `wsPushMs`, `requireAuth`) have no
-query form — use `/ctl`.
+Server-side knobs (`saveFails`, `pollHoldMs`, `wsPushMs`, `requireAuth`,
+`notifyPollHoldMs`) have no query form — use `/ctl`.
 
 The header of the page shows `#ws-status`, `#ws-count`, `#ambient-status`,
 `#heartbeat-count`, `#poll-count`, `#x-origin`, `#ws-last` (last WS frame JSON)
@@ -127,6 +129,7 @@ integers. Knobs: `ambient`, `heartbeatMs`, `pollHoldMs`, `wsPushMs` / `?ambient=
 `{type:"hello", id, state}` on open (counted, not applied as ctl),
 `{type:"echo", ...clientFields, seq}` for every client frame,
 `{type:"push", n, at}` on `wsPush` trigger and every `wsPushMs` while `ambient`,
+`{type:"notify", n, via:"ws", text}` on a `push:"ws"` trigger (see 23),
 `{type:"ctl", state}` on every knob change. Every button click on the page (including
 dynamically created `#modal-ack`, `#stay`, `#rerender`, `#shadow-btn`) sends
 `{type:"action", id:<button id>, t}` — wiring is per-button and **skips `#noop`**
@@ -265,6 +268,65 @@ Part of 5: `/api/poll` holds for `pollHoldMs` (server reads ctl at request time)
 client reissues immediately on return, so with `ambient` on a poll will begin inside the
 causality window of any action longer than a few ms. **G§4.4**; **REVIEW A3 / C22**.
 
+### 23. Push-channel content delivery (`#s-23`)
+Backend→frontend delivery of a content object over each standing channel, so the daemon can
+prove it observes *content* arriving between actions on every channel type. Trigger:
+`POST /ctl {"push":"ws"|"sse"|"poll"}` — write-only like `wsPush` (never persisted, no `ctl`
+frame). The server builds `{n, via, text:"Result <n> via <via>"}` with one monotonic `n`
+shared across all three channels and delivers it over **exactly** the chosen channel:
+- `"ws"` → frame `{type:"notify", n, via:"ws", text}` on every open `/ws` socket;
+- `"sse"` → one event on `/api/notify-sse`, a **persistent** EventSource the page opens at
+  load (server holds it open indefinitely, sending `: connected` first; separate from 19's
+  on-demand `/api/sse`);
+- `"poll"` → resolves every pending `GET /api/notify-poll`; the page runs a dedicated
+  long-poll loop from load — the server holds the request until a trigger or
+  `notifyPollHoldMs` (default 25000, read at request time; timeout answers `{n:null}`), and
+  the client reissues immediately either way.
+The client renders each notification as an `<li>` in `ul#notif-list` with the text exactly as
+delivered and sets `#notif-count` to the count received. Knob: `notifyPollHoldMs` (server).
+**G§3.4, G§10** — results delivered over the standing channel; between-action observation.
+
+### 24. Context menu (`#s-24`)
+`div#ctx-target` "Right-click me". `contextmenu` → `preventDefault()` → `ul#ctx-menu[role="menu"]`
+appears `position:fixed` at the pointer with `li[role="menuitem"]` items `#ctx-open` "Open",
+`#ctx-rename` "Rename", `#ctx-delete` "Delete". Left-clicking an item → `#ctx-result` =
+"ctx: <item text>" and the menu hides. A `mousedown` anywhere outside the open menu hides it
+(a fresh right-click on the target therefore hides-then-reopens). A plain left click on the
+target must NOT open the menu; it sets `#ctx-result` = "ctx: leftclick".
+**B§1.9, G§2.1** — right-button sequence (move → down(right) → up → `contextmenu`) through the
+action choke point; menu-like UI reachable only via a non-left click.
+
+### 25. Double-click to edit (`#s-25`)
+`div#dbl-target` shows "Editable value"; `#dbl-state` starts "idle". A single click arms a
+**250 ms confirmation timer** before setting "selected" — deliberately, because a dblclick
+necessarily emits `click, click, dblclick`, so an undelayed handler would flash "selected"
+on the way to editing; the timer is how real apps disambiguate, and settlement must ride
+through it. `dblclick` cancels the pending timer, sets `#dbl-state` = "editing" and swaps in
+`input#dbl-input` holding the current value; Enter commits → `#dbl-state` =
+"committed: <value>", the input is removed and the div shows the value. Clicks while editing
+are ignored.
+**B§1.9, G§8** — two full press/release pairs with correct `clickCount`; meaning depends on
+click-count sequencing.
+
+### 26. Mouse drag (`#s-26`)
+Plain mouse events (mousedown → document mousemove → mouseup), NOT HTML5 draggable.
+- **Slider:** `div#slider-track` (300×20) contains `div#slider-thumb` (20×20, starts at 0 —
+  no randomness). Drag the thumb: value = pointer X projected onto the track (thumb center
+  follows the pointer), clamped and rounded to 0–100; `#slider-value` updates live during
+  the drag.
+- **Reorder list:** `ul#sort-list` with `li#sort-a` "Item A", `li#sort-b` "Item B",
+  `li#sort-c` "Item C". mousedown on an item arms the drag (`.dragging` class while held);
+  the dragged item is re-inserted when the **pointer's Y crosses a sibling's midpoint**
+  (deviation from "dragged item's center": the item is reordered in place rather than freely
+  positioned, so its own center is quantized to slots — pointer Y is the deterministic
+  proxy). `#sort-order` shows the ids joined as e.g. "a,b,c" after every change.
+
+On drag END (mouseup) each widget sends exactly one `POST /api/drag-report` —
+`{widget:"slider", value}` or `{widget:"sort", order:"b,a,c"}` — so the wire carries the
+drag's result. A mousedown with no movement still reports on release (deterministic).
+**B§1.9, G§2.1** — held-button move sequences that `Input.dispatchMouseEvent` must express;
+drag outcome visible on screen and wire.
+
 ## Server API summary
 
 | Method | Path | Response |
@@ -285,6 +347,9 @@ causality window of any action longer than a few ms. **G§4.4**; **REVIEW A3 / C
 | GET | `/api/grid` | `{rows:4, cols:8, cells:[{r,c,label}]}` |
 | GET | `/api/meds?q=` | `{q, hits}` (no q → all 30) |
 | GET | `/api/sse` | `text/event-stream`, 5 events at 500 ms, then close |
+| GET | `/api/notify-sse` | persistent `text/event-stream`; `: connected`, then one event per `push:"sse"` trigger |
+| GET | `/api/notify-poll` | held until `push:"poll"` (→ notification) or `notifyPollHoldMs` (→ `{n:null}`) |
+| POST | `/api/drag-report` | echoes body + `ok:true` |
 | POST | `/api/graphql` | `{data, sawMutation, operation}` |
 | POST | `/api/login` | `{ok:true, user}` + `Set-Cookie`, or 401 |
 | WS | `/ws` | hello / echo / push / ctl frames |

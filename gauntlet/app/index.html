@@ -124,6 +124,37 @@
 <section id="s-21"><h2>21. Auth</h2>
   <a id="go-login" href="/login.html">Log in</a> · <a id="go-secure" href="/secure.html">Secure area</a>
 </section>
+<section id="s-23"><h2>23. Push-channel content delivery</h2>
+  <p>Trigger via <code>POST /ctl {"push":"ws"|"sse"|"poll"}</code>; standing channels live from load.</p>
+  notifications: <span id="notif-count">0</span>
+  <ul id="notif-list"></ul>
+</section>
+
+<section id="s-24"><h2>24. Context menu</h2>
+  <div id="ctx-target">Right-click me</div>
+  <ul id="ctx-menu" role="menu" hidden>
+    <li id="ctx-open" role="menuitem">Open</li>
+    <li id="ctx-rename" role="menuitem">Rename</li>
+    <li id="ctx-delete" role="menuitem">Delete</li>
+  </ul>
+  result: <span id="ctx-result"></span>
+</section>
+
+<section id="s-25"><h2>25. Double-click to edit</h2>
+  <div id="dbl-target">Editable value</div>
+  state: <span id="dbl-state">idle</span>
+</section>
+
+<section id="s-26"><h2>26. Mouse drag (slider + reorder)</h2>
+  <div id="slider-track"><div id="slider-thumb"></div></div>
+  value: <span id="slider-value">0</span>
+  <ul id="sort-list">
+    <li id="sort-a">Item A</li>
+    <li id="sort-b">Item B</li>
+    <li id="sort-c">Item C</li>
+  </ul>
+  order: <span id="sort-order">a,b,c</span>
+</section>
 </main>
 
 <script type="module" src="/app.js"></script>

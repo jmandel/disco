@@ -1,7 +1,7 @@
 /**
  * The gauntlet SPA (vanilla DOM). One page, sectioned #s-1 … #s-21; every
- * behavior is documented in ../scenarios.md with the exact ids/text it
- * exposes. Effective state = GET /ctl → URL query overrides → live `ctl`
+ * behavior (sections #s-1 … #s-26) is documented in ../scenarios.md with the
+ * exact ids/text it exposes. Effective state = GET /ctl → URL query overrides → live `ctl`
  * frames over the WebSocket (last write wins).
  */
 import type { CtlView } from "../server.ts";
@@ -34,7 +34,7 @@ const postJson = (url: string, body: unknown, method = "POST") =>
 let state: CtlView = {
   slowMs: 400, modal: false, modalDelayMs: 0, toastMs: 2000, saveFails: false, ambient: false,
   heartbeatMs: 5000, pollHoldMs: 3000, wsPushMs: 7000, timeoutMs: 0, rerenderOnHover: true,
-  requireAuth: false, xOrigin: "",
+  requireAuth: false, notifyPollHoldMs: 25000, xOrigin: "",
 };
 
 /** URL query → state overrides (client-local; never written back to the server). */
@@ -80,6 +80,7 @@ function openWs(): void {
     try {
       const frame = JSON.parse(String(ev.data));
       if (frame && frame.type === "ctl" && frame.state) applyState(frame.state as CtlView);
+      if (frame && frame.type === "notify") renderNotif(frame as Notif); // #23 channel (a)
     } catch { /* non-JSON frame: displayed only */ }
   });
 }
@@ -396,6 +397,152 @@ $("gql-query").addEventListener("click", () => gql("query { patient { name } }")
 $("gql-mutate").addEventListener("click", () => gql('mutation { rename(name: "Renamed") { name } }'));
 
 // ---------------------------------------------------------------------------
+// #23 Push-channel content delivery (ws frames handled in openWs; sse + poll here)
+// ---------------------------------------------------------------------------
+type Notif = { n: number; via: string; text: string };
+let notifCount = 0;
+
+function renderNotif(notif: Notif): void {
+  $("notif-list").appendChild(el("li", notif.text)); // text exactly as delivered
+  setText("notif-count", String(++notifCount));
+}
+
+function startNotifyChannels(): void {
+  // (b) persistent EventSource, held open by the server indefinitely (auto-reconnects if dropped)
+  const es = new EventSource("/api/notify-sse");
+  es.onmessage = (ev) => renderNotif(JSON.parse(String(ev.data)) as Notif);
+  // (c) dedicated long-poll: held until a trigger or notifyPollHoldMs ({n:null}); reissue immediately either way
+  void (async () => {
+    for (;;) {
+      try {
+        const j = await getJson<Notif | { n: null }>("/api/notify-poll");
+        if (j.n !== null) renderNotif(j);
+      } catch {
+        await sleep(1000); // server gone: back off
+      }
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
+// #24 Context menu (right-click only; left click must NOT open it)
+// ---------------------------------------------------------------------------
+{
+  const target = $("ctx-target");
+  const menu = $("ctx-menu");
+  const hide = () => { menu.hidden = true; };
+  target.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    menu.style.left = `${e.clientX}px`;
+    menu.style.top = `${e.clientY}px`;
+    menu.hidden = false;
+  });
+  target.addEventListener("click", () => setText("ctx-result", "ctx: leftclick"));
+  menu.addEventListener("click", (e) => {
+    const li = (e.target as Element).closest('li[role="menuitem"]');
+    if (li) { setText("ctx-result", `ctx: ${li.textContent}`); hide(); }
+  });
+  // any mousedown outside the menu dismisses it (right-click reopens: mousedown hides, contextmenu shows)
+  document.addEventListener("mousedown", (e) => {
+    if (!menu.hidden && !menu.contains(e.target as Node)) hide();
+  }, true);
+}
+
+// ---------------------------------------------------------------------------
+// #25 Double-click to edit. The 250 ms timer confirms a SINGLE click: a dblclick
+// necessarily fires click,click,dblclick, so without the delay the two clicks
+// would register as "selected" before "editing".
+// ---------------------------------------------------------------------------
+{
+  const target = $("dbl-target");
+  let value = "Editable value";
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let editing = false;
+  target.addEventListener("click", () => {
+    if (editing) return;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; setText("dbl-state", "selected"); }, 250);
+  });
+  target.addEventListener("dblclick", () => {
+    if (editing) return;
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+    editing = true;
+    setText("dbl-state", "editing");
+    const input = document.createElement("input");
+    input.id = "dbl-input";
+    input.value = value;
+    target.replaceChildren(input);
+    input.focus();
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      value = input.value;
+      editing = false;
+      setText("dbl-state", `committed: ${value}`);
+      target.textContent = value;
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// #26 Mouse drag: slider (0-100) + reorder list. Plain mouse events, no HTML5
+// draggable. Each drag END posts one /api/drag-report so the wire has the result.
+// ---------------------------------------------------------------------------
+{
+  const track = $("slider-track");
+  const thumb = $("slider-thumb");
+  const THUMB_W = 20;
+  let value = 0;
+  let dragging = false;
+  const setValue = (v: number) => {
+    value = Math.max(0, Math.min(100, Math.round(v)));
+    thumb.style.left = `${(value / 100) * (track.clientWidth - THUMB_W)}px`;
+    setText("slider-value", String(value));
+  };
+  thumb.addEventListener("mousedown", (e) => { e.preventDefault(); dragging = true; });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const r = track.getBoundingClientRect();
+    setValue(((e.clientX - r.left - THUMB_W / 2) / (r.width - THUMB_W)) * 100); // thumb center follows pointer
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    void postJson("/api/drag-report", { widget: "slider", value });
+  });
+  setValue(0); // thumb starts at 0
+}
+{
+  const list = $("sort-list");
+  let dragEl: HTMLElement | null = null;
+  const order = () => Array.from(list.children).map((li) => li.id.replace("sort-", "")).join(",");
+  list.addEventListener("mousedown", (e) => {
+    const li = (e.target as Element).closest("li");
+    if (!li) return;
+    e.preventDefault();
+    dragEl = li as HTMLElement;
+    dragEl.classList.add("dragging");
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragEl) return;
+    // move the dragged item when the pointer's Y crosses a sibling's midpoint
+    for (const sib of Array.from(list.children) as HTMLElement[]) {
+      if (sib === dragEl) continue;
+      const r = sib.getBoundingClientRect();
+      const mid = r.top + r.height / 2;
+      const dr = dragEl.getBoundingClientRect();
+      if (dr.top > r.top && e.clientY < mid) { list.insertBefore(dragEl, sib); setText("sort-order", order()); }
+      else if (dr.top < r.top && e.clientY > mid) { list.insertBefore(dragEl, sib.nextSibling); setText("sort-order", order()); }
+    }
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragEl) return;
+    dragEl.classList.remove("dragging");
+    dragEl = null;
+    void postJson("/api/drag-report", { widget: "sort", order: order() });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 async function boot(): Promise<void> {
@@ -408,6 +555,7 @@ async function boot(): Promise<void> {
   const base = await getJson<CtlView>("/ctl");
   applyState(applyQueryOverrides(base));
   openWs();
+  startNotifyChannels(); // #23 standing channels, live from load
 
   // #16 canvas grid
   mountGrid($<HTMLCanvasElement>("grid"), await getJson<GridData>("/api/grid"));
