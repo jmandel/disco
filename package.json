@@ -1,0 +1,20 @@
+{
+  "name": "disco",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Discovery daemon: observation-first browser instrumentation for agents (see GUIDANCE.md)",
+  "bin": { "disco": "./cli/disco.ts" },
+  "scripts": {
+    "gauntlet": "bun run gauntlet/server.ts",
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:gauntlet": "bun test test/gauntlet",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0",
+    "playwright-core": "^1.50.0"
+  }
+}
