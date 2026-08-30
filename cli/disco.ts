@@ -82,6 +82,7 @@ switch (cmd) {
       if (f("scope")) daemonArgs.push("--scope", f("scope")!);
       if (f("dialogs")) daemonArgs.push("--dialogs", f("dialogs")!);
       const daemonPath = join(import.meta.dir, "..", "src", "daemon.ts");
+      if (f("state") && !has("launch")) console.error("--state only applies with --launch");
       if (has("fg")) {
         const p = Bun.spawn(["bun", daemonPath, ...daemonArgs, "--fg"], { stdout: "inherit", stderr: "inherit", stdin: "ignore" });
         writeFileSync(join(sessionsDir(), ".current"), name);
@@ -96,6 +97,7 @@ switch (cmd) {
       while (!existsSync(sock)) { if (Date.now() - t0 > 15000) die(`daemon did not start; see ${join(dir, "daemon.out")}`); await new Promise((r) => setTimeout(r, 100)); }
       writeFileSync(join(sessionsDir(), ".current"), name);
       const c = await RpcClient.connect(sock);
+      if (f("state") && has("launch")) { await c.call("state.restore", { state: JSON.parse(readFileSync(f("state")!, "utf8")) }); console.error("storage state restored"); }
       const info = await c.call("session.info");
       console.error(`session "${name}" started (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
       for (const t of info.targets) console.error(`  ${t.targetId.slice(0, 8)} ${t.type} ${t.url}`);
@@ -121,6 +123,20 @@ switch (cmd) {
     } else if (sub === "info") {
       out(await withClient((c) => c.call("session.info")));
     } else die("session new|end|ls|info");
+    break;
+  }
+
+  case "state": {
+    const sub = pos[1];
+    if (sub === "save") {
+      const st = await withClient((c) => c.call("state.save"));
+      const dest = f("out") ?? "storage-state.json";
+      writeFileSync(dest, JSON.stringify(st, null, 2));
+      console.error(`saved ${(st.cookies as unknown[]).length} cookie(s), ${st.origins.length} origin(s) → ${dest}`);
+    } else if (sub === "restore") {
+      const file = pos[2] ?? f("file") ?? die("state restore <file>");
+      out(await withClient((c) => c.call("state.restore", { state: JSON.parse(readFileSync(file, "utf8")) })));
+    } else die("state save [--out f] | state restore <f>");
     break;
   }
 

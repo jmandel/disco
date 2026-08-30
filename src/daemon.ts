@@ -1,6 +1,6 @@
 // The daemon (GUIDANCE §3, BRIEF §1.16): owns the CDP connection, attaches scoped targets, installs
 // always-on instrumentation, writes the store, serves the unix-socket RPC, streams events.
-import { appendFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cdp, discoverBrowser, type CdpEvent } from "./cdp.ts";
 import { Store, type SessionManifest } from "./store.ts";
@@ -58,6 +58,7 @@ export class Daemon {
   private extraRpc = new Map<string, (params: any, conn: RpcConn) => Promise<unknown> | unknown>();
   private observerSrc = observerSource(defaults.observerBatchMs);
   connected = false;
+  resumed = false;
 
   static async start(opts: DaemonOptions): Promise<Daemon> {
     const d = new Daemon();
@@ -65,8 +66,12 @@ export class Daemon {
     d.logPath = join(opts.dir, "daemon.log");
     d.streamPath = join(opts.dir, "stream.jsonl");
     if (opts.log) d.extLog = opts.log;
-    const anchor = Date.now();
-    d.manifest = { name: opts.name, dir: opts.dir, anchorEpochMs: anchor, startedWall: new Date(anchor).toISOString(), mode: opts.mode, scope: opts.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? "accept", contract: opts.contract, pid: process.pid, launched: opts.launched };
+    const manifestPath = join(opts.dir, "manifest.json");
+    const prior = existsSync(manifestPath) ? (JSON.parse(readFileSync(manifestPath, "utf8")) as SessionManifest) : null;
+    const anchor = prior?.anchorEpochMs ?? Date.now();
+    d.resumed = !!prior;
+    d.manifest = { name: prior?.name ?? opts.name, dir: opts.dir, anchorEpochMs: anchor, startedWall: prior?.startedWall ?? new Date(anchor).toISOString(), mode: prior?.mode ?? opts.mode, scope: opts.scope ?? prior?.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? prior?.dialogPolicy ?? "accept", contract: opts.contract ?? prior?.contract, pid: process.pid, launched: opts.launched ?? prior?.launched };
+    if (prior) delete d.manifest.endedWall;
     if (opts.scope) { const m = opts.scope.match(/^\/(.+)\/([a-z]*)$/); if (m) d.scopeRe = new RegExp(m[1], m[2]); else d.scopeSub = opts.scope; }
     let wsUrl = opts.wsUrl;
     if (!wsUrl) {
@@ -89,7 +94,7 @@ export class Daemon {
     await d.cdp.send("Browser.setDownloadBehavior", { behavior: "default", eventsEnabled: true }).catch(() => {});
     registerActions(d);
     d.log(`daemon started: session=${opts.name} mode=${opts.mode} scope=${opts.scope ?? "(all)"} ws=${wsUrl}`);
-    d.publish({ kind: "session", t: d.now(), summary: { state: "started", name: opts.name, mode: opts.mode, scope: opts.scope ?? null } });
+    d.publish({ kind: "session", t: d.now(), summary: { state: d.resumed ? "resumed" : "started", name: d.manifest.name, mode: d.manifest.mode, scope: d.manifest.scope ?? null } });
     return d;
   }
 
@@ -368,6 +373,39 @@ export class Daemon {
         return { value: r.value, frame: frame.frameId, target: frame.targetId };
       }
       case "cdp.send": { const t = p.targetId ? this.targets.get(p.targetId) : p.browser ? null : this.primary(); return this.cdp.send(p.method, p.params ?? {}, t?.sessionId); }
+      case "state.save": {
+        const { cookies } = await this.cdp.send<{ cookies: unknown[] }>("Storage.getCookies", {});
+        const origins: Array<{ origin: string; localStorage: Record<string, string> }> = [];
+        const seen = new Set<string>();
+        for (const t of this.targets.values()) {
+          if (!t.scoped || !t.isPage || t.detached) continue;
+          let origin: string; try { origin = new URL(t.url).origin; } catch { continue; }
+          if (seen.has(origin)) continue; seen.add(origin);
+          try {
+            const fr = t.mainFrameId ? this.frames.get(t.mainFrameId) : null;
+            if (!fr) continue;
+            const r = await this.callInFrame(fr, "function(){ const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; }", [], "main");
+            origins.push({ origin, localStorage: (r.value as Record<string, string>) ?? {} });
+          } catch {}
+        }
+        return { cookies, origins, savedAt: new Date().toISOString() };
+      }
+      case "state.restore": {
+        const st = p.state as { cookies?: unknown[]; origins?: Array<{ origin: string; localStorage: Record<string, string> }> };
+        if (st.cookies?.length) await this.cdp.send("Storage.setCookies", { cookies: st.cookies });
+        for (const o of st.origins ?? []) {
+          if (!Object.keys(o.localStorage ?? {}).length) continue;
+          try {
+            const { targetId } = await this.cdp.send<{ targetId: string }>("Target.createTarget", { url: o.origin });
+            await new Promise((r) => setTimeout(r, 600));
+            const t = this.targets.get(targetId);
+            const fr = t?.mainFrameId ? this.frames.get(t.mainFrameId) : null;
+            if (fr) await this.callInFrame(fr, "function(items){ for (const [k, v] of Object.entries(items)) localStorage.setItem(k, v); return true; }", [o.localStorage], "main");
+            await this.cdp.send("Target.closeTarget", { targetId }).catch(() => {});
+          } catch (e) { this.log("state.restore origin failed: " + (e as Error).message); }
+        }
+        return { ok: true };
+      }
       case "families": return [...this.attrib.families.values()].map((f) => ({ family: f.family, count: f.count, ambient: f.ambient, reason: f.ambientReason, writeKind: f.writeKind, evidence: f.evidence }));
       case "family.mark": { if (p.read !== undefined && p.read) this.attrib.markRead(p.family); if (p.ambient !== undefined) this.attrib.markAmbient(p.family, !!p.ambient); return { ok: true }; }
       case "idle": {

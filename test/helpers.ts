@@ -36,12 +36,19 @@ export async function startEnv(opts: { scope?: string; headless?: boolean; name?
     gauntlet, browser, daemon, dir,
     async open(path) {
       const url = path.startsWith("http") ? path : gauntlet.origin + path;
-      const loaded = env.waitFor((ev) => ev.kind === "nav" && ev.summary?.kind === "load", 15000);
       const { targetId } = await daemon.cdp.send("Target.createTarget", { url });
-      await loaded;
-      // Also wait for the observer to be live in the main frame, so tests start from a fully-instrumented page.
-      const t = daemon.targets.get(targetId)!;
-      if (t.mainFrameId && !daemon.frames.get(t.mainFrameId)?.observerReady) await env.waitFor((ev) => ev.kind === "observer" && ev.targetId === targetId, 5000).catch(() => {});
+      // Wait until THIS target is loaded and its observer is live (poll is fine in a test helper).
+      const t0 = Date.now();
+      for (;;) {
+        const t = daemon.targets.get(targetId);
+        const fr = t?.mainFrameId ? daemon.frames.get(t.mainFrameId) : null;
+        if (fr?.observerReady) {
+          const ready = await daemon.callInFrame(fr, "function(){ return document.readyState; }", [], "main").catch(() => null);
+          if (ready?.value === "complete") break;
+        }
+        if (Date.now() - t0 > 20000) throw new Error(`open(${path}): target not ready in 20s`);
+        await sleep(100);
+      }
       return targetId;
     },
     async evalIn(targetId, expression) {
