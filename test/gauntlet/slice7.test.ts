@@ -67,6 +67,18 @@ describe("slice 7: selector engine everywhere", () => {
     expect(Number(after)).toBe(Number(before) + 1);
   }, 10000);
 
+  test("re-navigating a tab does not strand child frames (DECISIONS #31)", async () => {
+    // resolve inside the same-origin iframe
+    const r1 = await sel.resolve(env.daemon.resolveFrame("iframe.html"), "#if-submit");
+    expect("objectId" in r1).toBe(true);
+    // navigate the SAME top tab again (full reload) — rebuilds the frame tree; the old iframe frame must
+    // be pruned so it can't shadow the new one and break createIsolatedWorld.
+    await A({ kind: "navigate", url: env.gauntlet.origin + "/" });
+    await sleep(1200);
+    const r2 = await sel.resolve(env.daemon.resolveFrame("iframe.html"), "#if-submit");
+    expect("objectId" in r2).toBe(true);
+  }, 20000);
+
   test("chained selector with >> works", async () => {
     const f = env.daemon.resolveFrame(undefined, tab);
     const r = await sel.resolve(f, '#s-8 >> role=button');

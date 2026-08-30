@@ -34,7 +34,7 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - MCP / agent-tool exposure of the pack function libraries.
 - Deepen OpenEMR: encounter/notes flow, the save-flow ledger item; probe the interstitial hypothesis (a patient with no due reminders — ledger #1).
 - PHI/retention posture when a non-demo target is used (until then: demo/BAA-covered only).
-- OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant; gauntlet regression test for the re-navigation frame-prune fix.
+- OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant.
 
 ## How to run
 - `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)
