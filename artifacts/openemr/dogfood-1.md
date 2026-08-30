@@ -2,7 +2,7 @@
 
 **Target:** https://demo.openemr.io/a/openemr (real hosted OpenEMR, not the gauntlet).
 **Session:** `openemr` (attach mode, headless Chromium :9333, scope `demo.openemr.io`), physician/physician.
-**Date:** 2026-08-30. Evidence: `sessions/openemr/store.sqlite` (act:1–6, ~470 events, 162 requests). Screens in this dir.
+**Date:** 2026-08-30. Evidence: `sessions/openemr/store.sqlite` (act:1–6, ~470 events, 162 requests). Screens in `screenshots/`.
 
 This is the first time the daemon met an app it wasn't built against. It worked — a physician login, patient finder, and full chart-open were driven by `act()` with correct verdicts, and the wire carried the clinical facts. Findings below feed `defaults.ts` tuning and the roadmap.
 

@@ -19,7 +19,7 @@
 - Stage (b): a SECOND cold agent, given only artifacts/ + README, executed "open a record and extract row names via the wire" FIRST TRY under both modal states with zero fixes (records 2 and 3; interstitial acknowledged then absent; 10,000 rows via the 496KB /api/rows body, task-attributed).
 
 ## Dogfood #1 — DONE (OpenEMR 8.3.0 demo, 2026-08-30)
-- Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; artifacts/dogfood/openemr.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
+- Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; artifacts/openemr/dogfood-1.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
 
 ## Next
 - Dogfood #2: full OpenEMR nav-and-quirks doc + tested subtask scripts (open-patient, extract-problem-list-from-wire); probe the interstitial hypothesis (a patient with no due reminders).
