@@ -1,5 +1,9 @@
 # STATE.md — loop memory (cold-start readable)
 
+**Plan of record: `PLATFORM.md`** (the two-layer platform + the agreed plan). This file is the cold-start
+*status*. Read order for a fresh agent: `PLATFORM.md` → this → `DECISIONS.md` → `GUIDANCE.md`.
+Milestone tag: **`v0.1.0-platform-base`**.
+
 ## Done
 - Docs v0.2 (GUIDANCE/BRIEF revised per REVIEW.md; DECISIONS #1–23).
 - Milestone 0: gauntlet complete, behaviors 1–26 (incl. push-channels, context menu, dblclick, drag) — `bun test test/gauntlet/gauntlet-server.test.ts` 15/15.
@@ -11,8 +15,10 @@
 - Slice 4: sentinels (post-settlement modal w/ shot, toast frame timing, session-expiry, new-target + instrumented child, between-action 5xx) + RPC stream — 7/7.
 - Slice 2: act()/settlement/report/watch/awaitSettlement, vendored Playwright selectors, input dispatch (click/right/dbl/middle/hover/type/press/scroll/select/navigate/drag), OOPIF coordinate translation, self-feedback suppression, scroll-absorb, ambient DOM roots, unread-body demotion — `bun test test/gauntlet/slice2.test.ts` 14/14; unit tests (settle, attribute) green.
 
-## In progress
-- Nothing open — v1 done, Slice 8 passed, dogfood #1 complete.
+## In progress — platform build-out (PLATFORM.md plan)
+- Slice 1 ✅ ways-of-knowing palette named in `artifacts/README.md` (descriptive, not a schema).
+- Slice 2a ✅ function-library pattern on the gauntlet: `lib/wire.ts` + `lib/nav.ts` (generic reusable moves), `artifacts/gauntlet/lib.ts` (reference per-product library), `test/gauntlet/lib.test.ts`. Suite 87/87.
+- Slice 2b ← NEXT: OpenEMR function library (`artifacts/openemr/lib.ts`: login / findPatient / openPatient / extractProblemList, anchor-oriented, wire-first) + a live drift check (`artifacts/openemr/check.ts`, NOT `*.test.ts` so `bun test` never hits the net), against demo.openemr.io (physician).
 
 ## Slice 8 — PASSED (2026-08-30)
 - Stage (a): a fresh Fable agent ran a full discovery session against the gauntlet-as-unknown-app (51 acts): artifacts/gauntlet/ holds nav-and-quirks.md, ledger.md (interstitial n=5/5 with hypothesis + experiments), friction.md, and 3 tested defensive scripts. Commit 35ad2f6.
@@ -21,9 +27,12 @@
 ## Dogfood #1 — DONE (OpenEMR 8.3.0 demo, 2026-08-30)
 - Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; artifacts/openemr/dogfood-1.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
 
-## Next
-- Dogfood #2: full OpenEMR nav-and-quirks doc + tested subtask scripts (open-patient, extract-problem-list-from-wire); probe the interstitial hypothesis (a patient with no due reminders).
-- OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic (OpenEMR renders read panels via POST); settle-time distributions across more patients; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant.
+## Next (after 2b)
+- Slice 3: usage & philosophy docs — how to use the library to instrument/explore/discover/characterize/automate, with examples; grows alongside the libraries.
+- Slice 4: per-product live test loops (drift detection).
+- Later: MCP/agent-tool exposure of the libraries; a 3rd, non-EHR instance to force the reusable layer to generalize; PHI/retention posture when a non-demo target needs it.
+- Also for OpenEMR: probe the interstitial hypothesis (a patient with no due reminders — ledger #1).
+- OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions across more patients; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant.
 
 ## How to run
 - `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)
@@ -32,9 +41,11 @@
 - Manual attach: `chromium --remote-debugging-port=9222 --user-data-dir=~/hobby/.agent-scratch/disco/profile` then `bun cli/disco.ts session new s1 --attach 9222 --scope localhost:4800`
 - Re-vendor selector engine: `bun run scripts/vendor-injected.ts`
 
-## Gotchas discovered (see DECISIONS #16–29)
+## Gotchas discovered (see DECISIONS #16–30)
 - Budget = time since last attributed network evidence (suspended while in flight, maxBudgetMs cap).
-- Ambient DOM roots + visual ignore mask + ambient families all need idle observation — `disco idle` / session-new default.
+- Ambient DOM roots + visual ignore mask + ambient families all need idle observation — `disco idle` / session-new default; EHR heartbeats are ~60s so warm up ≥2 min.
 - Unread fetch bodies never emit loadingFinished → "unread" demotion after 1.2s grace.
 - scrollIntoView repaints the whole viewport → absorbed before the causality window opens.
 - Small-target self-repaint (pressed/focus) suppressed from the visual channel.
+- Verdict labels are best-effort: ambient content rendering in the settle tail can retag network→dom without changing timing (DECISIONS #30) — assert timing+attribution, not the label, in non-interference tests.
+- Function libraries live in the pack (`artifacts/<target>/lib.ts`), generic moves in `lib/`; live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline.
