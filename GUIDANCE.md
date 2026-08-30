@@ -1,6 +1,6 @@
 # Discovery-First UI Reverse Engineering: Guidance Document
 
-**Status:** v0.1 draft — first step toward a skill + supporting service ("the daemon")
+**Status:** v0.2 — v0.1 draft revised per `REVIEW.md` (2026-08-30): screencast-as-signal (§3.4, §4.2), attribution tiers restated (§4.4), ambient-classifier warm-up (§4.4, §7.2), attach-mode target scoping (§3.2), instrumentation order and isolated worlds (§3.4), FTS content model and `notes` table (§6.2), in-page `evaluateAfter` replacing in-daemon `extract` (§2.5, §4.1), streaming-body gap (§3.4, §10). Each change is logged in `DECISIONS.md`.
 **Audience:** frontier agents (Claude Code, Codex CLI, etc.) conducting discovery sessions; engineers building the Bun/TypeScript CDP service they drive
 **Scope:** the *discovery* phase — learning how a web application (initially: EHR-class SPAs) is laid out, how to act on it reliably, where it varies, and how to observe it richly — upstream of any durable automation.
 
@@ -42,11 +42,11 @@ The DOM shows what the app chose to render; the network shows what the backend a
 
 If a popup appeared on 3 of 3 record-opens, the honest claim is "appeared in all observed cases (n=3), likely conditional on record state, condition unknown." Discovery maintains a **variability ledger** (§7.5): for each step of each flow, what varied, what's suspected to vary, and what evidence exists. The prior for enterprise SPAs — and EHRs especially — is that *every* interstitial is conditional: warnings keyed to record state, first-run tips, role-dependent panels, timing-dependent toasts. The agent should reason about the branch it hasn't seen, and the automation it eventually writes should be defensive against optional steps by construction (§9).
 
-### 2.5 Context economy: digest first, drill by handle, extract in-daemon
+### 2.5 Context economy: digest first, drill by handle, reduce in the same script
 
-The daemon never pushes bulk data at the agent. Reports are compact digests with **handles** (stable IDs into the session store) for every underlying artifact: screenshots, full response bodies, DOM snapshots, WS frames. The agent drills down only when needed — and when it knows exactly what it wants, it can pass its **own extraction function** (a real TypeScript function executed in the daemon against the captured data or live page) so the answer comes back already reduced, in the same round trip, with no second tool call. Full HARs, full DOMs, and full-page screenshots enter agent context only by explicit request.
+The daemon never pushes bulk data at the agent. Reports are compact digests with **handles** (stable IDs into the session store) for every underlying artifact: screenshots, full response bodies, DOM snapshots, WS frames. The agent drills down only when needed — and because bodies are persisted *before* the report returns, the same Bun script that issued the action can open the store and reduce the payload immediately (`const rows = JSON.parse(store.body(report.wire[0].body))`), so the reduced answer lands in one agent turn with no second tool call. When the agent needs the *live page* at the instant of settlement (before further mutation), it passes an in-page function as `evaluateAfter`, executed in the target frame and returned with the report. Full HARs, full DOMs, and full-page screenshots enter agent context only by explicit request.
 
-The corollary (developed in §3.1 and §6): reduction happens in the agent's *native* languages — TS functions and SQL against the store — never through a constrained query DSL. Context economy is about moving computation to the data, and that only works if the computation language is unrestricted.
+The corollary (developed in §3.1 and §6): reduction happens in the agent's *native* languages — TS functions and SQL against the store — never through a constrained query DSL. Context economy is about moving computation to the data, and that only works if the computation language is unrestricted. (v0.1 proposed shipping reduction functions into the daemon; v0.2 drops that — the unit of context cost is the agent turn, not the process round trip, and one turn already runs one full Bun script against the store. See `DECISIONS.md`.)
 
 ### 2.6 Read-only is a discipline, not a mechanism (yet)
 
@@ -66,7 +66,7 @@ A long-lived **Bun/TypeScript daemon** owns the browser connection and all state
 
 - a **TypeScript library** (`import { session } from "…"`) — the primary face. Scripts run as short-lived Bun processes that connect to the daemon, so page/session state survives between agent turns. Anywhere the API accepts a filter, predicate, extractor, or reducer, it accepts a **real TS function**, shipped to and executed in the daemon (or in-page, where appropriate) — not a string in a query mini-language.
 - **direct substrate access** — the SQLite store is openable read-only by the agent itself (`bun:sqlite`, `sqlite3` CLI) with a documented, stable schema; arbitrary in-page JS via `session.evaluate(frame, fn)` is first-class, not an escape hatch; and a raw CDP passthrough (`session.cdp.send(...)`) exists for anything the library hasn't wrapped yet.
-- a **CLI** (`disco act click --sel '…'`, `disco tail`, `disco sql "…"`) for one-liners, tailing streams, and quick queries — generated from the same RPC surface, and including `disco sql` and `disco eval` so even the CLI bottoms out in SQL and TS rather than bespoke flags.
+- a **CLI** (`disco act click 'role=button[name="Open Chart"]'`, `disco tail`, `disco sql "…"`) for one-liners, tailing streams, and quick queries — generated from the same RPC surface, and including `disco sql` and `disco eval` so even the CLI bottoms out in SQL and TS rather than bespoke flags. Selectors are written in Playwright's selector language everywhere (library, CLI, docs) — one syntax, the one LLMs already know.
 
 The principle: **investigation is never mediated through a weaker DSL than the agent's native languages.** Frontier agents are fluent in TypeScript and SQL; a boutique `--grep`/`--jsonpath` flag language is strictly less expressive, costs round trips (query, read, refine, query again) where one function would do, and has to be learned besides. Convenience flags may exist for the common 80%, but every one of them must be definable as sugar over SQL-on-the-schema or a TS one-liner, and the docs should show the desugaring so agents graduate naturally to the full-power form when the canned form falls short.
 
@@ -81,6 +81,8 @@ Both are first-class from day one, sharing one code path (CDP endpoint discovery
 
 Multi-target handling matters more than it seems: EHRs open child windows, print dialogs, and iframes with separate CDP targets. The daemon auto-attaches to every target (`Target.setAutoAttach`, flattened), instruments each identically, and reports include which target the activity occurred on.
 
+**Scope of attachment.** In attach mode the browser is a human's — it has their mail, chat and bank open in other tabs. A session therefore declares a **target scope** at creation (a URL pattern, or an explicitly picked tab); the daemon instruments only page targets matching the scope plus their descendants (iframes, popups, child windows opened *from* a scoped page), ignores everything else, and records the scope in the manifest. Recording an unscoped desktop browser is never the default.
+
 ### 3.3 CDP core, Playwright as an ergonomic guest
 
 Build the instrumentation and settlement layer **directly on CDP** — this is the whole point of the system, and Playwright's abstractions actively obscure what we need (its auto-waiting is precisely the blind-wait behavior we're eliminating; it doesn't expose WebSocket frames, `Network.requestWillBeSent` initiators, or screencast frames on its terms). The domains we live in: `Target`, `Page`, `DOM`, `DOMSnapshot`, `Runtime`, `Network`, `Fetch` (only if interception is ever needed), `Input`, `Log`, `Overlay` (debug highlighting), `Page.startScreencast`.
@@ -94,7 +96,13 @@ What we do *not* take: Playwright's waiting model, its tracing (ours must be que
 
 ### 3.4 Always-on instrumentation
 
-From the moment a target is attached, before any action is taken, the daemon records: all requests/responses with bodies (`Network.getResponseBody` fetched eagerly, subject to a size cap with truncation markers), WebSocket lifecycle + frames both directions, console messages and uncaught exceptions, JS dialogs (`alert`/`confirm`/`beforeunload` — auto-handled per a session policy, always recorded), navigation and frame lifecycle events, downloads, and a low-rate screencast or interval screenshot stream (~2–4 fps equivalent, JPEG, deduplicated when pixels are static) so that *between-action* changes — toasts, async refreshes, session-timeout warnings — are captured even when no action is in flight. Everything is timestamped on one monotonic clock and written to the store as it happens.
+From the moment a target is attached, before any action is taken, the daemon records: all requests/responses with bodies (`Network.getResponseBody` fetched eagerly, subject to a size cap with truncation markers), WebSocket lifecycle + frames both directions, console messages and uncaught exceptions, JS dialogs (`alert`/`confirm`/`beforeunload` — auto-handled per a session policy, always recorded; an unanswered dialog blocks the renderer, so handling is mandatory, not optional), navigation and frame lifecycle events, downloads, and a screencast so that *between-action* changes — toasts, async refreshes, session-timeout warnings — are captured even when no action is in flight. Everything is timestamped on one monotonic clock and written to the store as it happens.
+
+"Before any action" is literal: targets are attached with `waitForDebuggerOnStart`, the domains are enabled and the per-frame observer script is installed (in an **isolated world**, so page code and CSP can neither see nor clobber it) *before* the target is allowed to run, then resumed. A target that ran even one script before we were listening has an unobserved prefix, and the store should say so.
+
+**Screencast is a signal, not a throttle.** `Page.startScreencast` is push-on-paint: Chromium emits a frame when the compositor produces one and nothing when pixels are static. So the daemon runs it at native rate (JPEG, modest quality, capped width), acknowledges every frame, and uses *the absence of changed frames* as the visual-quiescence signal (§4.2); hash-dedup and a storage-rate cap (~3 fps equivalent) apply only to what is persisted. Screencast stops when a tab is not visible — in attach mode the human switching tabs blinds the visual channel, and the report says so. Where screencast proves too costly on a human's desktop browser the sanctioned fallback is on-event + interval `Page.captureScreenshot`, as a mode switch.
+
+Two capture limits are structural and are recorded rather than hidden: response bodies are only retrievable after `loadingFinished` and while Chromium still buffers them (the daemon raises the buffer sizes; an evicted body is stored as `evicted`, never silently absent), and **streaming responses (SSE, long chunked transfers) never finish**, so their bodies are not captured in v1 — such requests are flagged `streaming` in the store and the report, and interception via the `Fetch` domain is the reserved path if a target app turns out to deliver results that way (§10).
 
 ---
 
@@ -105,11 +113,11 @@ From the moment a target is attached, before any action is taken, the daemon rec
 ```
 report = await session.act(
   { kind: "click", target: role("button", { name: "Open Chart" }), frame: "main" },
-  { settle: { budgetMs: 3000 }, extract?: (ctx) => …, expect?: … }
+  { settle: { budgetMs: 3000 }, evaluateAfter?: (el, ctx) => …, expect?: … }
 )
 ```
 
-Internally: (1) resolve the target *now* — if resolution fails, return immediately with the fuzzy-match diagnosis (§2.2), never wait for an element to exist as a side effect of acting on it; (2) snapshot pre-state (screenshot, URL, cheap DOM digest, scroll positions, focused element, open-dialog census); (3) mark a **causality window** and dispatch the input; (4) run settlement detection (§4.2); (5) snapshot post-state; (6) compute deltas; (7) run the agent's `extract` function if provided; (8) persist everything; (9) return the digest.
+Internally: (1) resolve the target *now* — if resolution fails, return immediately with the fuzzy-match diagnosis (§2.2), never wait for an element to exist as a side effect of acting on it; (2) snapshot pre-state (screenshot, URL, cheap DOM digest, scroll positions, focused element, open-dialog census); (3) mark a **causality window** and dispatch the input; (4) run settlement detection (§4.2); (5) snapshot post-state; (6) compute deltas; (7) run the agent's `evaluateAfter` function in-page if provided; (8) persist everything; (9) return the digest. Input is dispatched on the top-level page target with coordinates translated through the frame chain (cross-origin iframes are separate targets; their elements are resolved in their own target but clicked via the root), after scrolling into view and hit-testing that the point actually lands on the element — occlusion is reported, never clicked through.
 
 ### 4.2 Settlement: a race of quiescence signals under a hard budget
 
@@ -117,10 +125,10 @@ Internally: (1) resolve the target *now* — if resolution fails, return immedia
 
 - **Network quiescence (scoped):** no in-flight requests *attributed to this action* (§4.4) for ≥ Q ms (Q ≈ 300). Crucially scoped — heartbeats, analytics beacons, and long-lived polls are classified out (recognized within the first minutes of a session by their periodicity and independence from actions) so they never hold settlement open.
 - **DOM quiescence:** no mutations (via a pre-installed `MutationObserver` per frame, batched) for ≥ Q ms — with an escape hatch that ignores identified "always animating" subtrees (clocks, spinners, blink cursors) after they're fingerprinted.
-- **Visual quiescence:** consecutive screencast frames differ by < ε pixels outside ignored regions.
+- **Visual quiescence:** no *changed* screencast frame (hash differs from the previous, outside fingerprinted ignore-regions) for ≥ Q ms — possible only because screencast is push-on-paint at native rate (§3.4); a throttled 3 fps stream could not resolve a 300ms window. This is the sole signal for canvas-rendered regions, where DOM and network are silent.
 - **Discrete completion events:** navigation committed + load/`networkidle`-ish, dialog opened, download started, target created — any of these can settle immediately with a definitive verdict.
 
-Tiers: if *nothing at all* has happened (no mutation, no attributed request, no pixel delta) within ~400–600ms, settle early with verdict **`no-effect`** — this is the fast "nothing happened" path. Otherwise run the quiescence race, hard-capped at the budget (default ~3s, agent-extendable per action for known-slow operations; the EHR reality of 1–10s server latency is handled by the network detector keeping settlement open *while attributed requests are genuinely in flight*, then closing ~Q ms after the last one lands — so a 7s server round trip yields a report at ~7.3s, and a 200ms one at ~0.5s, with no per-case tuning). On budget expiry, settle with verdict **`still-active`** and include *what is still moving* (pending request URLs, mutating subtree, spinner region) so the agent can choose to `awaitSettlement(more)` or proceed. The report always states *which* signal settled it and the timeline of signals — this is itself discovery data ("Open Chart settles on network, ~4s, 12 requests").
+Tiers: if *nothing at all* has happened (no mutation, no attributed request, no changed frame) within ~400–600ms, settle early with verdict **`no-effect`** — this is the fast "nothing happened" path. Otherwise run the quiescence race, hard-capped at the budget (default ~3s, agent-extendable per action for known-slow operations; the EHR reality of 1–10s server latency is handled by the network detector keeping settlement open *while attributed requests are genuinely in flight*, then closing ~Q ms after the last one lands — so a 7s server round trip yields a report at ~7.3s, and a 200ms one at ~0.5s, with no per-case tuning). On budget expiry, settle with verdict **`still-active`** and include *what is still moving* (pending request URLs, mutating subtree, spinner region) so the agent can choose to `awaitSettlement(more)` or proceed. The report always states *which* signal settled it and the timeline of signals — this is itself discovery data ("Open Chart settles on network, ~4s, 12 requests").
 
 Feasibility of the ~500ms notification target: the binding constraint is the quiescence window Q, not our plumbing — you cannot declare "network quiet for 300ms" until 300ms after the last event. So the realistic floor is *outcome + Q (~300ms) + transport (~tens of ms)*, comfortably inside 500ms of the true finish, and discrete completion events (navigation, dialog) report faster still. Where the agent needs to react *mid-settlement*, the streaming interface (§5.4) exposes events as they occur rather than waiting for the report.
 
@@ -130,17 +138,19 @@ Digest-sized (target: a few hundred tokens), everything else by handle:
 
 - verdict (`no-effect` / `settled:<signal>` / `still-active` / `navigated` / `dialog` / `new-target` / `download`) + settlement timeline
 - **UI delta:** appeared/disappeared/changed summary at the semantic level (roles, names, headings, dialog titles, row counts), not raw node diffs; bounding boxes of changed screen regions; post screenshot handle (+ diff-highlighted variant handle)
-- **wire delta:** attributed requests as `method path → status, size, content-type, bodyHandle`, grouped; note of any *non-attributed* activity in the window (so surprises are visible); WS frames summarized
+- **wire delta:** attributed requests as `method path → status, size, content-type, bodyHandle`, grouped; note of any *non-attributed* activity in the window (so surprises are visible); WS frames summarized. The digest is bounded: requests are ranked by interestingness (non-2xx, write-flagged, largest, non-attributed first) and cut at a fixed count with `+k more` and the cursor, so a 40-request page load still yields a readable report.
 - console errors/warnings during the window
-- environment flags: URL change, focus change, new/closed targets, dialog text, **write-flag** (non-GET to non-telemetry endpoint, §2.6)
-- `extract` result, if a function was supplied
+- environment flags: URL change, focus change, new/closed targets, dialog text, sentinel firings since the last report, **write-flag** (a non-GET to a request family not known to be read-only; families are classified once — GraphQL bodies are peeked for `mutation`, and recon may mark RPC-over-POST families as reads — so the flag stays meaningful instead of firing on every query, §2.6)
+- `evaluateAfter` result, if a function was supplied
 - store cursor (event-sequence range covering this action) for later queries
 
 An optional `expect` clause (a cheap predicate over the report) doesn't change waiting behavior — it just lets the agent mark reports as surprising, which feeds the variability ledger.
 
 ### 4.4 Causal attribution of network activity
 
-Attribute a request to an action when any of: its `initiator` chain (script stack) descends from the input event's task; it started within the causality window (action dispatch → settlement) and is not classified as ambient (heartbeat/poll/analytics/prefetch, learned per-session); or it's a redirect/dependency of an attributed request. Attribution is recorded with a confidence tag (`stack` > `window` > `heuristic`) rather than pretended to be exact. The ambient-traffic classifier is important and cheap: within the first minute of instrumentation, periodic traffic identifies itself; everything about scoped network quiescence and clean reports depends on filtering it.
+Attribute a request to an action when any of: it was initiated by script **within the input event's task** (synchronously, or in the microtask checkpoint that follows — detected in-page by a one-shot capture-phase listener armed at dispatch, not by CDP initiator stacks, which are synchronous-only and blind to the async schedulers every modern framework uses); it started within the causality window (action dispatch → settlement) and is not classified as ambient (heartbeat/poll/analytics/prefetch, learned per-session); or it's a redirect/dependency of an attributed request. Attribution is recorded with a confidence tag (`task` > `window` > `dependency`; `ambient` when a classified-ambient family fired inside the window, so the exclusion is visible and reversible) rather than pretended to be exact. **Window + ambient is the workhorse; `task` is corroboration.**
+
+The ambient-traffic classifier is important and cheap, but it needs evidence: a family (method + host + path shape) is ambient when it recurs at regular cadence, or chains back-to-back like a long-poll, with occurrences outside any causality window. It has *nothing* at the first action of a session, so sessions begin with a short idle observation (§7.2) and early reports carry a `classifier: immature` flag. The nasty case is a long-poll that returns and immediately reissues *inside* a window: without a learned family it would hold settlement to the budget. Everything about scoped network quiescence and clean reports depends on filtering it.
 
 ---
 
@@ -148,7 +158,7 @@ Attribute a request to an action when any of: its `initiator` chain (script stac
 
 ### 5.1 `awaitSettlement(opts)`
 
-Re-arm settlement detection without an action — for "I know a refresh is coming" moments, or to extend a `still-active` verdict. Same report shape.
+Re-arm settlement detection without an action — for "I know a refresh is coming" moments, or to extend a `still-active` verdict. Same report shape. An action's causality window does not close at budget expiry — it closes at eventual settlement — so extending a `still-active` verdict keeps attributing to the same `act:<n>` rather than settling `no-effect` on an empty window.
 
 ### 5.2 `watch(predicate, opts)` — evidence-driven waits
 
@@ -175,7 +185,8 @@ Append-only, local, two layers: a **SQLite event index** (one row per event: mon
 The store is designed to be queried directly, not through a mediating layer:
 
 - **The SQLite schema is documented and queried directly — no compatibility machinery.** The agent opens the DB read-only (`bun:sqlite` in scripts, `sqlite3`/`disco sql` from the shell) and writes arbitrary SQL — joins, aggregates, window functions, whatever the investigation needs. Schema design choices serve queryability: normalized-enough tables for requests/frames/mutations/actions/sentinel-firings, generated columns for hot filters (URL host+path, method, status, action-id, attribution confidence), JSON1 for the summary blobs, and **FTS5 full-text indexes over textual response bodies and WS frames** so "did this MRN ever appear" is a native `MATCH`, fast even on large sessions. Live queries during a session are safe via WAL mode. No versioning layer, no views-as-API, no migration story: this is greenfield tooling for frontier agents, which read the actual schema (`.schema`, or a checked-in `schema.sql`) at the start of a session and adapt — when the schema improves, it just changes, and any saved script that breaks gets fixed by the agent in seconds. **Simple and powerful beats over-engineered** is a standing design rule for the whole system: prefer the direct thing (a real table, a real function, a real file) over an abstraction protecting a stability nobody needs.
-- **Blobs join in through TS.** Body content lives in the blob directory keyed by hash; the library exposes `store.body(handle)`, `store.frames(range)`, etc., so a typical investigation is a small Bun script: SQL to find the rows, TS to open the blobs and reduce them (`JSON.parse`, walk, extract) — full language, one process, one round trip.
+- **Text lives in SQLite; bytes live in blobs.** Every body and frame is written to the content-addressed blob directory keyed by hash, and textual bodies (JSON, HTML, text, XML — under a size cap) are *also* stored in a `bodies` table so FTS5 can index them and one-line SQL can read them; large or binary payloads are blob-only. The library exposes `store.body(handle)`, `store.frames(range)`, etc., so a typical investigation is a small Bun script: SQL to find the rows, TS to open the blobs and reduce them (`JSON.parse`, walk, extract) — full language, one process, one round trip.
+- **Interpretations live next to evidence.** A `notes` table (kind: `state` / `transition` / `ledger` / `note`, optional action id, free text or JSON) is the only thing the agent writes into the store — via `disco note` or `session.note()`. It exists so the variability ledger and state map are *queries* joined to `act:<n>` and cursors, not a markdown file that drifts from the evidence, and so `timeline()` interleaves what happened with what the agent concluded.
 - **Canned helpers are documented as desugarings.** A handful of the highest-frequency questions get named helpers — `requests({urlLike, method, actionId})`, `appearances(textOrRegex)` (bodies + WS + DOM snapshots; screenshots via OCR later), `timeline(t0, t1)`, `screenshotAt(t)`, `action(id)`, `diffTrace(a, b)` (structural comparison of two runs of "the same" step — the substrate for variability analysis and eventual N-record sampling). Each helper's doc shows the SQL/TS it expands to. They're on-ramps and token-savers for the common case, not the interface; the moment a question doesn't fit a helper, the agent drops to SQL+TS without ceremony, and helper source doubles as schema-by-example.
 
 All query output follows the digest+handles convention by default; the agent controls verbosity fully since it's writing the reduction itself.
@@ -196,7 +207,7 @@ Spend the first minutes characterizing the terrain, because everything after is 
 
 - **Target/frame census:** how many frames and windows, which contain the app vs chrome vs ads/legacy islands; EHRs frequently nest the working UI several iframes deep, sometimes cross-origin.
 - **Framework and rendering fingerprint:** React/Angular/GWT/jQuery-era/custom; presence of shadow DOM; presence of canvas-rendered regions (flowsheets and schedule grids are canvas in several EHRs — these need screenshot/coordinate techniques and are worth flagging *early* because DOM-based selection is blind there).
-- **Ambient traffic profile:** identify heartbeats, polls, token refresh, analytics (feeds the classifier in §4.4); note session-keepalive behavior and idle-timeout policy — discovery sessions are long, and knowing the timeout (and how the warning presents) prevents mysterious mid-session death.
+- **Ambient traffic profile:** let the page sit untouched for the first ~30–60 seconds (`disco session new` does this by default; `disco settle --idle` re-runs it), then read the classifier's families (`ambient_families` table): heartbeats, polls, token refresh, analytics. This is not just documentation — the classifier in §4.4 has no evidence until this happens, and acting before it does yields noisy settlement. Note session-keepalive behavior and idle-timeout policy — discovery sessions are long, and knowing the timeout (and how the warning presents) prevents mysterious mid-session death.
 - **Selector viability sampling:** poke a few interactive elements; do they carry stable ids/`data-*`/test hooks, or generated class soup? Do accessible roles/names exist? This decides the selector strategy for the whole session and belongs in the artifacts (automation should know *why* text-anchored selectors were chosen).
 - **API shape skim:** eyeball a handful of response bodies; REST vs RPC vs GraphQL, entity id patterns, whether the wire is readable enough to be a primary information source (§2.3).
 
@@ -206,7 +217,7 @@ Model the app as **named states** (recognizable by cheap predicates: URL pattern
 
 ### 7.4 Walk flows with experiments, not sleepwalking
 
-Per step: predict (what should this click do?), act via `act()`, compare report to prediction, record surprises. Prefer reading facts off attributed API responses over scraping pixels when both exist, and note in the docs which facts are wire-available. When a step's report shows `still-active` or an unexplained request, that's a thread to pull, not noise to skip. Keep per-step notes *as you go* in the working doc — the session store remembers everything, but the agent's interpretations are the part only it can produce, and context windows end.
+Per step: predict (what should this click do?), act via `act()`, compare report to prediction, record surprises. Prefer reading facts off attributed API responses over scraping pixels when both exist, and note in the docs which facts are wire-available. When a step's report shows `still-active` or an unexplained request, that's a thread to pull, not noise to skip. Keep per-step notes *as you go* — `disco note --action act:12 "…"` puts them in the store beside the evidence (§6.2) — because the session store remembers everything, but the agent's interpretations are the part only it can produce, and context windows end.
 
 ### 7.5 Maintain the variability ledger
 
@@ -224,7 +235,7 @@ Typical set: (a) a **navigation-and-quirks document** — states, transitions, s
 
 ## 8. Failure-mode catalog
 
-What discovery should expect, detect, and document. Generic to enterprise SPAs; the EHR examples justify their base-layer weight (§ per your scoping: assumptions earn their place by materially improving results).
+What discovery should expect, detect, and document. Generic to enterprise SPAs; the EHR examples justify their base-layer weight because they materially improve results on the target class of apps.
 
 - **Conditional interstitials:** state-dependent popups on record open (allergy warnings, break-the-glass, care gaps), first-run tips, "what's new" modals. Sentinel-detected; ledger-recorded; automation must treat all as optional.
 - **Toasts and transient banners:** carry real information (save confirmations, *async failure* notices) and vanish in seconds; only the screencast/sentinel reliably catches them.
@@ -262,15 +273,15 @@ Discovery's outputs should make the following the *path of least resistance* for
 
 **Deliberately out of v1:** mechanical read-only enforcement (stance + write-flags only); orchestrated N-record sampling (store supports it; agent can do it by hand); capture-time redaction (environmental posture instead); screenshot OCR in `appearances`; request interception/mocking (`Fetch` domain reserved for later); any agent-loop infrastructure.
 
-**To resolve during build, with real EHR traffic:** default Q and budget values (tune against measured settle-time distributions, not taste); how aggressive the ambient classifier can be before it misclassifies real long-polls that *do* carry action results (some EHRs deliver results over the standing WS/poll channel — attribution may need a content-based fallback); whether screencast at 2–4 fps is cheap enough attached to a human's desktop Chromium or needs to drop to on-event screenshots; how much of Playwright's `InjectedScript` can be vendored cleanly under Bun vs falling back to `connectOverCDP` parallel attachment; and the report-digest token budget (start ~300 tokens, adjust by feel in supervised sessions).
+**To resolve during build, with real EHR traffic:** default Q and budget values (tune against measured settle-time distributions, not taste); how aggressive the ambient classifier can be before it misclassifies real long-polls that *do* carry action results (some EHRs deliver results over the standing WS/poll/SSE channel — attribution may need a content-based fallback, and SSE bodies are uncaptured in v1, §3.4); whether native-rate screencast is cheap enough attached to a human's desktop Chromium or needs to drop to on-event screenshots; and the report-digest token budget (start ~300 tokens, adjust by feel in supervised sessions). *Resolved at build start:* Playwright's `InjectedScript` vendors cleanly (it is a plain string inside `playwright-core`'s bundle; extraction is a 30-line script), so the selector engine is Playwright's from the first slice and `connectOverCDP` is not needed.
 
 ---
 
 ## Appendix A: A discovery turn, end to end (illustrative)
 
-1. Agent: `disco act click --role button --name "Open Chart" --budget 6000` (recon showed chart-open is slow).
+1. Agent: `disco act click 'role=button[name="Open Chart"]' --budget 6000` (recon showed chart-open is slow).
 2. Daemon: resolves target in main frame (34ms), snapshots pre-state, dispatches click, opens causality window.
-3. 180ms: three XHRs attributed by initiator stack; DOM mutating; screencast shows spinner region (fingerprinted, ignored for visual quiescence).
+3. 180ms: three XHRs attributed (`task`: fired inside the click's task); DOM mutating; screencast shows spinner region (fingerprinted, ignored for visual quiescence).
 4. 4.1s: last attributed response lands (a 900KB patient-summary JSON — body stored, hash-deduped); 4.4s: network quiet ≥300ms, DOM quiet, pixels quiet → settled on network.
 5. 4.45s: sentinel fired at 4.2s: dialog role appeared, title "Allergy Review Required" — flagged in report, screenshot handle attached.
 6. Report (~250 tokens): `settled:network 4.4s`, UI delta (dialog "Allergy Review Required" over chart view; header now shows patient name/DOB), wire delta (3 requests, incl. `GET /api/patient/{id}/summary → 200, 900KB, bodyHandle b41f`), write-flag: none, cursor `ev:1042-1131`.

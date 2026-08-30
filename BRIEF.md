@@ -1,6 +1,6 @@
 # Build Brief: Discovery Daemon & Framework
 
-**Status:** v0.1 — companion to `ui-discovery-guidance.md` (read that first; it is the constitution, this is the construction plan)
+**Status:** v0.2 — companion to `GUIDANCE.md` (read that first; it is the constitution, this is the construction plan). Revised 2026-08-30 per `REVIEW.md`: settled decisions §1.4/1.5/1.7/1.8/1.9/1.10/1.13 restated, §1.15–1.19 added, gauntlet behaviors 16–22 added with ambient traffic off by default, slices re-sequenced (selector engine vendored in Slice 2; Slice 7 becomes frame/shadow acceptance). Every change has a `DECISIONS.md` entry.
 **Audience:** the frontier agent (Claude Code / Codex CLI / similar) executing the build in a local loop, and the human supervising it
 **Prime directive:** build the smallest system that fully honors the guidance doc, prove every timing and observation claim with executable tests, and log every divergence from the guidance rather than silently drifting.
 
@@ -19,17 +19,22 @@ These are pre-decided so the loop doesn't burn time or drift on them. Each is th
 1. **Runtime & repo:** Bun + TypeScript, one repo, workspaces only if genuinely needed (start without). `bun test` for everything. No build step beyond what Bun does natively. Strict TS, but don't fight the checker with ceremony — `unknown` + narrowing over elaborate generics.
 2. **CDP client:** speak raw CDP over WebSocket with a thin hand-rolled client (connect, send with id, await response, dispatch events, session routing for flattened `Target.setAutoAttach`). No `chrome-remote-interface`, no Puppeteer, no Playwright in the daemon core. Type the messages you actually use (generate or hand-write a minimal `protocol.ts`); do not import the full protocol types package unless it's zero-friction.
 3. **Daemon ⇄ client transport:** Unix domain socket at a well-known path per session (e.g. `$SESSION_DIR/daemon.sock`), newline-delimited JSON-RPC 2.0, hand-rolled framing (~50 lines). Streams (tail) are a subscription over the same socket. No HTTP server, no gRPC, no message broker.
-4. **Agent-supplied functions:** shipped as **source strings**, evaluated in the daemon via dynamic import of a temp module (preferred, gets TS via Bun) or `new Function` for tiny lambdas. In-page functions go through `Runtime.evaluate`/`callFunctionOn` as stringified functions. Everything is trusted local code: **no sandboxing, no capability layer, no serialization cleverness.** Document loudly in the library README that closures don't transfer — functions must be self-contained, receiving `(ctx)` with everything they need.
-5. **Store:** one SQLite DB per session (WAL mode) + content-addressed blob dir (`blobs/ab/cdef…`, SHA-256, first-2-hex sharding). Schema lives in a checked-in `schema.sql`, applied at session create, and **evolves freely as hand-driving experience demands** (see §6.4 — constraints and aesthetics are fixed, the blueprint is not); FTS5 external-content tables for textual bodies and WS frames, populated at capture time. Writers: the daemon only. Readers: anyone, directly. No ORM, no query builder — string SQL with a tiny typed helper at most.
+4. **Agent-supplied functions run in-page only.** The only functions shipped over the socket are *in-page* functions (`session.evaluate(fn)`, `act(..., {evaluateAfter: fn})`, `watch(fn)`), sent as stringified source and run via `Runtime.callFunctionOn` in the target frame's isolated world (or main world on request). There is **no daemon-side function execution**: reduction over captured data happens in the agent's own Bun process against the store (GUIDANCE §2.5). Everything is trusted local code: **no sandboxing, no capability layer, no serialization cleverness.** Document loudly in the library README that closures don't transfer — in-page functions must be self-contained, receiving `(element, arg)`.
+5. **Store:** one SQLite DB per session (WAL mode) + content-addressed blob dir (`blobs/ab/cdef…`, SHA-256, first-2-hex sharding). Schema lives in a checked-in `schema.sql`, applied at session create, and **evolves freely as hand-driving experience demands** (see §6.4 — constraints and aesthetics are fixed, the blueprint is not). **Content model:** every body/frame is a blob; textual bodies (text/JSON/HTML/XML under `bodyTextCap`) are *also* stored in a `bodies(hash, text)` table, and FTS5 external-content tables index `bodies.text` and `ws_frames.payload` at capture time. Writers: the daemon only. Readers: anyone, directly. No ORM, no query builder — string SQL with a tiny typed helper at most.
 6. **Direct store access is a feature, not a backdoor:** agent scripts open the SQLite DB in-process with `bun:sqlite` for pure store queries (no daemon round trip); the daemon is only required for live-page interaction and for blob-writing.
-7. **Screencast:** `Page.startScreencast` (JPEG, quality ≈ 50, capped dimensions ≈ 1280 wide), ack every frame, hash-dedup before persisting. If it proves heavy in attach mode against a human's desktop browser, the sanctioned fallback is on-event + interval screenshots (`Page.captureScreenshot` on mutation/sentinel/interval) — implement the fallback as a mode switch, not an abstraction layer.
-8. **Selector engine:** Phase 1 (through slice 5): CSS selectors + a small text/role resolver built on `DOMSnapshot`/accessibility tree — enough for the gauntlet and early dogfooding. Phase 2 (slice 7): attempt to vendor Playwright's `injected` script source for full `getByRole`/`getByText`/piercing semantics; if vendoring under Bun is not clean within a bounded effort (~a day of loop time), fall back to `playwright-core` `connectOverCDP` in parallel *for element resolution only* (resolve → backend node id → our CDP input dispatch), and log the choice. Do not hand-reimplement Playwright's semantics.
-9. **Input dispatch:** CDP `Input.dispatchMouseEvent`/`dispatchKeyEvent` with correct event sequences (move → down → up for click; proper `text`/`key`/`code` for typing). Crib sequencing details from Playwright's source where needed. Always scroll the target into view and verify hit-test point lands on it (or an acceptable descendant) before dispatching; report occlusion instead of clicking through it.
-10. **Clocks:** one monotonic clock (daemon `performance.now()` mapped to an epoch anchor recorded in the manifest). Every stored event carries `t_mono` and derived wall time. CDP timestamps are mapped into this clock at ingest.
+7. **Screencast is the visual signal:** `Page.startScreencast` (JPEG, quality ≈ 50, max width ≈ 1280) at native push-on-paint rate, ack every frame, hash every frame; "last changed frame" feeds visual quiescence (GUIDANCE §4.2) while persistence is hash-deduped and rate-capped (≈3 fps). Top-level page targets only (never OOPIF/worker targets). If it proves heavy in attach mode against a human's desktop browser, the sanctioned fallback is on-event + interval screenshots (`Page.captureScreenshot` on mutation/sentinel/interval) — implement the fallback as a mode switch, not an abstraction layer.
+8. **Selector engine:** Playwright's `InjectedScript`, vendored from `playwright-core`'s bundle by `scripts/vendor-injected.ts` into `src/vendor/injected-script.ts`, instantiated per frame in the daemon's isolated world. Agent-facing selector language is Playwright's from Slice 2 (`css=`, `text=`, `role=`, `xpath=`, `internal:label=…`, `>>` chaining, shadow-piercing). Also used for `ariaSnapshot` (semantic UI deltas), `expectHitTarget` (occlusion), `generateSelector` (diagnoses). No phase-1 resolver; no `connectOverCDP`. Pin the version; re-vendor deliberately.
+9. **Input dispatch:** CDP `Input.dispatchMouseEvent`/`dispatchKeyEvent` **on the top-level page session** with correct event sequences (move → down → up for click; proper `text`/`key`/`code` for typing). Elements in cross-origin iframes are resolved in their own target and their coordinates translated through the frame chain to root-viewport space before dispatch. Always scroll the target into view and verify hit-test point lands on it (or an acceptable descendant) before dispatching; report occlusion instead of clicking through it. Enable `Emulation.setFocusEmulationEnabled` on every page target so unfocused windows behave.
+10. **Clocks:** one monotonic clock: daemon `performance.now()` mapped to an epoch anchor recorded in the manifest. Every stored event carries `t` (ms, session-monotonic) and derived wall time. CDP `MonotonicTime` values (seconds, browser `TimeTicks` origin) are mapped by an offset estimated from paired (`timestamp`, `wallTime`) on `Network.requestWillBeSent`, re-estimated on reconnect; epoch timestamps (screencast metadata) map directly.
 11. **IDs:** actions get `act:<n>` (per-session counter), events get a monotonic `seq`, blobs are their hash. Handles in reports are these IDs verbatim. No UUIDs anywhere they aren't needed.
 12. **Session layout:** `sessions/<name>/` containing `manifest.json`, `store.sqlite`, `blobs/`, `daemon.sock`, `daemon.log`, `stream.jsonl` (the tail, also persisted). The CLI's `disco session new|attach|end` manages lifecycle.
-13. **Ambient classifier v1:** periodicity + independence heuristics only — a request family (same method+host+path-shape) seen ≥3 times with regular cadence and occurrences outside any causality window is ambient; classification is recorded per-family with evidence and is *reversible* (attribution stores its confidence tag, and reports note when ambient-classified traffic occurred inside a window). Content-based fallback for "results delivered over the standing channel" is an open question for dogfooding, not v1 code.
-14. **Defaults:** quiescence window Q = 300ms; no-effect tier = 500ms; default settlement budget = 3000ms; screencast target ≈ 3 fps equivalent post-dedup; report digest budget ≈ 300 tokens. All defaults live in one `defaults.ts` with a comment pointing at the tuning task in §5 — tune from gauntlet + dogfood measurements, not taste.
+13. **Ambient classifier v1:** periodicity + independence heuristics only, running from Slice 1 so it has history by the time settlement needs it — a request family (same method+host+path-shape) is ambient when seen ≥3 times with regular cadence (coefficient of variation of the gaps < 0.3) **or** chained back-to-back like a long-poll (next start within 250ms of previous end, ≥3 links), with at least one occurrence outside any causality window; classification is recorded per-family with evidence and is *reversible* (attribution stores its confidence tag, and reports note when ambient-classified traffic occurred inside a window). Reports carry `classifier: immature` until the session has observed ≥ `classifierWarmupMs` of idle time. Content-based fallback for "results delivered over the standing channel" is an open question for dogfooding, not v1 code.
+14. **Defaults:** quiescence window Q = 300ms; no-effect tier = 500ms; default settlement budget = 3000ms; screencast persistence cap ≈ 3 fps; report digest budget ≈ 300 tokens with a top-8 request cut; idle observation at session start = 20s (skippable). All defaults live in one `defaults.ts` with a comment pointing at the tuning task in §5 — tune from gauntlet + dogfood measurements, not taste.
+15. **Target scope (attach mode):** `disco session new --attach <port> --scope <url-substring|regex>` (or `--pick` to choose a tab from a list). Only page targets whose URL matches the scope, plus targets they open (popups, child windows, OOPIFs), are instrumented; the rest are ignored and never appear in the store. Launch mode scopes to the launched browser. The scope is written to `manifest.json`.
+16. **Instrumentation order:** `Target.setAutoAttach({flatten:true, waitForDebuggerOnStart:true})` at browser and page level → for each new target: `Network.enable` (raised buffer sizes), `Page.enable`, `Runtime.enable`, `Log.enable`, `Page.addScriptToEvaluateOnNewDocument({worldName:'disco'})` installing the observer, `Runtime.addBinding({name:'__disco', executionContextName:'disco'})`, focus emulation, screencast (page targets only) → `Runtime.runIfWaitingForDebugger`. Targets attached late (already running when the session began) get an `observed_from` timestamp in the `targets` table.
+17. **`notes` table:** the one agent-written table (`disco note`, `session.note()`), kinds `state|transition|ledger|note`, optional `action_id`, free text or JSON. Ledger and state map are queries over it.
+18. **Report truncation:** requests in the digest are ranked (non-2xx → write-flagged → non-attributed-in-window → by size desc) and cut at `digestMaxRequests`, followed by `+k more` and the cursor; UI delta lines cut at `digestMaxUiLines`.
+19. **Write-flag per family:** a request family is `read`, `write`, or `unknown`; GET/HEAD/OPTIONS are `read`; non-GET families default to `write` except `/graphql`-style bodies without `mutation` (peeked at capture) and families the agent marks read via `disco family mark-read`. The report's write-flag fires only for `write`/`unknown` families.
 
 ## 2. Repository shape
 
@@ -40,26 +45,32 @@ disco/
   BRIEF.md                   — this document
   STATE.md                   — loop memory: done / next / how-to-run (§6.1)
   DECISIONS.md               — divergence & decision log (§6.2)
+  REVIEW.md                  — the v0.1 review that produced v0.2
   schema.sql                 — the store schema; source of truth, freely evolving (§6.4)
   defaults.ts
+  scripts/vendor-injected.ts — extracts Playwright's InjectedScript into src/vendor/
   src/
+    vendor/injected-script.ts — GENERATED: Playwright selector engine + ariaSnapshot
     cdp.ts                   — CDP client (connect, sessions, typed send)
     daemon.ts                — lifecycle, RPC server, target auto-attach
-    instrument/              — network, ws, console, dialogs, screencast, mutations
-    settle.ts                — settlement race
-    attribute.ts             — causality windows + ambient classifier
+    instrument/              — network, ws, console, dialogs, screencast, observer (in-page)
+    settle.ts                — settlement race (pure; fake-clock testable)
+    attribute.ts             — causality windows + ambient classifier (pure)
     act.ts                   — resolve → snapshot → dispatch → settle → report
     sentinels.ts
     report.ts                — digest construction
     store.ts                 — writers (daemon-side) + `store.*` readers (client-side)
-    selectors.ts             — phase-1 resolver; phase-2 vendored engine
+    selectors.ts             — injected-script bridge: resolve, ariaSnapshot, hit-test
+    input.ts                 — mouse/keyboard dispatch, key layout, frame→root coords
     client.ts                — the agent-facing library (`session.*`)
+    rpc.ts                   — NDJSON JSON-RPC framing over the unix socket
   cli/
-    disco.ts                 — thin command surface incl. `sql`, `eval`, `tail`
+    disco.ts                 — thin command surface incl. `sql`, `eval`, `tail`, `note`
   gauntlet/
     app/                     — the nasty test SPA (§3)
     server.ts
     scenarios.md             — what each control knob does
+  demos/                     — human-followable scripts per slice
   test/
     unit/                    — settle logic, attribution, store, framing (fake clocks)
     gauntlet/                — end-to-end acceptance suites per slice (§4)
@@ -88,22 +99,31 @@ Required behaviors (each with the guidance claim it exercises):
 13. **No-op button** — does nothing at all → fast `no-effect` verdict (G§4.2).
 14. **Write endpoints** — a `POST /api/save` and a `DELETE` → write-flag surfacing in reports (G§2.6).
 15. **New-window opener** — opens a child window with its own page → target auto-attach (G§3.2).
+16. **Canvas grid** — an 8×4 grid drawn on `<canvas>`; clicking a cell redraws it with no DOM mutation and no request → pixel-only settlement and coordinate-based input (G§4.2, §7.2).
+17. **Keyboard-only combobox** — a medication search whose options ignore mouse events and select only via ArrowDown + Enter → the "working input recipe" failure mode (G§8).
+18. **Shadow DOM** — an open shadow root with a button and counter inside → shadow-piercing selectors (G§3.3).
+19. **SSE stream** — an `EventSource` endpoint sending 5 events then closing → the streaming-body capture gap is *observed* and flagged, not assumed away (G§3.4).
+20. **GraphQL over POST** — a query and a mutation to the same endpoint → per-family write-flag with body peek (§1.19).
+21. **Cookie login** — `/login.html` + `/secure.html` → storage-state save/restore in Slice 6.
+22. **Long-poll reissue** — the poll from #5 must be able to begin *inside* an action's causality window → the classifier's chained-poll heuristic (§1.13).
 
-Acceptance for milestone 0: gauntlet runs with `bun gauntlet`, every behavior manually verifiable in a browser, `scenarios.md` documents each knob. The gauntlet is also the demo sandbox for every subsequent slice.
+**Ambient traffic (#5, #22, spontaneous WS pushes in #6) is OFF by default** and enabled per test via `/ctl`, so Slice 2's timing suite is deterministic and Slice 3 turns it on deliberately.
+
+Acceptance for milestone 0: gauntlet runs with `bun gauntlet`, every behavior manually verifiable in a browser, `scenarios.md` documents each knob, `test/gauntlet/gauntlet-server.test.ts` covers the endpoints. The gauntlet is also the demo sandbox for every subsequent slice.
 
 ## 4. Vertical slices
 
 Each slice = implementation + acceptance tests (in `test/gauntlet/`) + a demo script or README section showing a human how to see it work + a `STATE.md` update. Timing assertions use generous-but-real bounds and should run against the local gauntlet where timing is controllable; mark them so they can be loosened on slow CI later, but they run locally by default.
 
 ### Slice 1 — Attach + store + always-on instrumentation
-Daemon connects to a running Chromium (`--remote-debugging-port`), auto-attaches all targets/frames, and records to the store: requests/responses with eagerly-fetched bodies (size-capped with truncation markers), WS lifecycle + frames, console, dialogs (recorded; policy handling can stub to "auto-dismiss + record" for now), navigation/frame events, downloads, screencast frames (deduped). `disco session new/end`, `disco tail`, `disco sql`. FTS populated at capture.
+Daemon connects to a running Chromium (`--remote-debugging-port`) with a target scope (§1.15), auto-attaches scoped targets/frames in the §1.16 order, and records to the store: requests/responses with eagerly-fetched bodies (size-capped with truncation markers; `evicted`/`streaming` flags), WS lifecycle + frames, console, dialogs (auto-handled per a stub policy, always recorded), navigation/frame events, downloads, screencast frames (hashed every frame, persisted deduped), in-page observer batches (mutations, dialog/toast candidates — raw material for Slice 4). Ambient family tracking starts here. `disco session new/end/ls`, `disco tail`, `disco sql`, `disco note`, `disco targets`. FTS populated at capture. The acceptance test launches its own headless Chromium as the thing to attach to (launch *mode* — profile management, storage state — is still Slice 6).
 
-*Acceptance:* drive the gauntlet **by hand** in the browser while the daemon watches; then, with the daemon stopped, answer via `sqlite3` alone: every request the page made with status+size; the full body of the virtualized-list response; "did the string `Zebra-Row-9741` ever appear anywhere" (FTS hit in a body, even though it was never rendered); the screenshot nearest the moment the toast was visible; every WS frame in order. A spontaneous WS push and the heartbeat both appear with correct timestamps. **This slice is independently useful: from here on, real hand-driven discovery sessions are already possible (G§7 note).**
+*Acceptance:* drive the gauntlet **by hand** in the browser while the daemon watches (demo), and in the automated suite drive it via raw CDP `Runtime.evaluate` clicks; then, with the daemon stopped, answer via `sqlite3` alone: every request the page made with status+size; the full body of the virtualized-list response; "did the string `Zebra-Row-9741` ever appear anywhere" (FTS hit in a body, even though it was never rendered); the screenshot nearest the moment the toast was visible; every WS frame in order. A spontaneous WS push and the heartbeat both appear with correct timestamps. An unscoped tab's requests are *absent*. **This slice is independently useful: from here on, real hand-driven discovery sessions are already possible (G§7 note).**
 
 *Demo:* `demos/01-hand-drive.md` — a 5-minute script a human follows.
 
 ### Slice 2 — `act()` + settlement
-Phase-1 selectors, input dispatch, pre/post snapshots, the settlement race (network-scoped stub: window-based attribution only for now), UI delta digest, report construction, `awaitSettlement`, `watch()` with diagnosis-on-expiry.
+Vendored Playwright selectors (§1.8), input dispatch incl. frame-chain coordinate translation (§1.9), pre/post snapshots (ariaSnapshot-based), the settlement race (window-based attribution only for now; ambient traffic off in these tests), UI delta digest, report construction with truncation (§1.18), `awaitSettlement` (window stays open, G§5.1), `watch()` with diagnosis-on-expiry.
 
 *Acceptance (the timing suite — the point of the whole system):*
 - No-op button → verdict `no-effect`, report delivered < 800ms wall (target 600; assert 800 for slop).
@@ -112,32 +132,34 @@ Phase-1 selectors, input dispatch, pre/post snapshots, the settlement race (netw
 - Re-render race button → click lands (re-resolve-once path), report notes the detachment.
 - Debounced input: `type()` settlement includes the trailing XHR.
 - Occluded target → occlusion reported, no blind click-through.
+- Canvas cell click → settles on the visual signal (frame changed, then quiet); no DOM/network in the report.
+- Cross-origin iframe button → resolved in the OOPIF target, clicked via translated root coordinates, the iframe's POST attributed.
 - `watch()` for a selector that never comes, budget 1500ms → diagnosis, and elapsed < 1700ms.
 
 ### Slice 3 — Attribution + ambient classifier
-Initiator-stack attribution, causality windows, redirect/dependency chaining, confidence tags; periodicity-based ambient classification with evidence records; settlement's network detector now uses attributed-only scoping.
+Task-tier attribution (in-page one-shot listener, G§4.4), causality windows, redirect/dependency chaining, confidence tags; periodicity + chained-poll ambient classification with evidence records and the `immature` flag; settlement's network detector now uses attributed-only scoping; per-family write-flag (§1.19).
 
-*Acceptance:* heartbeat + long-poll never hold settlement open (chart load at `ms=4000` still settles at ~4.3s with heartbeats firing throughout); the 3 chart requests attribute with `stack` or `window` confidence; a spontaneous WS push during an unrelated action shows up as *non-attributed activity in the window*; ambient families are queryable in the store with their evidence.
+*Acceptance:* with ambient traffic ON and warmed up, heartbeat + long-poll never hold settlement open (chart load at `ms=4000` still settles at ~4.3s with heartbeats firing throughout, **including a long-poll that returns and reissues inside the window**); the 3 chart requests attribute with `task` or `window` confidence; a spontaneous WS push during an unrelated action shows up as *non-attributed activity in the window*; ambient families are queryable in the store with their evidence; a GraphQL query does not raise the write-flag, the mutation does.
 
 ### Slice 4 — Sentinels + stream
 Dialog/modal, toast, error, session-expiry, new-target sentinels; firings persisted, surfaced in next report's environment flags, and streamed; `disco tail` shows digested live events.
 
 *Acceptance:* conditional modal fires the dialog sentinel with a screenshot handle *even when it appears 2s after settlement*; toast sentinel captures a frame while the toast is visible (assert the blob's timestamp falls in the toast's lifetime); ctl-armed timeout modal fires session-expiry; child window fires new-target and is instrumented (a request made in the child is in the store); an exception + a 500 fire the error sentinel.
 
-### Slice 5 — Client library + CLI + in-daemon extraction
-`session.*` surface finalized: `act`, `awaitSettlement`, `watch`, `evaluate`, `cdp.send`, `store.*` readers, sentinel subscription; `extract` functions as source strings executed against `(ctx)` with the report's data + live page access; canned helpers (`requests`, `appearances`, `timeline`, `screenshotAt`, `action`, `diffTrace`) each documented with their SQL/TS desugaring; CLI generated over the same RPC incl. `disco eval`.
+### Slice 5 — Client library + CLI + same-script reduction
+`session.*` surface finalized: `act`, `awaitSettlement`, `watch`, `evaluate`, `cdp.send`, `note`, `store.*` readers, sentinel/event subscription; `evaluateAfter` in-page functions; canned helpers (`requests`, `appearances`, `timeline`, `screenshotAt`, `action`, `diffTrace`, `body`, `frames`) each documented with their SQL/TS desugaring; CLI generated over the same RPC incl. `disco eval`.
 
-*Acceptance:* a single `act()` with an `extract` returns the virtualized list's full 10k names reduced to a count + first/last, in one round trip; `diffTrace` of record-open with and without `?modal=1` reports the dialog + its requests as the structural difference; every helper's doc example runs verbatim; a script that *only* queries (no live page) runs with the daemon down.
+*Acceptance:* one Bun script does `act()` on "Load Rows" and, in the same process, reads the response body from the store and prints the 10k names reduced to a count + first/last — one agent turn, no second tool call; `diffTrace` of record-open with and without `?modal=1` reports the dialog + its requests as the structural difference; every helper's doc example runs verbatim; a script that *only* queries (no live page) runs with the daemon down.
 
 ### Slice 6 — Launch mode + hardening
 Managed Chromium launch (headed + headless), storage-state save/restore, reconnect-on-daemon-restart against a still-running browser, dialog *policy* (per-session config for confirm/beforeunload), graceful multi-gigabyte-session behavior (blob dedup verified, DB size sane).
 
 *Acceptance:* full slice-2/3/4 suites pass identically in launched-headless mode; kill and restart the daemon mid-session against the same browser and continue acting; a saved storage state restores an authenticated gauntlet variant.
 
-### Slice 7 — Real selector engine
-Per settled decision §1.8: vendor Playwright's injected script or fall back to `connectOverCDP` resolution. Either way the agent-facing selector language is Playwright's (`role=`, `text=`, `getByLabel`, frame-scoped, shadow-piercing).
+### Slice 7 — Selector engine acceptance across frames and shadow roots
+The engine is already vendored (Slice 2); this slice proves it everywhere the gauntlet is hostile, and adds frame-scoped targeting sugar (`{frame: 'iframe#cross-origin'}` or `frame=` prefixes).
 
-*Acceptance:* role/text/label selectors resolve in main frame, nested iframe, and cross-origin iframe on the gauntlet; shadow-DOM element (add one to the gauntlet) resolves; phase-1 CSS path still works.
+*Acceptance:* role/text/label selectors resolve in main frame, nested same-origin iframe, and cross-origin iframe on the gauntlet; the shadow-DOM button resolves and its in-shadow counter is read via `evaluate`; the keyboard-only combobox is driven to a selection with `press` (ArrowDown, Enter) and the recipe is recorded in the report; CSS selectors still work.
 
 ### Slice 8 — Methodology dry run (exit criterion for the build)
 Not code: run a **full discovery session against the gauntlet as if it were an unknown EHR**, following the guidance doc's methodology (§7) end to end — contract, recon, state map, flow walks, variability ledger (the conditional modal must end up there with n and a hypothesis), artifacts (nav-and-quirks doc + at least three tested subtask scripts + ledger). The human reviews the artifacts, not the code.

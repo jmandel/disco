@@ -1,0 +1,27 @@
+# DECISIONS.md — divergence & decision log (append-only)
+
+Format: date · decision · alternatives · why · **diverges from** GUIDANCE/BRIEF (section) or none. `OPEN` tags open questions, reviewed at slice boundaries.
+
+## 2026-08-30 — v0.1 → v0.2 revision (pre-build, per REVIEW.md; human-approved)
+
+1. **Adopt REVIEW.md into the docs before building.** Alt: build to v0.1 and log divergences. Why: the review found feasibility gaps (screencast rate vs Q, attribution mechanism, FTS content model, attach-mode scoping) that would have forced divergences in Slice 1–2 anyway; cheaper to fix the constitution first. Human chose this option. Diverges: supersedes v0.1 text throughout; each item below.
+2. **Screencast at native rate is the visual signal; 3 fps is a persistence cap.** Alt: throttled screencast + pixel diff; `captureScreenshot` polling. Why: REVIEW A2 — a 3 fps stream cannot resolve a 300 ms quiet window, and canvas regions have no other signal. Diverges: GUIDANCE §3.4/§4.2, BRIEF §1.7 (rewritten).
+3. **Attribution tiers are `task` > `window` > `dependency`, with `ambient` as an explicit tag.** `task` is detected in-page (one-shot capture-phase listener at dispatch marks the event's task + microtask checkpoint), not via CDP initiator stacks. Alt: `Debugger.setAsyncCallStackDepth`. Why: REVIEW A1 — sync initiator stacks are blind to framework schedulers; async stacks cost renderer perf and still lose across `MessageChannel`. Diverges: GUIDANCE §4.4 (rewritten).
+4. **Gauntlet ambient traffic is OFF by default; classifier warm-up is explicit.** Why: REVIEW A3 — a long-poll reissuing inside a window holds settlement to budget until its family is learned; Slice 2's timing suite must be deterministic (BRIEF §6.5). Diverges: BRIEF §3, §1.13, §1.14 (rewritten).
+5. **Attach mode requires a target scope.** Why: REVIEW A7 — privacy; a human's browser has other tabs. Diverges: GUIDANCE §3.2, BRIEF §1.15 (added).
+6. **Instrumentation order fixed (`waitForDebuggerOnStart`, isolated world `disco`).** Why: REVIEW A6. Diverges: GUIDANCE §3.4, BRIEF §1.16 (added).
+7. **FTS content model: textual bodies also stored in SQLite (`bodies.text`), blobs for everything.** Alt: contentless FTS over blob-only bodies. Why: REVIEW A9 — "external-content FTS" needs the text in a table; keeping it there also makes `appearances()` and one-line SQL trivial; storage duplication for text bodies is accepted. Diverges: BRIEF §1.5, GUIDANCE §6.2 (rewritten).
+8. **Drop daemon-side `extract`; add in-page `evaluateAfter`.** Alt: keep temp-module dynamic import. Why: REVIEW B — the unit of context cost is the agent turn; one turn is one Bun script that can already read the store after `act()`. Deletes the closure-transfer footgun. Diverges: GUIDANCE §2.5/§4.1/§4.3, BRIEF §1.4, Slice 5 (rewritten).
+9. **Vendor Playwright's InjectedScript from day one (Slice 2); no phase-1 resolver; no `connectOverCDP`.** Why: verified `playwright-core@1.62.1`'s bundle carries the source as a plain string; extraction is `scripts/vendor-injected.ts` (30 lines). Human approved skipping the throwaway resolver. Diverges: BRIEF §1.8, Slice 2, Slice 7 (rewritten).
+10. **`notes` table (agent-written), per-family write-flag with GraphQL peek, report truncation policy.** Why: REVIEW D1–D3. Diverges: GUIDANCE §4.3/§6.2/§7.4, BRIEF §1.17–1.19 (added).
+11. **Gauntlet behaviors 16–22 added** (canvas, keyboard-only combobox, shadow DOM, SSE, GraphQL, cookie login, in-window long-poll reissue). Why: REVIEW C — untested claims otherwise. Diverges: BRIEF §3 (extended).
+12. **Streaming (SSE/chunked) bodies are not captured in v1; flagged `streaming`.** Alt: `Fetch` domain interception. Why: REVIEW A4 — `getResponseBody` needs `loadingFinished`. Recorded, not hidden. Diverges: GUIDANCE §3.4/§10 (stated). `OPEN`: revisit if a dogfood EHR delivers results over SSE.
+13. **Launch mode remains Slice 6 although GUIDANCE §3.2 says "both first-class from day one".** Why: sequencing only; the code path is shared (endpoint discovery differs). Slice 1's test harness launches a headless Chromium to attach to, so the launch mechanics exist early in test helpers and are productized in Slice 6. Diverges: GUIDANCE §3.2 timing; pre-logged per BRIEF §0.
+14. **Human gates: run all slices autonomously; present Slice-1 surface review material and Slice-8 artifacts at the end.** Human chose this. Diverges: BRIEF §6.4 gate timing.
+15. **Repo location:** `~/hobby/discovery-docs-original-take/disco` (human choice). No remote; commits local only.
+
+## Open questions
+
+- `OPEN` (2026-08-30) Ambient classifier vs long-polls that carry action results (GUIDANCE §10) — content-based fallback deferred to dogfood.
+- `OPEN` (2026-08-30) Screencast cost in attach mode on a real desktop — measure in first dogfood; fallback mode exists as a switch.
+- `OPEN` (2026-08-30) Digest token budget (300) and `digestMaxRequests` (8) — tune from dogfood.
