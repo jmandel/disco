@@ -13,8 +13,8 @@ export const defaults = {
   ambientMaxCv: 0.3,       // coefficient of variation of inter-arrival gaps for "regular cadence"
   chainedPollGapMs: 250,
   trailingAttributionMs: 1500, // requests this soon after a window closes (same root, no new window) tag "trailing"   // next poll starting within this of previous end => chained (long-poll)
-  classifierWarmupMs: 20000, // idle observation before reports stop saying "classifier: immature"
-  idleObserveMs: 20000,    // `disco session new` idle observation (skippable with --no-idle)
+  classifierWarmupMs: 90000, // idle observation before reports stop saying "classifier: immature" (EHRs use ~60s heartbeats; need ≥3 cycles — dogfood #1)
+  idleObserveMs: 30000,    // `disco session new` idle observation (skippable); for minute-scale EHR heartbeats run `disco idle 120000` once (dogfood #1)
   // --- capture (GUIDANCE §3.4) ---
   bodyTextCap: 2_000_000,  // bytes of textual body kept in SQLite (and FTS); blob always keeps full
   bodyBlobCap: 50_000_000, // bytes beyond which we don't even fetch the body (marked "truncated")
@@ -37,6 +37,7 @@ export const defaults = {
   // --- report digest (GUIDANCE §4.3, BRIEF §1.18) ---
   digestMaxRequests: 8,
   digestMaxUiLines: 24,
+  digestMaxUiLinesNav: 12, // navigations rebuild the whole screen; cap the aria delta harder (dogfood #1)
   digestMaxConsole: 5,
   // --- rpc ---
   rpcTimeoutMs: 60000,

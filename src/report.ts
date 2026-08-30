@@ -56,7 +56,8 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
 
   // ---- UI delta (semantic, from aria snapshots) ----
   if (i.preAriaText !== undefined && i.postAriaText !== undefined) {
-    const diff = ariaDiff(i.preAriaText, i.postAriaText, defaults.digestMaxUiLines);
+    const isNav = i.verdict === "navigated" || !!i.settle?.navigated;
+    const diff = ariaDiff(i.preAriaText, i.postAriaText, isNav ? defaults.digestMaxUiLinesNav : defaults.digestMaxUiLines);
     r.ui = { ...diff, changedBoxes: i.root.cast?.boxes?.slice(0, 4) ?? [] };
     // Ambient-classified churn continued during the window (its mutations were excluded from
     // settlement AND may mask small real changes — dry-run friction #6): say so.
