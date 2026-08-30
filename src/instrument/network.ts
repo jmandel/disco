@@ -100,7 +100,9 @@ function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: id, summary: { s: r.status, u: short(inf.url), ms: Math.round(at - inf.tStart), a: inf.attribution, streaming: true } });
   }
   if (inf && !streaming) armStallTimer(d, t, inf);
-  if (r.status >= 400 && inf && inf.attribution !== "none" && inf.attribution !== "ambient") {
+  // Any non-ambient 4xx/5xx on a scoped target fires the error sentinel — including between-action
+  // failures (delayed async validations, optimistic-UI status checks): DECISIONS #24, GUIDANCE §8.
+  if (r.status >= 400 && inf && inf.attribution !== "ambient") {
     void fireSentinel(d, t, "error", { status: r.status, url: short(inf.url), method: inf.method, request: id }, { t: at });
   }
 }
@@ -163,7 +165,7 @@ function onFailed(d: Daemon, t: TargetState, p: LoadingFailed) {
   if (inf) {
     d.inflight.delete(id);
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: id, summary: { u: short(inf.url), ms: Math.round(at - inf.tStart), a: inf.attribution, error: p.errorText, canceled: !!p.canceled } });
-    if (!p.canceled && inf.attribution !== "none" && inf.attribution !== "ambient") void fireSentinel(d, t, "error", { url: short(inf.url), method: inf.method, error: p.errorText, request: id }, { t: at });
+    if (!p.canceled && inf.attribution !== "ambient") void fireSentinel(d, t, "error", { url: short(inf.url), method: inf.method, error: p.errorText, request: id }, { t: at });
   }
 }
 

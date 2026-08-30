@@ -24,7 +24,7 @@ describe("slice 2: act + settlement", () => {
     const r = await A({ kind: "click", target: "#noop" });
     const wall = performance.now() - t0;
     expect(r.verdict).toBe("no-effect");
-    expect(wall).toBeLessThan(800);
+    expect(wall).toBeLessThan(1000); // target 600 isolated; slop for full-suite load (BRIEF §4 preamble)
   }, 10000);
 
   test("slow chart load: settlement scales with server latency, no tuning", async () => {

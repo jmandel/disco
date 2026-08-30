@@ -4,13 +4,15 @@
 - Docs v0.2 (GUIDANCE/BRIEF revised per REVIEW.md; DECISIONS #1–23).
 - Milestone 0: gauntlet complete, behaviors 1–26 (incl. push-channels, context menu, dblclick, drag) — `bun test test/gauntlet/gauntlet-server.test.ts` 15/15.
 - Slice 1: attach + store + always-on instrumentation (network/WS/SSE/console/dialogs/nav/downloads/screencast/mutations), target scoping, sentinels (dialog/toast/expiry/error/new-target), notes, CLI (session/tail/sql/note/families/idle/screenshot/blob/eval/cdp). Smoke-verified.
+- Slice 3: live ambient attribution (task/window/dependency/ambient), families w/ evidence, GraphQL write-flags, SSE capture, push-channel content over WS/SSE/long-poll — 7/7.
+- Slice 4: sentinels (post-settlement modal w/ shot, toast frame timing, session-expiry, new-target + instrumented child, between-action 5xx) + RPC stream — 7/7.
 - Slice 2: act()/settlement/report/watch/awaitSettlement, vendored Playwright selectors, input dispatch (click/right/dbl/middle/hover/type/press/scroll/select/navigate/drag), OOPIF coordinate translation, self-feedback suppression, scroll-absorb, ambient DOM roots, unread-body demotion — `bun test test/gauntlet/slice2.test.ts` 14/14; unit tests (settle, attribute) green.
 
 ## In progress
-- Slice 3 acceptance (ambient traffic live): test/gauntlet/slice3.test.ts.
+- Slice 5 (client/CLI acceptance, README, demos).
 
 ## Next
-- Slice 4 (sentinel acceptance incl. post-settlement modal, toast blob timing, child window) → 5 (client/CLI polish + helpers docs + README) → 6 (launch mode, storage state, reconnect) → 7 (frame/shadow selector acceptance) → 8 (methodology dry run by a FRESH agent).
+- Slice 6 (launch mode, storage state, reconnect) → 7 (frame/shadow selector acceptance) → 8 (methodology dry run by a FRESH agent).
 
 ## How to run
 - `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)
