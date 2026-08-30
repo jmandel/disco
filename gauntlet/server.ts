@@ -236,6 +236,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
   // --- ctl --------------------------------------------------------------------
   const applyPatch = (patch: CtlPatch) => {
     const next: State = { ...state };
+    let touched = false; // at least one known knob was present (even if unchanged)
     for (const key of Object.keys(DEFAULTS) as (keyof State)[]) {
       if (!(key in patch)) continue;
       const v = patch[key];
@@ -243,11 +244,14 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       if (typeof v !== want) continue; // ignore wrong-typed values
       if (want === "number" && !Number.isFinite(v)) continue;
       (next as Record<string, unknown>)[key] = v;
+      touched = true;
     }
-    state = next;
-    armPush();
-    broadcast({ type: "ctl", state: view() });
-    if (patch.wsPush === true) pushOnce(); // write-only trigger, never persisted
+    if (touched) {
+      state = next;
+      armPush();
+      broadcast({ type: "ctl", state: view() }); // live pages apply without reload
+    }
+    if (patch.wsPush === true) pushOnce(); // write-only trigger, never persisted, no ctl frame
   };
   const ctl = {
     get: (): State => ({ ...state }),
@@ -286,6 +290,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       return staticFile("index.html");
     }
     if (path === "/app.js") return text(appJs, "text/javascript; charset=utf-8");
+    if (path === "/favicon.ico") return new Response(null, { status: 204, headers: NO_STORE }); // keep consoles clean
     if (path === "/secure.html") {
       if (!authed) return redirect("/login.html?next=/secure.html");
       const tpl = await Bun.file(join(APP_DIR, "secure.html")).text();
@@ -419,8 +424,9 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
         counters.echo++;
         let parsed: unknown = null;
         try { parsed = JSON.parse(String(raw)); } catch { /* non-JSON */ }
+        // flatten the client's fields, then force type:"echo" (client's own type is dropped)
         const frame = parsed && typeof parsed === "object"
-          ? { type: "echo", ...(parsed as Record<string, unknown>), seq: counters.echo }
+          ? { ...(parsed as Record<string, unknown>), type: "echo", seq: counters.echo }
           : { type: "echo", raw: String(raw), seq: counters.echo };
         ws.send(JSON.stringify(frame));
       },
@@ -430,7 +436,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
 
   // --- cross-origin server ------------------------------------------------------
   const xServer = Bun.serve({
-    port: wantPort === 0 ? 0 : mainServer.port + 1,
+    port: wantPort === 0 ? 0 : mainServer.port! + 1,
     async fetch(req) {
       const url = new URL(req.url);
       log("x", req.method, url.pathname);

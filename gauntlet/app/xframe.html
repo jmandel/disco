@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>cross-origin iframe</title></head>
+<body style="font-family: system-ui, sans-serif; font-size: 13px; background: #fff8e1">
+<strong>Cross-origin iframe</strong> (<span id="xf-origin"></span>)<br>
+<input id="xf-name" placeholder="Name" autocomplete="off">
+<button id="xf-submit">Submit</button>
+<p id="xf-result"></p>
+<script>
+  document.getElementById("xf-origin").textContent = location.origin;
+  document.getElementById("xf-submit").addEventListener("click", async () => {
+    const name = document.getElementById("xf-name").value;
+    // relative URL: posts to THIS (cross) origin's /api/xframe-submit
+    const r = await fetch("/api/xframe-submit", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    const j = await r.json();
+    document.getElementById("xf-result").textContent = "Submitted: " + j.name;
+  });
+</script>
+</body></html>

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>disco gauntlet</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>disco gauntlet</h1>
+  <div id="statusbar">
+    ws: <span id="ws-status">closed</span> ·
+    frames: <span id="ws-count">0</span> ·
+    ambient: <span id="ambient-status">off</span>
+    (heartbeats <span id="heartbeat-count">0</span> / polls <span id="poll-count">0</span>) ·
+    x-origin: <span id="x-origin">?</span>
+  </div>
+  <div class="mono">last ws frame: <span id="ws-last"></span></div>
+  <div class="mono">effective ctl: <span id="ctl-state"></span></div>
+</header>
+
+<main>
+<section id="s-1"><h2>1. Load Chart (three concurrent fetches, one slow)</h2>
+  <button id="load-chart">Load Chart</button> status: <span id="chart-status">idle</span>
+  <div id="chart"></div>
+</section>
+
+<section id="s-2"><h2>2. Records (conditional modal)</h2>
+  <div id="record-buttons">
+    <button class="record" id="record-1" data-id="1">Open Record 1</button>
+    <button class="record" id="record-2" data-id="2">Open Record 2</button>
+    <button class="record" id="record-3" data-id="3">Open Record 3</button>
+    <button class="record" id="record-4" data-id="4">Open Record 4</button>
+    <button class="record" id="record-5" data-id="5">Open Record 5</button>
+  </div>
+  <section id="record"></section>
+</section>
+
+<section id="s-3"><h2>3. Save (optimistic UI, async toast)</h2>
+  <button id="save">Save</button> state: <span id="save-state">unsaved</span>
+</section>
+
+<section id="s-4"><h2>4. Perpetual spinner</h2>
+  <div id="spinner" aria-label="loading forever"></div>
+</section>
+
+<section id="s-5"><h2>5 / 22. Ambient traffic (heartbeat + reissuing long-poll + periodic WS push)</h2>
+  <p>Gated by ctl <code>ambient</code> (default off). Counts are in the header.</p>
+</section>
+
+<section id="s-6"><h2>6. WebSocket</h2>
+  <p>Opened on load; every button click (except #noop) sends an <code>action</code> frame; see header.</p>
+</section>
+
+<section id="s-7"><h2>7. Debounced search (250 ms trailing, XHR)</h2>
+  <input id="search" placeholder="Search…" autocomplete="off">
+  <ul id="search-results"></ul>
+</section>
+
+<section id="s-8"><h2>8. Virtualized rows</h2>
+  <button id="load-rows">Load Rows</button> <span id="rows-count"></span>
+  <div id="rows"></div>
+</section>
+
+<section id="s-9"><h2>9. Re-render race</h2>
+  <div id="rerender-host"><button id="rerender">Re-render me</button></div>
+  clicks counted: <span id="rerender-count">0</span>
+</section>
+
+<section id="s-10"><h2>10. Iframes (same-origin + cross-origin)</h2>
+  <iframe id="same-origin" src="/iframe.html" title="same-origin"></iframe>
+  <iframe id="cross-origin" title="cross-origin"></iframe>
+</section>
+
+<section id="s-11"><h2>11. beforeunload / confirm / alert</h2>
+  <button id="arm-unload">Arm beforeunload</button> <span id="unload-armed">unarmed</span>
+  <a id="nav-away" href="/away.html">Navigate away</a>
+  <button id="confirm">Confirm me</button> <span id="confirm-result"></span>
+  <button id="alert">Alert me</button> <span id="alert-result"></span>
+</section>
+
+<section id="s-12"><h2>12. Session timeout</h2>
+  <p>idle timer: <span id="timeout-state">off</span> (ctl <code>timeoutMs</code>)</p>
+</section>
+
+<section id="s-13"><h2>13. No-op</h2>
+  <button id="noop">Do nothing</button>
+</section>
+
+<section id="s-14"><h2>14. Delete (write endpoint)</h2>
+  <button id="delete">Delete item</button> <span id="delete-result"></span>
+</section>
+
+<section id="s-15"><h2>15. Child window</h2>
+  <button id="open-child">Open child window</button>
+</section>
+
+<section id="s-16"><h2>16. Canvas grid (pixels only)</h2>
+  <canvas id="grid" width="400" height="200"></canvas>
+</section>
+
+<section id="s-17"><h2>17. Keyboard-only combobox</h2>
+  <input id="med" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="med-list"
+         placeholder="Medication…" autocomplete="off">
+  <ul id="med-list" role="listbox" hidden></ul>
+  <span id="med-selected"></span>
+</section>
+
+<section id="s-18"><h2>18. Shadow DOM</h2>
+  <div id="shadow-host"></div>
+</section>
+
+<section id="s-19"><h2>19. Server-sent events</h2>
+  <button id="start-sse">Start SSE</button> <span id="sse-status">idle</span>
+  <ul id="sse-log"></ul>
+</section>
+
+<section id="s-20"><h2>20. GraphQL over POST</h2>
+  <button id="gql-query">GraphQL query</button>
+  <button id="gql-mutate">GraphQL mutation</button>
+  <pre id="gql-result"></pre>
+</section>
+
+<section id="s-21"><h2>21. Auth</h2>
+  <a id="go-login" href="/login.html">Log in</a> · <a id="go-secure" href="/secure.html">Secure area</a>
+</section>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
