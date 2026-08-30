@@ -168,7 +168,7 @@ switch (cmd) {
   case "sql": {
     const q = pos[1] ?? die('sql "<query>"');
     const s = openStore(sessionDir());
-    let rows: any[];
+    let rows: any[] = [];
     try { rows = s.sql(q); } catch (e) { s.close(); die("sql error: " + (e as Error).message + "  (schema: schema.sql, or: disco sql \"SELECT name FROM sqlite_master WHERE type=" + String.fromCharCode(39) + "table" + String.fromCharCode(39) + "\")"); }
     if (has("json")) out(rows);
     else if (!rows.length) console.log("(no rows)");
