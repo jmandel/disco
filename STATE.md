@@ -18,6 +18,8 @@ Milestone tag: **`v0.1.0-platform-base`**.
 ## In progress — platform build-out (PLATFORM.md plan)
 - Slice 1 ✅ ways-of-knowing palette named in `artifacts/README.md` (descriptive, not a schema).
 - Slice 2a ✅ function-library pattern on the gauntlet: `lib/wire.ts` + `lib/nav.ts` (generic reusable moves), `artifacts/gauntlet/lib.ts` (reference per-product library), `test/gauntlet/lib.test.ts`. Suite 87/87.
+- Slice 3 ✅ usage & philosophy field guide `docs/using-disco.md` (instrument→explore→discover→characterize→automate, both instances as worked examples).
+- Slice 4 ✅ per-pack `check.ts` + one-command runner `scripts/run-check.ts <target>` (fresh browser+session, runs the check, exits status). `run-check.ts openemr` green.
 - Slice 2b ✅ OpenEMR function library `artifacts/openemr/lib.ts` (login / findPatient [finder search past page 1] / openPatient / extractSummary, anchor-oriented, wire-first, defensive) + `artifacts/openemr/check.ts` live drift loop. Validated vs demo.openemr.io: Belford (page 1) + Stone (page 2 via search) end-to-end, idempotent. Fixed a real daemon bug (prune stale same-target child frames on main-frame re-navigation, DECISIONS #31). Retired site.json → folded into lib.ts + nav-and-quirks.md.
 
 ## Slice 8 — PASSED (2026-08-30)
@@ -27,12 +29,12 @@ Milestone tag: **`v0.1.0-platform-base`**.
 ## Dogfood #1 — DONE (OpenEMR 8.3.0 demo, 2026-08-30)
 - Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; artifacts/openemr/dogfood-1.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
 
-## Next (after 2b)
-- Slice 3: usage & philosophy docs — how to use the library to instrument/explore/discover/characterize/automate, with examples; grows alongside the libraries.
-- Slice 4: per-product live test loops (drift detection).
-- Later: MCP/agent-tool exposure of the libraries; a 3rd, non-EHR instance to force the reusable layer to generalize; PHI/retention posture when a non-demo target needs it.
-- Also for OpenEMR: probe the interstitial hypothesis (a patient with no due reminders — ledger #1).
-- OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions across more patients; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant.
+## Next — plan slices 1–4 all done; remaining is the "later" bucket (a direction call)
+- A 3rd, deliberately-different (non-EHR) instance to force the Layer-1 reusable layer to generalize.
+- MCP / agent-tool exposure of the pack function libraries.
+- Deepen OpenEMR: encounter/notes flow, the save-flow ledger item; probe the interstitial hypothesis (a patient with no due reminders — ledger #1).
+- PHI/retention posture when a non-demo target is used (until then: demo/BAA-covered only).
+- OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant; gauntlet regression test for the re-navigation frame-prune fix.
 
 ## How to run
 - `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)

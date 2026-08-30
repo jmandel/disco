@@ -5,6 +5,11 @@ observation report; everything the browser does — screen and wire — lands qu
 Constitution: [GUIDANCE.md](GUIDANCE.md). Construction plan: [BRIEF.md](BRIEF.md). Decisions/divergences:
 [DECISIONS.md](DECISIONS.md). Loop state: [STATE.md](STATE.md).
 
+## Docs
+
+- **[docs/using-disco.md](docs/using-disco.md)** — the field guide: how to use disco to instrument/explore/discover/characterize/automate, with worked examples.
+- **[PLATFORM.md](PLATFORM.md)** — the two-layer platform + the plan. **[GUIDANCE.md](GUIDANCE.md)** — constitution + methodology. **[artifacts/README.md](artifacts/README.md)** — the per-product packs.
+
 ## Quickstart: ten lines to a first observed click
 
 ```bash

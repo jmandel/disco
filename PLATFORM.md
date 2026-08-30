@@ -60,17 +60,18 @@ exploration sharpens the platform, not just its own pack. (Full model: `artifact
 
 ## The plan (agreed 2026-08-30)
 
-1. **Name the palette** — the five ways of knowing above, descriptively in `artifacts/README.md`. Not a
-   schema. (small)
-2. **Function libraries + reusable moves** — build per-product function libraries (plain TS, anchor-
-   oriented, robust) and promote the generic helpers they share into Layer 1. Main work: start with
-   OpenEMR (`login` → `openPatient` → problem-list), and lift the gauntlet's standalone scripts toward
-   composable importable functions.
-3. **Usage & philosophy docs** — the deep how-to-use documents (instrument / explore / discover /
-   characterize / automate), design philosophy, effective use with examples. Grows alongside the library.
-4. **A simple test loop** — run a product's functions against its live demo to catch drift.
-5. **Later** — MCP / agent-tool exposure of the libraries; a third, deliberately-different system to
-   force the reusable layer to generalize; PHI / retention posture when a real (non-demo) target needs it
-   (until then: demo / BAA-covered environments only, posture written down).
+1. ✅ **Name the palette** — the five ways of knowing above, in `artifacts/README.md`. Not a schema.
+2. ✅ **Function libraries + reusable moves** — `lib/` generic moves (`wire.ts`, `nav.ts`); reference
+   library on the gauntlet (`artifacts/gauntlet/lib.ts`); OpenEMR library (`artifacts/openemr/lib.ts`:
+   `login`/`findPatient`/`openPatient`/`extractSummary`) validated live.
+3. ✅ **Usage & philosophy docs** — `docs/using-disco.md` (instrument → explore → discover → characterize
+   → automate, with both instances as worked examples). Grows as the libraries do.
+4. ✅ **Test loops** — per-pack `check.ts` + a one-command runner `scripts/run-check.ts <target>` that
+   stands up a fresh browser+session, runs the pack's check, and exits with its status (schedulable).
+5. **Later (needs a direction call)** — MCP / agent-tool exposure of the libraries; a third,
+   deliberately-different (non-EHR) system to force the reusable layer to generalize; PHI / retention
+   posture when a real (non-demo) target needs it (until then: demo / BAA-covered environments only).
+   Also open: deepen OpenEMR (encounter/notes, save-flow), and the DECISIONS OPEN items.
 
-Sequence: **1 → 2 (with 3 growing alongside) → 4 → later.**
+Sequence so far: **1 → 2 → 3 → 4 done.** Next is the Layer-1 reusable layer proving out on a 3rd system,
+or going deeper on OpenEMR — a direction call.

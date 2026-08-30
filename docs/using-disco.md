@@ -1,0 +1,145 @@
+# Using disco — a field guide
+
+How to wield disco to **instrument, explore, discover, characterize, and automate** a web application you
+did not build. This is the *usage* guide (design philosophy + how to use it well, with examples). For the
+constitution and the discovery methodology see `GUIDANCE.md`; for what the project *is* and where it's
+going, `PLATFORM.md`; for the hard-won engine gotchas, `DECISIONS.md` #16–31.
+
+The worked examples are the two product packs: `artifacts/gauntlet/lib.ts` (a synthetic hostile app) and
+`artifacts/openemr/lib.ts` (OpenEMR 8.3.0). Read them alongside this.
+
+## The mental model (four ideas)
+
+1. **Every action is an experiment that returns a report — read it, don't guess.** You never "click and
+   wait 30s for a selector." You `act()`, and the report tells you what actually happened: a verdict
+   (`no-effect` / `settled:network|dom|visual` / `still-active` / `dialog` / `navigated` / `diagnosis`),
+   the UI delta, the attributed network, sentinels, timing. A missing selector returns a *diagnosis*
+   (near-matches, dialog census, pending requests, a screenshot) in one turn — never a bare timeout.
+2. **The screen and the wire are one evidence stream.** The DOM shows what the app chose to render; the
+   network shows what the backend actually said. Prefer reading facts off captured responses when both
+   carry them — the full patient list is JSON on the wire even though the DOM only renders 10 rows.
+3. **Navigate to anchors; be defensive by construction.** Robust automation asserts a known *anchor
+   state*, acts, settles, asserts the next anchor — and treats every interstitial as optional (present
+   *or* absent). It never assumes position.
+4. **The output is a pack, not a transcript.** What you learn is distilled into `artifacts/<target>/`:
+   navigation notes, a function library, a ledger of what varies, evidence. The next session builds on it.
+
+## The loop: five verbs
+
+### 1. Instrument — attach a session and start capturing
+
+```bash
+# attach to a browser you (or a human) already drives; scope keeps other tabs out
+disco session new mysite --attach 9222 --scope example.com
+# or launch a managed one:  disco session new mysite --launch --headless --url https://example.com
+```
+
+From the moment it attaches, disco records every request/response (bodies included), WS/SSE frame,
+console line, dialog, navigation, and a screencast — to `sessions/mysite/store.sqlite` + `blobs/`.
+**Let the ambient classifiers warm up** before you lean on settlement — `disco idle 120000` for an EHR
+(minute-scale heartbeats need ≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never
+record a human's mail/bank tabs.
+
+### 2. Explore — act, and read what happened
+
+```bash
+disco act click 'role=button[name="Load Chart"]'      # Playwright selectors everywhere
+disco act type '#search' --text ada
+disco act rightclick '#row-7'      # click/rightclick/dblclick/hover/type/press/scroll/select/drag/navigate
+```
+
+The report prints the verdict, the settle timeline, the UI delta, and the attributed wire lines with body
+handles. In the library it's the same, returned as a value:
+
+```ts
+import { connect } from "./src/client.ts";
+const s = await connect("mysite");
+const r = await s.click('role=button[name="Load Chart"]');
+r.verdict;            // "settled:network"
+r.wire.attributed;    // [{ m, p, s, ms, body, family, a }, …]  ← structured, not scraped
+```
+
+### 3. Discover — mine the store in SQL + TS (your native languages, never a DSL)
+
+Bodies are persisted *before* the report returns, so the same script reduces them with no second round trip:
+
+```ts
+const rows = s.store.json(r.wire.attributed.find(w => w.p.includes("/api/rows")).body);
+console.log(rows.length, rows[0].name);     // 10000  "Aardvark-Row-0"  — the wire had it all along
+```
+
+Ask retroactive questions the run never anticipated — FTS over every captured body/frame:
+
+```bash
+disco sql "SELECT r.path FROM bodies b JOIN bodies_fts f ON f.rowid=b.rowid
+           JOIN requests r ON r.body_hash=b.hash WHERE bodies_fts MATCH 'Zebra-Row-9741'"
+```
+
+Canned helpers desugar to exactly this (`store.appearances(text)`, `store.requests({urlLike})`,
+`store.timeline(t0,t1)`, `store.diffTrace(a,b)`) — see `src/store.ts`. Record interpretations as you go
+with `disco note` / `s.note(...)`; they land in the store next to the evidence, cited by act id.
+
+### 4. Characterize — states, transitions, variability
+
+Model the app as **named anchors** (cheap predicates: a URL pattern + a landmark element) and
+**transitions** between them (with their settlement profile + wire signature). Keep a **variability
+ledger**: what varied, with n-counts, and the experiment that would resolve each. `diffTrace(a, b)`
+compares two runs of "the same" step and shows the structural difference (e.g. the interstitial that only
+sometimes appears). This is what `artifacts/<target>/nav-and-quirks.md` + `ledger.md` capture.
+
+### 5. Automate — write robust functions and a drift check
+
+Distill the transitions into a **function library** in the pack — plain importable TS, one job each. See
+the recipe below. Then a `check.ts` runs them against the live app to catch drift (`bun scripts/run-check.ts <target>`).
+
+## Writing a robust function (the recipe)
+
+Every good pack function does four things — assert the precondition anchor, act, reach the next anchor,
+handle optional steps both ways. `openPatient` from the OpenEMR pack, annotated:
+
+```ts
+export async function openPatient(s, target) {
+  // (1) anchor + reach the row: for a name, search the finder (works past page 1) so the row is visible
+  let pid = typeof target === "string" ? (await findPatient(s, target)).pid : (await openFinder(s), target);
+  // (2) act
+  const r = await s.click(`#pid_${pid}`, { frame: "dynamic_finder.php", budgetMs: 15000 });
+  if (r.verdict === "diagnosis") throw new Error(`openPatient(${pid}): could not click the row`);  // fail loud
+  // (3) the "due clinical reminders" alert may or may not fire — auto-accepted by policy, so proceed either way
+  // (4) reach + assert the next anchor
+  await waitForFrame(s, "demographics.php", 15000);
+  await assertChart(s, pid);
+  return pid;
+}
+```
+
+Principles it embodies (all from real fixes — see DECISIONS #31):
+- **Anchors, not positions.** `assertMainShell` / `assertChart` verify where you are and throw a clear
+  message otherwise. `login` is idempotent (skips work if already in the shell).
+- **Optional steps both ways.** `actIfPresent(s, sel)` (in `lib/nav.ts`) dismisses an interstitial if it
+  appears within a short budget and does nothing if it doesn't — the absent path is first-class.
+- **Wire-first.** `findPatient`/`extractSummary` read the finder JSON and summary fragments, not brittle
+  layout. `lib/wire.ts::extractFromWire` is the generic move.
+- **Wait for evidence, not sleeps.** `waitForFrame` polls for the child frame; `extractSummary` waits for
+  the async summary fragment to populate before reading.
+
+Generic moves live in `lib/` (product-agnostic: `extractFromWire`, `wireHas`, `assertVisible`,
+`actIfPresent`, `waitForFrame`); product-specific functions live in the pack and lean on them. A move
+graduates from a pack to `lib/` when a second product would copy it.
+
+## Effective-use tips & rough edges
+
+- **Frame-scope everything** in a nested app: `{ frame: "dynamic_finder.php" }`. Cross-origin iframes
+  resolve in their own target; disco translates the click coordinates for you.
+- **Digest → drill → reduce.** The report is ~300 tokens with handles; open a body/blob only when needed,
+  and reduce it in your own script. Don't pull whole HARs into context.
+- **Verdict labels are best-effort** — ambient content rendering in the settle tail can retag
+  `network`→`dom` (DECISIONS #30). Assert timing + attribution for non-interference, not the label.
+- **`disco sql` is read-only** — it can't mutate the store; notes are written only through the daemon.
+- **Warm the classifiers** (`disco idle`) before trusting settlement on a heartbeat-heavy app.
+- Full gotcha list: `STATE.md` "Gotchas" + `DECISIONS.md` #16–31.
+
+## Where outputs go
+
+Everything you learn becomes a pack under `artifacts/<target>/` (the ways-of-knowing palette:
+`artifacts/README.md`). Tool-level lessons become engine fixes + `DECISIONS.md`; class-of-app lessons
+become methodology in `GUIDANCE.md §7–8`. Every exploration sharpens the platform, not just its own pack.
