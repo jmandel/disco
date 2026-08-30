@@ -113,11 +113,11 @@ Two capture limits are structural and are recorded rather than hidden: response 
 ```
 report = await session.act(
   { kind: "click", target: role("button", { name: "Open Chart" }), frame: "main" },
-  { settle: { budgetMs: 3000 }, evaluateAfter?: (el, ctx) => …, expect?: … }
+  { settle: { budgetMs: 3000 }, evaluateAfter?: (arg) => …, expect?: … }
 )
 ```
 
-Internally: (1) resolve the target *now* — if resolution fails, return immediately with the fuzzy-match diagnosis (§2.2), never wait for an element to exist as a side effect of acting on it; (2) snapshot pre-state (screenshot, URL, cheap DOM digest, scroll positions, focused element, open-dialog census); (3) mark a **causality window** and dispatch the input; (4) run settlement detection (§4.2); (5) snapshot post-state; (6) compute deltas; (7) run the agent's `evaluateAfter` function in-page if provided; (8) persist everything; (9) return the digest. Input is dispatched on the top-level page target with coordinates translated through the frame chain (cross-origin iframes are separate targets; their elements are resolved in their own target but clicked via the root), after scrolling into view and hit-testing that the point actually lands on the element — occlusion is reported, never clicked through.
+Internally: (1) resolve the target *now* — if resolution fails, return immediately with the fuzzy-match diagnosis (§2.2), never wait for an element to exist as a side effect of acting on it; (2) snapshot pre-state (screenshot, URL, cheap DOM digest, scroll positions, focused element, open-dialog census); (3) mark a **causality window** and dispatch the input; (4) run settlement detection (§4.2); (5) snapshot post-state; (6) compute deltas; (7) run the agent's `evaluateAfter` function in-page if provided (main world, self-contained, called with `evaluateAfterArg` — closures do not transfer); (8) persist everything; (9) return the digest. Input is dispatched on the top-level page target with coordinates translated through the frame chain (cross-origin iframes are separate targets; their elements are resolved in their own target but clicked via the root), after scrolling into view and hit-testing that the point actually lands on the element — occlusion is reported, never clicked through.
 
 ### 4.2 Settlement: a race of quiescence signals under a hard budget
 
