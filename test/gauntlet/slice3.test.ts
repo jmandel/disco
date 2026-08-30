@@ -39,7 +39,11 @@ describe("slice 3: attribution + ambient", () => {
     const t0 = performance.now();
     const r = await A({ kind: "click", target: "#load-chart" });
     const wall = performance.now() - t0;
-    expect(r.verdict).toBe("settled:network");
+    // Non-interference is the claim here (heartbeat/poll don't hold settlement open) — carried by the
+    // timing + attribution assertions below. The verdict LABEL may be network or dom: with ambient
+    // traffic on, a poll/notify render can land in the DOM during the settle tail and retag it (the
+    // dedicated network-label assertion lives in slice2's ambient-free chart test). DECISIONS #30.
+    expect(["settled:network", "settled:dom"]).toContain(r.verdict);
     expect(r.settle!.ms).toBeGreaterThan(1700);
     expect(wall).toBeLessThan(1800 + 300 + 1200); // polls reissue inside this window and must not extend it
     const attributed = r.wire!.attributed;
