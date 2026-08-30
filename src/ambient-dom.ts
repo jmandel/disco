@@ -1,0 +1,34 @@
+// Ambient DOM roots (GUIDANCE §4.2 escape hatch): subtrees that mutate perpetually while the page is
+// idle (tickers, clocks, churning widgets) are fingerprinted and classified out of DOM quiescence —
+// the DOM analog of the ambient network classifier. Reversible: batches are still recorded; only the
+// settlement feed marks them ambient. See DECISIONS #21.
+export class AmbientDom {
+  private roots = new Map<string, { times: number[]; ambient: boolean }>(); // key: frameId + "|" + rootSel
+
+  /** Learn from an idle batch; decide for any batch. Returns true when the batch is entirely ambient. */
+  observe(frameId: string | null, rootSels: string[], t: number, idle: boolean, churn: { added: number; removed: number; attrs: number; text: number }): boolean {
+    let allAmbient = rootSels.length > 0;
+    for (const sel of rootSels) {
+      const key = `${frameId ?? "?"}|${sel}`;
+      let r = this.roots.get(key);
+      if (!r) { r = { times: [], ambient: false }; this.roots.set(key, r); }
+      if (idle) {
+        r.times.push(t);
+        if (r.times.length > 24) r.times.shift();
+        if (!r.ambient && r.times.length >= 5) {
+          const span = r.times[r.times.length - 1] - r.times[0];
+          const gaps: number[] = [];
+          for (let i = 1; i < r.times.length; i++) gaps.push(r.times[i] - r.times[i - 1]);
+          gaps.sort((a, b) => a - b);
+          const median = gaps[Math.floor(gaps.length / 2)];
+          if (span >= 1500 && median <= 600) r.ambient = true; // recurs at sub-600ms cadence over 1.5s of idle
+        }
+      }
+      if (!r.ambient) allAmbient = false;
+    }
+    // a large batch is real work even if it touches ambient roots
+    if (churn.added + churn.removed > 12) allAmbient = false;
+    return allAmbient;
+  }
+  ambientKeys(): string[] { return [...this.roots.entries()].filter(([, r]) => r.ambient).map(([k]) => k); }
+}

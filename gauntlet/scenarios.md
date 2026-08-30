@@ -51,6 +51,7 @@ State and defaults. **All ambient traffic is OFF by default** so timing tests ar
 | `rerenderOnHover` | true | client | replace `#rerender` synchronously on mousemove/mouseover |
 | `requireAuth` | false | server | `/` 302s to `/login.html?next=/` without the cookie |
 | `notifyPollHoldMs` | 25000 | server | how long `/api/notify-poll` is held awaiting a `push` trigger |
+| `notify` | `false` | Client-side gate for the #23 long-poll loop (SSE + WS stand regardless). Off by default so the reissuing poll cannot perturb settlement timing; enable live via `POST /ctl {notify:true}`. |
 | `wsPush` | — | trigger | write-only: `true` pushes one `{type:"push"}` frame immediately; never persisted and does not emit a `ctl` frame |
 | `push` | — | trigger | write-only: `"ws"`/`"sse"`/`"poll"` delivers one notification over exactly that channel (see 23); never persisted, no `ctl` frame |
 

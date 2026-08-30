@@ -1,19 +1,27 @@
 # STATE.md — loop memory (cold-start readable)
 
 ## Done
-- Repo scaffolded; GUIDANCE.md/BRIEF.md revised to v0.2 (DECISIONS.md #1–15); Playwright InjectedScript vendored (`bun run scripts/vendor-injected.ts`).
+- Docs v0.2 (GUIDANCE/BRIEF revised per REVIEW.md; DECISIONS #1–23).
+- Milestone 0: gauntlet complete, behaviors 1–26 (incl. push-channels, context menu, dblclick, drag) — `bun test test/gauntlet/gauntlet-server.test.ts` 15/15.
+- Slice 1: attach + store + always-on instrumentation (network/WS/SSE/console/dialogs/nav/downloads/screencast/mutations), target scoping, sentinels (dialog/toast/expiry/error/new-target), notes, CLI (session/tail/sql/note/families/idle/screenshot/blob/eval/cdp). Smoke-verified.
+- Slice 2: act()/settlement/report/watch/awaitSettlement, vendored Playwright selectors, input dispatch (click/right/dbl/middle/hover/type/press/scroll/select/navigate/drag), OOPIF coordinate translation, self-feedback suppression, scroll-absorb, ambient DOM roots, unread-body demotion — `bun test test/gauntlet/slice2.test.ts` 14/14; unit tests (settle, attribute) green.
 
 ## In progress
-- Milestone 0 (gauntlet) — subagent building `gauntlet/`.
-- Slice 1 — CDP client, store, daemon, instrumentation.
+- Slice 3 acceptance (ambient traffic live): test/gauntlet/slice3.test.ts.
 
 ## Next
-- Slice 2 (act + settlement timing suite) → 3 → 4 → 5 → 6 → 7 → 8.
+- Slice 4 (sentinel acceptance incl. post-settlement modal, toast blob timing, child window) → 5 (client/CLI polish + helpers docs + README) → 6 (launch mode, storage state, reconnect) → 7 (frame/shadow selector acceptance) → 8 (methodology dry run by a FRESH agent).
 
 ## How to run
-- Install: `bun install`
-- Gauntlet: `bun run gauntlet/server.ts --port 4800` (also `bun gauntlet`)
-- Tests: `bun test` (unit + gauntlet); `bun test test/unit`; `bun test test/gauntlet`
+- `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)
+- All tests: `bun test` (launches its own headless chromium; scratch in .scratch/)
 - Typecheck: `bunx tsc --noEmit -p .`
-- Re-vendor selector engine after bumping playwright-core: `bun run scripts/vendor-injected.ts`
-- Chromium for manual attach: `chromium --remote-debugging-port=9222 --user-data-dir=/home/jmandel/hobby/.agent-scratch/disco/profile`
+- Manual attach: `chromium --remote-debugging-port=9222 --user-data-dir=~/hobby/.agent-scratch/disco/profile` then `bun cli/disco.ts session new s1 --attach 9222 --scope localhost:4800`
+- Re-vendor selector engine: `bun run scripts/vendor-injected.ts`
+
+## Gotchas discovered (see DECISIONS #16–23)
+- Budget = time since last attributed network evidence (suspended while in flight, maxBudgetMs cap).
+- Ambient DOM roots + visual ignore mask + ambient families all need idle observation — `disco idle` / session-new default.
+- Unread fetch bodies never emit loadingFinished → "unread" demotion after 1.2s grace.
+- scrollIntoView repaints the whole viewport → absorbed before the causality window opens.
+- Small-target self-repaint (pressed/focus) suppressed from the visual channel.

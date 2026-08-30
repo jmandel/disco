@@ -94,21 +94,23 @@ export class Selectors {
   }
 
   /** Where would a click at the element's center actually land? "ok" or a description of the occluder. */
-  async hitCheck(frame: FrameInfo, selector: string): Promise<{ ok: boolean; point?: { x: number; y: number }; hit?: string }> {
-    const r = await this.call<{ ok: boolean; x?: number; y?: number; hit?: string; err?: string }>(frame,
+  async hitCheck(frame: FrameInfo, selector: string): Promise<{ ok: boolean; point?: { x: number; y: number }; hit?: string; scrolled?: boolean }> {
+    const r = await this.call<{ ok: boolean; x?: number; y?: number; hit?: string; err?: string; scrolled?: boolean }>(frame,
       `function (sel) {
         const el = this.querySelectorAll(this.parseSelector(sel), document)[0];
         if (!el) return { ok: false, err: "gone" };
+        const before = el.getBoundingClientRect();
         el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
         const r = el.getBoundingClientRect();
+        const scrolled = Math.abs(r.y - before.y) > 1 || Math.abs(r.x - before.x) > 1;
         const x = r.x + r.width / 2, y = r.y + r.height / 2;
         const res = this.expectHitTarget({ x, y }, el);
-        if (res === "done") return { ok: true, x, y };
-        return { ok: false, x, y, hit: res && res.hitTargetDescription ? res.hitTargetDescription : String(res) };
+        if (res === "done") return { ok: true, x, y, scrolled };
+        return { ok: false, x, y, scrolled, hit: res && res.hitTargetDescription ? res.hitTargetDescription : String(res) };
       }`, [selector]);
     const v = r.value!;
     if (v.err === "gone") throw new RpcError(-32013, "element detached during hit check");
-    return { ok: v.ok, point: v.x !== undefined ? { x: v.x, y: v.y! } : undefined, hit: v.hit };
+    return { ok: v.ok, point: v.x !== undefined ? { x: v.x, y: v.y! } : undefined, hit: v.hit, scrolled: v.scrolled };
   }
 
   /** Element state probe (visible/enabled/editable) via injected elementState. */

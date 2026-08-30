@@ -94,7 +94,11 @@ export class Settler {
       deadlines.push([quietAt, () => {
         // verify still quiet (signals may have arrived and rescheduled; this closure only runs if not)
         const last = this.lastActivity();
-        const verdict: Verdict = this.navigatedUrl !== null ? "navigated" : last === this.lastNet ? "settled:network" : last === this.lastVis && this.lastVis > this.lastDom ? "settled:visual" : "settled:dom";
+        // Verdict = the binding signal. Network wins when attributed requests participated and stayed
+        // active into the final quiet window (the render tail after the last response is expected).
+        const verdict: Verdict = this.navigatedUrl !== null ? "navigated"
+          : this.counts.requests > 0 && last - this.lastNet <= this.quietMs ? "settled:network"
+          : last === this.lastVis && this.lastVis > this.lastDom ? "settled:visual" : "settled:dom";
         this.finish(verdict, last, this.clock.now());
       }]);
     }

@@ -32,7 +32,7 @@ const postJson = (url: string, body: unknown, method = "POST") =>
 // effective ctl state
 // ---------------------------------------------------------------------------
 let state: CtlView = {
-  slowMs: 400, modal: false, modalDelayMs: 0, toastMs: 2000, saveFails: false, ambient: false,
+  slowMs: 400, modal: false, modalDelayMs: 0, toastMs: 2000, saveFails: false, ambient: false, notify: false,
   heartbeatMs: 5000, pollHoldMs: 3000, wsPushMs: 7000, timeoutMs: 0, rerenderOnHover: true,
   requireAuth: false, notifyPollHoldMs: 25000, xOrigin: "",
 };
@@ -59,6 +59,7 @@ function applyState(next: CtlView): void {
   setText("ctl-state", JSON.stringify(state));
   setXOrigin(state.xOrigin);
   syncAmbient();
+  syncNotify();
   armIdleTimer();
 }
 
@@ -408,12 +409,21 @@ function renderNotif(notif: Notif): void {
 }
 
 function startNotifyChannels(): void {
-  // (b) persistent EventSource, held open by the server indefinitely (auto-reconnects if dropped)
+  // (b) persistent EventSource, held open by the server indefinitely (auto-reconnects if dropped).
+  // Always on: it never re-issues requests, so it cannot perturb settlement.
   const es = new EventSource("/api/notify-sse");
   es.onmessage = (ev) => renderNotif(JSON.parse(String(ev.data)) as Notif);
-  // (c) dedicated long-poll: held until a trigger or notifyPollHoldMs ({n:null}); reissue immediately either way
+  syncNotify();
+}
+let notifyLoopRunning = false;
+/** (c) dedicated long-poll — gated on ctl `notify` (default off) so the reissuing request cannot
+ *  perturb Slice-2 timing determinism; enable via POST /ctl {notify:true} (live, like ambient). */
+function syncNotify(): void {
+  if (!state.notify || notifyLoopRunning) return;
+  notifyLoopRunning = true;
   void (async () => {
     for (;;) {
+      if (!state.notify) { notifyLoopRunning = false; return; }
       try {
         const j = await getJson<Notif | { n: null }>("/api/notify-poll");
         if (j.n !== null) renderNotif(j);

@@ -20,10 +20,16 @@ export const defaults = {
   wsPayloadCap: 1_000_000,
   networkBufferTotal: 400_000_000, // Network.enable maxTotalBufferSize (raise so bodies aren't evicted)
   networkBufferPerResource: 100_000_000,
+  unreadBodyGraceMs: 1200,  // fetch() responses whose body the page never reads emit no loadingFinished;
+                            // after headers + this much silence the request is demoted to "unread" and
+                            // released from settlement (DECISIONS #22)
   screencast: { format: "jpeg" as const, quality: 50, maxWidth: 960, maxHeight: 960, everyNthFrame: 1 },
   screencastPersistMinGapMs: 333, // ≈3 fps persistence cap for *changed* frames
   visualDecodeMinGapMs: 80,       // ≥12 fps cap on JPEG decode for tile signatures
   visualTilePx: 32,
+  selfFeedbackMaxArea: 24000, // px²: clicked elements smaller than this may repaint themselves (pressed/
+                              // focus states) without it counting as an "effect" (DECISIONS #23)
+  selfFeedbackInflatePx: 12,
   visualTileDelta: 12,     // mean-RGB delta per tile to count as changed
   visualIgnoreLearnFrames: 24, // tile changing in this many of the last 32 idle frames => ignored
   observerBatchMs: 40,     // in-page mutation batch interval (well under quietMs)

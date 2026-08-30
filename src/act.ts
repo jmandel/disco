@@ -8,6 +8,9 @@ import { clickAt, hoverAt, wheelAt, dragFromTo, pressKey, typeText, pointToRoot 
 import { RpcError } from "./rpc.ts";
 import { defaults } from "../defaults.ts";
 
+/** Settler deadlines must run on the SAME clock as t0 and the fed event times: the session clock. */
+const sessionClock = (d: Daemon) => ({ now: () => d.now(), setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), clearTimeout: (h: unknown) => clearTimeout(h as any) });
+
 export interface ActParams {
   kind: "click" | "rightclick" | "dblclick" | "middleclick" | "hover" | "type" | "press" | "scroll" | "select" | "navigate" | "drag";
   target?: string; frame?: string; targetId?: string;
@@ -31,14 +34,26 @@ export function registerActions(d: Daemon): Selectors {
   return sel;
 }
 
-function feedFromEvent(d: Daemon, rootId: string, actionId: string, s: Settler) {
+/** Self-feedback suppression (DECISIONS #23): a small clicked element repainting itself (pressed state,
+ *  focus ring) is expected affordance feedback, not an effect. Visual changes confined to the target box
+ *  are dropped from the feed; big targets (canvases, panels) keep their in-element pixel signal. */
+function feedFromEvent(d: Daemon, rootId: string, actionId: string, s: Settler, selfBox?: { x: number; y: number; w: number; h: number } | null) {
+  const pad = defaults.selfFeedbackInflatePx;
+  const selfContained = (ev: any): boolean => {
+    if (!selfBox) return false;
+    const boxes = ev.summary?.boxes as Array<{ x: number; y: number; w: number; h: number }> | undefined;
+    if (!boxes?.length) return false;
+    const cast = d.targets.get(rootId)?.cast;
+    const scale = cast && cast.viewW > 0 && cast.w > 0 ? cast.w / cast.viewW : 1;
+    return boxes.every((b) => b.x / scale >= selfBox.x - pad && b.y / scale >= selfBox.y - pad && (b.x + b.w) / scale <= selfBox.x + selfBox.w + pad && (b.y + b.h) / scale <= selfBox.y + selfBox.h + pad);
+  };
   return d.listen((ev) => {
     const tin = ev.targetId ? d.targets.get(ev.targetId)?.rootTargetId === rootId || ev.targetId === rootId : false;
     switch (ev.kind) {
       case "request": if (ev.actionId === actionId && (ev.summary as any)?.a !== "ambient") s.feed({ kind: "request-start", t: ev.t, id: String(ev.ref) }); break;
       case "response": if (ev.actionId === actionId) s.feed({ kind: "request-end", t: ev.t, id: String(ev.ref) }); break;
-      case "mutation": if (tin) s.feed({ kind: "mutation", t: ev.t }); break;
-      case "visual": if (tin) s.feed({ kind: "visual", t: ev.t }); break;
+      case "mutation": if (tin && !(ev.summary as any)?.amb) s.feed({ kind: "mutation", t: ev.t }); break;
+      case "visual": if (tin && !selfContained(ev)) s.feed({ kind: "visual", t: ev.t }); break;
       case "nav": if (tin && (ev.summary as any)?.kind === "navigated" && (ev.summary as any)?.main) s.feed({ kind: "navigated", t: ev.t, url: (ev.summary as any).url }); break;
       case "dialog": if (tin) s.feed({ kind: "dialog", t: ev.t }); break;
       case "target": if ((ev.summary as any)?.state === "attached" && (ev.summary as any)?.opener && d.targets.get((ev.summary as any).opener)?.rootTargetId === rootId) s.feed({ kind: "new-target", t: ev.t, targetId: ev.targetId }); break;
@@ -73,6 +88,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   // ---- resolve now; fail with a diagnosis, never wait (GUIDANCE §2.2) ----
   let resolved: Resolved | null = null;
   let detachedRetried = false;
+  let didScroll = false;
   let point: { x: number; y: number } | null = null;
   if (NEEDS_TARGET.has(p.kind)) {
     if (!p.target) throw new RpcError(-32602, `act ${p.kind} needs a target selector`);
@@ -89,6 +105,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
             return failReport(d, { actionId, n, kind: p.kind, spec, frame, root, seqStart, resolvedInfo: resolved, diagnosis: await diagnose(d, frame, root, "occluded", { occludedBy: hit.hit }) });
           }
           point = hit.point!;
+          didScroll = !!hit.scrolled;
           break;
         } catch (e) {
           if (attempt >= 1) return failReport(d, { actionId, n, kind: p.kind, spec, frame, root, seqStart, diagnosis: await diagnose(d, frame, root, "detached", { error: (e as Error).message }) });
@@ -101,6 +118,9 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
     }
   }
 
+  // If resolution scrolled the target into view, the whole viewport repaints ~tens of ms later; absorb
+  // that BEFORE opening the causality window so the scroll (pre-action adjustment) is not an "effect".
+  if (didScroll) await absorbVisual(d, root, 450);
   const pre = await snapshot(d, sel, frame, root, "pre");
   try { await d.callInFrame(frame, "function(t){ return window.__discoApi ? window.__discoApi.armTask(t) : 0; }", [TASK_EVENT[p.kind] ?? "click"]); } catch {}
 
@@ -110,8 +130,14 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   d.store.insert("actions", { id: actionId, n, t_start: t0, target_id: root.targetId, frame_id: frame.frameId, kind: p.kind, spec: JSON.stringify(spec), resolved: resolved ? JSON.stringify({ selector: p.target, preview: resolved.preview, generated: resolved.generated, count: resolved.count }) : null, pre_shot: pre.shot ?? null, pre_aria: pre.aria ?? null });
   d.publish({ kind: "action", t: t0, targetId: root.targetId, actionId, summary: { kind: p.kind, target: p.target ?? p.url ?? p.key, state: "dispatch" } });
 
-  const settler = new Settler({ t0, quietMs: p.quietMs, noEffectMs: p.noEffectMs, budgetMs: p.budgetMs, maxBudgetMs: p.maxBudgetMs });
-  const unsub = feedFromEvent(d, root.rootTargetId, actionId, settler);
+  let selfBox: { x: number; y: number; w: number; h: number } | null = null;
+  if (resolved?.box && POINTER[p.kind] && resolved.box.w * resolved.box.h <= defaults.selfFeedbackMaxArea && point) {
+    const { point: rp } = await pointToRoot(d, frame, point);
+    const dx = rp.x - point.x, dy = rp.y - point.y;
+    selfBox = { x: resolved.box.x + dx, y: resolved.box.y + dy, w: resolved.box.w, h: resolved.box.h };
+  }
+  const settler = new Settler({ t0, quietMs: p.quietMs, noEffectMs: p.noEffectMs, budgetMs: p.budgetMs, maxBudgetMs: p.maxBudgetMs }, sessionClock(d));
+  const unsub = feedFromEvent(d, root.rootTargetId, actionId, settler, selfBox);
 
   // ---- dispatch ----
   try {
@@ -171,6 +197,15 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   return report;
 }
 
+async function absorbVisual(d: Daemon, root: TargetState, maxMs: number): Promise<void> {
+  const t0 = d.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 60));
+    const cast = root.cast;
+    if (!cast || d.now() - cast.lastChangedT >= 130 || d.now() - t0 >= maxMs) return;
+  }
+}
+
 function failReport(d: Daemon, i: { actionId: string; n: number; kind: string; spec: unknown; frame: FrameInfo; root: TargetState; seqStart: number; resolvedInfo?: Resolved; diagnosis: Report["diagnosis"] }): Report {
   const t0 = d.now();
   d.closeWindow(i.root.rootTargetId);
@@ -188,7 +223,7 @@ export async function awaitSettlement(d: Daemon, sel: Selectors, p: { action?: s
   let actionId: string; let t0: number; let seed: string[] = []; let n: number; let seqStart: number; let kind = "settle";
   if (open && (!p.action || open.actionId === p.action)) {
     actionId = open.actionId; t0 = d.now();
-    seed = [...d.inflight.values()].filter((x) => x.actionId === actionId && x.attribution !== "ambient").map((x) => x.id);
+    seed = [...d.inflight.values()].filter((x) => x.actionId === actionId && x.attribution !== "ambient" && !x.stalled).map((x) => x.id);
     const row = d.store.get<any>("SELECT n, kind, seq_start FROM actions WHERE id=?", actionId);
     n = row?.n ?? d.store.nextActionN(); seqStart = row?.seq_start ?? d.store.lastSeq() + 1; kind = row?.kind ?? "settle";
   } else {
@@ -196,7 +231,7 @@ export async function awaitSettlement(d: Daemon, sel: Selectors, p: { action?: s
     d.openWindow(root.rootTargetId, actionId, t0);
     d.store.insert("actions", { id: actionId, n, t_start: t0, target_id: root.targetId, frame_id: frame.frameId, kind: "settle", spec: JSON.stringify(p) });
   }
-  const settler = new Settler({ t0, budgetMs: p.budgetMs ?? defaults.budgetMs });
+  const settler = new Settler({ t0, budgetMs: p.budgetMs ?? defaults.budgetMs }, sessionClock(d));
   settler.seed(seed);
   const unsub = feedFromEvent(d, root.rootTargetId, actionId, settler);
   const result = await settler.result;

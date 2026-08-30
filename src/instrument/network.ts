@@ -7,7 +7,7 @@ import { defaults } from "../../defaults.ts";
 import { isTextual } from "../store.ts";
 import { fireSentinel } from "../sentinels.ts";
 
-export interface InflightRequest { id: string; targetId: string; frameId: string | null; url: string; family: string; tStart: number; actionId: string | null; attribution: string; resourceType: string | undefined; mime?: string; status?: number; streaming?: boolean; method: string; writeKind: string }
+export interface InflightRequest { id: string; targetId: string; frameId: string | null; url: string; family: string; tStart: number; actionId: string | null; attribution: string; resourceType: string | undefined; mime?: string; status?: number; streaming?: boolean; stalled?: boolean; lastData?: number; stallTimer?: ReturnType<typeof setTimeout>; method: string; writeKind: string }
 
 export function handleNetwork(d: Daemon, t: TargetState, e: CdpEvent): void {
   const p = e.params;
@@ -16,6 +16,12 @@ export function handleNetwork(d: Daemon, t: TargetState, e: CdpEvent): void {
     case "Network.responseReceived": return onResponse(d, t, p as ResponseReceived);
     case "Network.loadingFinished": { void onFinished(d, t, p as LoadingFinished); return; }
     case "Network.loadingFailed": return onFailed(d, t, p as LoadingFailed);
+    case "Network.dataReceived": {
+      const id = d.reqAlias.get(p.requestId) ?? p.requestId;
+      const inf = d.inflight.get(id);
+      if (inf) { inf.lastData = d.now(); if (inf.stallTimer) { clearTimeout(inf.stallTimer); armStallTimer(d, t, inf); } }
+      return;
+    }
     case "Network.requestServedFromCache": { const id = d.reqAlias.get(p.requestId) ?? p.requestId; d.store.update("requests", { from_cache: 1 }, "id=?", [id]); return; }
     case "Network.webSocketCreated": {
       const now = d.now();
@@ -93,15 +99,31 @@ function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
     d.inflight.delete(id);
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: id, summary: { s: r.status, u: short(inf.url), ms: Math.round(at - inf.tStart), a: inf.attribution, streaming: true } });
   }
+  if (inf && !streaming) armStallTimer(d, t, inf);
   if (r.status >= 400 && inf && inf.attribution !== "none" && inf.attribution !== "ambient") {
     void fireSentinel(d, t, "error", { status: r.status, url: short(inf.url), method: inf.method, request: id }, { t: at });
   }
+}
+
+/** Unread-body demotion (DECISIONS #22): headers arrived, then silence — the page never consumed the
+ *  body, so loadingFinished may never come. Release the request from settlement; keep it inflight for
+ *  the eventual (possible) completion. */
+function armStallTimer(d: Daemon, t: TargetState, inf: InflightRequest) {
+  if (inf.stallTimer) clearTimeout(inf.stallTimer);
+  inf.stallTimer = setTimeout(() => {
+    if (!d.inflight.has(inf.id) || inf.stalled) return;
+    inf.stalled = true;
+    const at = d.now();
+    d.store.update("requests", { body_state: "unread" }, "id=? AND t_end IS NULL", [inf.id]);
+    d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: inf.id, summary: { s: inf.status, u: short(inf.url), a: inf.attribution, stalled: true, bs: "unread" } });
+  }, defaults.unreadBodyGraceMs);
 }
 
 async function onFinished(d: Daemon, t: TargetState, p: LoadingFinished) {
   const id = d.reqAlias.get(p.requestId) ?? p.requestId;
   const at = d.monoToT(p.timestamp);
   const inf = d.inflight.get(id);
+  if (inf?.stallTimer) clearTimeout(inf.stallTimer);
   const patch: Record<string, unknown> = { t_end: at, encoded_size: p.encodedDataLength };
   let size: number | null = null;
   if (inf?.streaming) {
@@ -134,6 +156,7 @@ async function onFinished(d: Daemon, t: TargetState, p: LoadingFinished) {
 function onFailed(d: Daemon, t: TargetState, p: LoadingFailed) {
   const id = d.reqAlias.get(p.requestId) ?? p.requestId;
   const at = d.monoToT(p.timestamp);
+  const inf0 = d.inflight.get(id); if (inf0?.stallTimer) clearTimeout(inf0.stallTimer);
   d.store.update("requests", { t_end: at, error: p.errorText, body_state: p.canceled ? "none" : "error" }, "id=?", [id]);
   d.attrib.observeEnd(id, at);
   const inf = d.inflight.get(id);

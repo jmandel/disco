@@ -49,6 +49,7 @@ export type State = {
   requireAuth: boolean;
   /** how long /api/notify-poll is held waiting for a push trigger (ms) */
   notifyPollHoldMs: number;
+  notify: boolean;
 };
 
 export const DEFAULTS: Readonly<State> = Object.freeze({
@@ -65,6 +66,7 @@ export const DEFAULTS: Readonly<State> = Object.freeze({
   rerenderOnHover: true,
   requireAuth: false,
   notifyPollHoldMs: 25000,
+  notify: false,
 });
 
 /** Patch accepted by POST /ctl and ctl.set(): knobs plus the write-only triggers. */
@@ -456,6 +458,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
 
   // --- main server -------------------------------------------------------------
   mainServer = Bun.serve<WsData>({
+    idleTimeout: 120, // long-polls (/api/poll, /api/notify-poll) outlive the 10s default
     port: wantPort,
     async fetch(req, server) {
       const t0 = performance.now();
@@ -490,6 +493,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
 
   // --- cross-origin server ------------------------------------------------------
   const xServer = Bun.serve({
+    idleTimeout: 60,
     port: wantPort === 0 ? 0 : mainServer.port! + 1,
     async fetch(req) {
       const url = new URL(req.url);

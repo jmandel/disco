@@ -14,9 +14,10 @@ import { defaults } from "../defaults.ts";
 import type { IgnoreMask, Box, TileSig } from "./visual.ts";
 import type { AttachedToTarget, TargetInfo } from "./protocol.ts";
 import { registerActions } from "./act.ts";
+import { AmbientDom } from "./ambient-dom.ts";
 
 export interface FrameInfo { frameId: string; targetId: string; parentFrameId: string | null; url: string; name?: string; contexts: Map<string, number>; observerReady: boolean }
-export interface CastState { lastHash: string | null; lastSig: TileSig | null; lastChangedT: number; lastPersistT: number; lastDecodeT: number; lastBytes: Uint8Array | null; lastT: number; ignore: IgnoreMask; boxes: Box[]; frames: number; decoded: number; w: number; h: number }
+export interface CastState { lastHash: string | null; lastSig: TileSig | null; lastChangedT: number; lastPersistT: number; lastDecodeT: number; lastBytes: Uint8Array | null; lastT: number; ignore: IgnoreMask; boxes: Box[]; frames: number; decoded: number; w: number; h: number; viewW: number; viewH: number }
 export interface TargetState {
   targetId: string; sessionId: string; type: string; url: string; title: string;
   parentTargetId: string | null; openerId: string | null; rootTargetId: string;
@@ -44,6 +45,7 @@ export class Daemon {
   wsUrls = new Map<string, string>();
   windows = new Map<string, ActionWindow>(); // rootTargetId → open causality window
   attrib!: Attributor;
+  ambientDom = new AmbientDom();
   primaryTargetId: string | null = null;
   private listeners = new Set<(ev: DaemonEvent) => void>();
   private rpc!: ReturnType<typeof serveRpc>;

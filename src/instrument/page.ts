@@ -168,8 +168,9 @@ function onObserverMsg(d: Daemon, t: TargetState, frameId: string | null, msg: O
     const at = d.store.fromEpochMs(msg.t);
     const actionId = d.windowFor(t.targetId, at)?.actionId ?? null;
     if (msg.count > 0) {
+      const amb = d.ambientDom.observe(frameId, msg.roots, at, !actionId, { added: msg.added, removed: msg.removed, attrs: msg.attrs, text: msg.text });
       const seq = d.store.insert("mutations", { t: at, target_id: t.targetId, frame_id: frameId, count: msg.count, added: msg.added, removed: msg.removed, attrs: msg.attrs, text: msg.text, roots: JSON.stringify(msg.roots), action_id: actionId });
-      d.publish({ kind: "mutation", t: at, targetId: t.targetId, frameId: frameId ?? undefined, actionId, ref: seq, summary: { n: msg.count, add: msg.added, rm: msg.removed, roots: msg.roots.slice(0, 4) } }, { stream: false });
+      d.publish({ kind: "mutation", t: at, targetId: t.targetId, frameId: frameId ?? undefined, actionId, ref: seq, summary: { n: msg.count, add: msg.added, rm: msg.removed, roots: msg.roots.slice(0, 4), ...(amb ? { amb: true } : {}) } }, { stream: false });
     }
     for (const c of msg.dialogs) void fireSentinel(d, t, c.kind === "expiry" ? "session_expiry" : "dialog", { title: c.title, text: c.text, role: c.role, sel: c.sel, area: c.area, key: c.key }, { frameId, t: at });
     for (const c of msg.toasts) void fireSentinel(d, t, "toast", { title: c.title, text: c.text, role: c.role, sel: c.sel, area: c.area, key: c.key }, { frameId, t: at });
@@ -182,7 +183,8 @@ async function onScreencastFrame(d: Daemon, t: TargetState, p: ScreencastFrame) 
   const bytes = new Uint8Array(Buffer.from(p.data, "base64"));
   const at = p.metadata?.timestamp ? d.store.fromEpochMs(p.metadata.timestamp * 1000) : d.now();
   const hash = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-  const c = t.cast ?? (t.cast = { lastHash: null, lastSig: null, lastChangedT: -1, lastPersistT: -1, lastDecodeT: -1, lastBytes: null, lastT: -1, ignore: new IgnoreMask(), boxes: [], frames: 0, decoded: 0, w: p.metadata?.deviceWidth ?? 0, h: p.metadata?.deviceHeight ?? 0 });
+  const c = t.cast ?? (t.cast = { lastHash: null, lastSig: null, lastChangedT: -1, lastPersistT: -1, lastDecodeT: -1, lastBytes: null, lastT: -1, ignore: new IgnoreMask(), boxes: [], frames: 0, decoded: 0, w: 0, h: 0, viewW: 0, viewH: 0 });
+  if (p.metadata?.deviceWidth) { c.viewW = p.metadata.deviceWidth; c.viewH = p.metadata.deviceHeight; }
   c.frames++;
   c.lastT = at; c.lastBytes = bytes;
   if (hash === c.lastHash) return;
