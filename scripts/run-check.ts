@@ -11,6 +11,7 @@ import { Session } from "../src/client.ts";
 // Per-target setup: where to point the browser, and what host to scope to. Add a line per pack.
 const TARGETS: Record<string, { url: string; scope: string }> = {
   openemr: { url: "https://demo.openemr.io/a/openemr/index.php", scope: "demo.openemr.io" },
+  saucedemo: { url: "https://www.saucedemo.com/", scope: "saucedemo.com" },
 };
 
 const name = process.argv[2];

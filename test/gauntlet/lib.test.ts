@@ -42,6 +42,18 @@ describe("gauntlet function library", () => {
     expect(hits.length).toBeGreaterThan(0);
   }, 15000);
 
+  test("typing preserves shifted punctuation (underscore bug regression, DECISIONS #32)", async () => {
+    await env.open("/");
+    await sleep(300);
+    const s2 = await Session.connect(env.dir);
+    try {
+      await s2.evaluate(() => { const el = document.getElementById("search") as HTMLInputElement; el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
+      await s2.type("#search", "a_b-c.d");
+      const v = await s2.evaluate<string>(() => (document.getElementById("search") as HTMLInputElement).value);
+      expect(v).toBe("a_b-c.d");
+    } finally { s2.close(); }
+  }, 15000);
+
   test("assertHome throws off-anchor (robustness: functions verify where they are)", async () => {
     await env.open("/away.html");                     // navigate somewhere without #load-chart
     await sleep(300);

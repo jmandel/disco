@@ -20,10 +20,12 @@ not a required shape — such knowledge is usually better expressed as functions
 OpenEMR pack started with a `site.json` and then folded it into `lib.ts` + `nav-and-quirks.md`, which is
 the expected direction.)
 
-## The two current instances
+## The current instances
 
 - **`gauntlet/`** — instance #1, the synthetic app (our known-answer control). `nav-and-quirks.md`, `ledger.md`, `friction.md`, `scripts/` (early functions, as standalone runnables — will lift toward composable importable functions).
 - **`openemr/`** — instance #2, OpenEMR 8.3.0 demo. `lib.ts` (function library: `login`/`findPatient`/`openPatient`/`extractSummary`, anchor-oriented, wire-first, defensive), `check.ts` (live drift loop), `nav-and-quirks.md`, `ledger.md`, `dogfood-1.md`, `screenshots/`.
+
+- **`saucedemo/`** — instance #3, Sauce Labs "Swag Labs" (a client-rendered React SPA, **no data API**). `lib.ts` (login / listProducts / addToCart / openCart / checkout — DOM-first), `check.ts`, `nav-and-quirks.md`, `ledger.md`. Chosen to prove the Layer-1 reusable layer generalizes past wire-rich apps: it uses `lib/nav` (anchors + defensive) with **no** `lib/wire` at all.
 
 ## The promotion path (raw → durable)
 

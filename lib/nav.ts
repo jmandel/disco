@@ -3,7 +3,8 @@
 import type { Session } from "../src/client.ts";
 
 /** Assert an element is present & visible, or throw with a clear "anchor not reached" message.
- *  The building block product functions use to verify they arrived where they think they did. */
+ *  The building block product functions use to verify they arrived where they think they did.
+ *  NB: `selector` is a plain CSS selector (raw querySelector), not the Playwright engine syntax. */
 export async function assertVisible(s: Session, selector: string, msg?: string, opts: { frame?: string } = {}): Promise<void> {
   const ok = await s.evaluate<boolean>(
     (sel: string) => { const el = document.querySelector(sel); if (!el) return false; const r = (el as HTMLElement).getBoundingClientRect(); return r.width > 1 && r.height > 1; },

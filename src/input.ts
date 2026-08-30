@@ -94,19 +94,23 @@ const NAMED: Record<string, KeyDef> = {
   Space: { key: " ", code: "Space", keyCode: 32, text: " " },
   F1: { key: "F1", code: "F1", keyCode: 112 }, F2: { key: "F2", code: "F2", keyCode: 113 }, F5: { key: "F5", code: "F5", keyCode: 116 },
 };
-const SHIFTED = '~!@#$%^&*()_+{}|:"<>?';
-const UNSHIFTED = "`1234567890-=[]\;',./";
-function charDef(ch: string): KeyDef & { shift?: boolean } {
-  if (/[a-z]/.test(ch)) return { key: ch, code: "Key" + ch.toUpperCase(), keyCode: ch.toUpperCase().charCodeAt(0), text: ch };
-  if (/[A-Z]/.test(ch)) return { key: ch, code: "Key" + ch, keyCode: ch.charCodeAt(0), text: ch, shift: true };
+// Physical key (code) + Windows virtual-key code per printable char. `text` drives insertion, so we do
+// NOT set the Shift modifier for typing — that combination dropped shifted punctuation like "_" (the VKs
+// also matter: "_"/"-" is 189, not the ASCII 45). Real keys, correct codes, text-driven insertion.
+const KEYMAP: Record<string, [string, number]> = {
+  "`": ["Backquote", 192], "-": ["Minus", 189], "=": ["Equal", 187], "[": ["BracketLeft", 219], "]": ["BracketRight", 221], "\\": ["Backslash", 220], ";": ["Semicolon", 186], "'": ["Quote", 222], ",": ["Comma", 188], ".": ["Period", 190], "/": ["Slash", 191],
+  "~": ["Backquote", 192], "_": ["Minus", 189], "+": ["Equal", 187], "{": ["BracketLeft", 219], "}": ["BracketRight", 221], "|": ["Backslash", 220], ":": ["Semicolon", 186], '"': ["Quote", 222], "<": ["Comma", 188], ">": ["Period", 190], "?": ["Slash", 191],
+  "!": ["Digit1", 49], "@": ["Digit2", 50], "#": ["Digit3", 51], "$": ["Digit4", 52], "%": ["Digit5", 53], "^": ["Digit6", 54], "&": ["Digit7", 55], "*": ["Digit8", 56], "(": ["Digit9", 57], ")": ["Digit0", 48],
+};
+function charDef(ch: string): KeyDef {
+  if (/[a-zA-Z]/.test(ch)) return { key: ch, code: "Key" + ch.toUpperCase(), keyCode: ch.toUpperCase().charCodeAt(0), text: ch };
   if (/[0-9]/.test(ch)) return { key: ch, code: "Digit" + ch, keyCode: ch.charCodeAt(0), text: ch };
-  if (ch === " ") return { ...NAMED.Space };
-  const si = SHIFTED.indexOf(ch);
-  if (si >= 0) { const base = UNSHIFTED[si]; const d2 = charDef(base); return { ...d2, key: ch, text: ch, shift: true }; }
-  const codes: Record<string, string> = { "`": "Backquote", "-": "Minus", "=": "Equal", "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash", ";": "Semicolon", "'": "Quote", ",": "Comma", ".": "Period", "/": "Slash" };
-  if (codes[ch]) return { key: ch, code: codes[ch], keyCode: ch.charCodeAt(0), text: ch };
-  return { key: ch, code: "", keyCode: 0, text: ch }; // falls back to insertText below
+  if (ch === " ") return { key: " ", code: "Space", keyCode: 32, text: " " };
+  const m = KEYMAP[ch];
+  if (m) return { key: ch, code: m[0], keyCode: m[1], text: ch };
+  return { key: ch, code: "", keyCode: 0, text: ch }; // non-ASCII → insertText fallback
 }
+
 const MODS: Record<string, number> = { Alt: 1, Control: 2, Ctrl: 2, Meta: 4, Cmd: 4, Shift: 8 };
 
 /** Press a key or combo ("Enter", "ArrowDown", "Control+a"). */
@@ -116,7 +120,6 @@ export async function pressKey(d: Daemon, root: TargetState, combo: string): Pro
   let modifiers = 0;
   for (const m of parts) modifiers |= MODS[m] ?? 0;
   const def = NAMED[keyName] ?? charDef(keyName.length === 1 ? keyName : keyName.toLowerCase());
-  if ((def as any).shift) modifiers |= 8;
   const text = modifiers & ~8 ? undefined : def.text; // ctrl/alt combos don't produce text
   await d.send(root, "Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", modifiers, key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode, text, unmodifiedText: text });
   await d.send(root, "Input.dispatchKeyEvent", { type: "keyUp", modifiers, key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode });
@@ -129,9 +132,9 @@ export async function typeText(d: Daemon, root: TargetState, text: string, opts:
     const def = charDef(ch);
     if (!def.code) { await d.send(root, "Input.insertText", { text: ch }); }
     else {
-      const modifiers = (def as any).shift ? 8 : 0;
-      await d.send(root, "Input.dispatchKeyEvent", { type: "keyDown", modifiers, key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode, text: def.text, unmodifiedText: def.text });
-      await d.send(root, "Input.dispatchKeyEvent", { type: "keyUp", modifiers, key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode });
+      // text drives insertion (works for shifted punctuation, caps, symbols); no Shift modifier needed
+      await d.send(root, "Input.dispatchKeyEvent", { type: "keyDown", modifiers: 0, key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode, text: def.text, unmodifiedText: def.text });
+      await d.send(root, "Input.dispatchKeyEvent", { type: "keyUp", modifiers: 0, key: def.key, code: def.code, windowsVirtualKeyCode: def.keyCode, nativeVirtualKeyCode: def.keyCode });
     }
     if (delay) await sleep(delay);
   }

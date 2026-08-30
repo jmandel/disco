@@ -35,9 +35,9 @@ product needs. Five shapes a pack can hold (take any subset; packs differ on pur
    and for **automated test loops** that run over them.
 5. **Evidence** — screenshots, reports, cited act ids / store cursors.
 
-The first two instances differ exactly this way, which is the point: `artifacts/gauntlet/` is
-script-heavy (a test target), `artifacts/openemr/` is understanding-heavy (partial coverage). Neither is
-"incomplete against a schema"; each is shaped by need.
+The three instances differ exactly this way, on purpose: `artifacts/gauntlet/` is script-heavy (a test
+target), `artifacts/openemr/` is understanding+wire-heavy (server-rendered EHR), `artifacts/saucedemo/` is
+DOM-first (a client-rendered SPA with no data API). None is "incomplete against a schema"; each is shaped by need.
 
 **Design principle for the function library (#4):** the engineering goes into **robustness** — handling
 rough edges, recovering from problems, reliably reaching known anchor states you can start a workflow
@@ -68,10 +68,10 @@ exploration sharpens the platform, not just its own pack. (Full model: `artifact
    → automate, with both instances as worked examples). Grows as the libraries do.
 4. ✅ **Test loops** — per-pack `check.ts` + a one-command runner `scripts/run-check.ts <target>` that
    stands up a fresh browser+session, runs the pack's check, and exits with its status (schedulable).
-5. **Later (needs a direction call)** — MCP / agent-tool exposure of the libraries; a third,
-   deliberately-different (non-EHR) system to force the reusable layer to generalize; PHI / retention
-   posture when a real (non-demo) target needs it (until then: demo / BAA-covered environments only).
-   Also open: deepen OpenEMR (encounter/notes, save-flow), and the DECISIONS OPEN items.
+5. **Later** — ✅ *third instance done*: `artifacts/saucedemo/` (Sauce Labs, a DOM-only React SPA) proved
+   the Layer-1 reusable layer generalizes past wire-rich apps (uses `lib/nav`, no `lib/wire`). Still open:
+   MCP / agent-tool exposure of the libraries; deepen OpenEMR (encounter/notes, save-flow); PHI / retention
+   posture when a real (non-demo) target needs it (until then: demo / BAA-covered only); the DECISIONS OPEN items.
 
-Sequence so far: **1 → 2 → 3 → 4 done.** Next is the Layer-1 reusable layer proving out on a 3rd system,
-or going deeper on OpenEMR — a direction call.
+Sequence so far: **1 → 2 → 3 → 4 done, + 3rd instance (saucedemo).** Three instances now exercise the
+platform (gauntlet synthetic, OpenEMR server-rendered+wire, saucedemo client-rendered DOM-only).
