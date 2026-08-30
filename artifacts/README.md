@@ -19,7 +19,9 @@ of the eventual skill.") This directory is home #2 — **per-app knowledge**. Th
   - `ledger.md` — the variability ledger: observed-vs-inferred with n-counts and the experiment that resolves each.
   - `scripts/` — reusable, defensive subtask scripts (each tested against a live session at least once).
   - `dogfood-1.md` + `screenshots/` — the session report and evidence.
-- **top-level `nav-and-quirks.md`, `ledger.md`, `friction.md`, `scripts/`** — the **gauntlet** Slice-8 dry-run handover (the fresh-agent exam artifacts). Left in place because that reproduction is cited/committed; new targets get their own subdir.
+- **`gauntlet/`** — the site pack for the gauntlet-as-unknown-app (the Slice-8 dry-run handover). Same shape as any target: `nav-and-quirks.md`, `ledger.md`, `friction.md`, `scripts/`.
+
+Every target gets its own subdir `artifacts/<target>/`; there is no top-level per-target file.
 
 ## The promotion path (raw → durable)
 

@@ -11,13 +11,13 @@ A disco daemon must be attached to the browser showing the app (see repo README)
 ```bash
 cd /home/jmandel/hobby/discovery-docs-original-take/disco   # repo root — session resolution is cwd-relative
 bun cli/disco.ts session new dryrun --attach <cdp-port> --scope localhost:4820   # if not already running
-bun artifacts/scripts/open-record.ts 3
-bun artifacts/scripts/extract-rows.ts            # summary; --json for the full 10k rows
-bun artifacts/scripts/save-verified.ts           # WRITE: POSTs /api/save
+bun artifacts/gauntlet/scripts/open-record.ts 3
+bun artifacts/gauntlet/scripts/extract-rows.ts            # summary; --json for the full 10k rows
+bun artifacts/gauntlet/scripts/save-verified.ts           # WRITE: POSTs /api/save
 ```
 
 Scripts use the *current* session (`sessions/.current`). To target another:
-`DISCO_SESSION=<name> bun artifacts/scripts/…` or `DISCO_SESSIONS_DIR=… `. They import
+`DISCO_SESSION=<name> bun artifacts/gauntlet/scripts/…` or `DISCO_SESSIONS_DIR=… `. They import
 `../../src/client.ts` relative to this directory, so keep them in place (or adjust the import).
 
 | script | write footprint | what it defends against |
