@@ -130,6 +130,14 @@ switch (cmd) {
       const c = await RpcClient.connect(sock);
       if (f("state") && has("launch")) { await c.call("state.restore", { state: JSON.parse(readFileSync(f("state")!, "utf8")) }); console.error("storage state restored"); }
       const info = await c.call("session.info");
+      // What did we attach to? A bot challenge (Cloudflare Turnstile, hCaptcha, Akamai, PerimeterX…) is a 403 page
+      // that a script mistakes for "loading" — name it now (GUIDANCE §8) instead of letting the run invest in it.
+      try {
+        const probe = await c.call("evaluate", { fn: "() => ({ title: document.title, html: (document.documentElement.outerHTML || '').slice(0, 40000) })", world: "main" });
+        const v = probe?.value ?? {}; const h = String(v.html ?? ""); const t = String(v.title ?? "");
+        const challenge = /challenges\.cloudflare\.com|cf-chl|cf_chl|turnstile|hcaptcha\.com|_Incapsula_|perimeterx|px-captcha|akamai.*bot|distil_/i.test(h) || /^just a moment|attention required|access denied|are you a human|verify you are human/i.test(t);
+        if (challenge) console.error(`⚠ the page you attached to looks like a BOT CHALLENGE (title ${JSON.stringify(t.slice(0, 60))}). A headless browser will not pass it by waiting — attach to a real browser that has passed it, or use another host. Everything recorded from here is the challenge, not the app.`);
+      } catch {}
       for (const ig of ignores) { const r = await c.call("rules.add", { kind: "ambient", match: ig, note: "session new --ignore" }); console.error(`rule #${r.id}: requests whose URL contains ${JSON.stringify(ig)} are ambient`); }
       console.error(`app "${product}" — run ${info.manifest.run} ${info.resumed ? "(resumed)" : "(new)"} (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
       for (const t of info.targets) console.error(`  ${t.targetId.slice(0, 8)} ${t.type} ${t.url}`);

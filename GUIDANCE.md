@@ -259,6 +259,8 @@ What discovery should expect, detect, and document. Generic to enterprise SPAs; 
 - **Optimistic UI:** the screen says saved before the server agrees; the wire is the truth — check the attributed response status, not the toast.
 - **Third-party telemetry and crash reporters:** analytics beacons and error reporters (frequently 401/404/CORS-blocked) fire *per event* — on a refusal, on every page load — never periodically, so the ambient classifier cannot learn them; they hold settlement until they fail and spam the error sentinel. Mark the family ambient explicitly; never let one decide a verdict.
 - **Native browser dialogs and `beforeunload`:** auto-handled per session policy, always recorded, because an unhandled `confirm` freezes everything silently.
+- **Bot challenges (Cloudflare Turnstile, hCaptcha, Akamai, PerimeterX):** a headless browser is answered with a 403 challenge page that looks like "loading" to a script — a challenge iframe in the targets census, a "Just a moment…" title. Waiting never passes it; the instrument step must detect it and stop (attach to a real browser that has passed the challenge, or another host of the same build).
+- **Cold-load hydration races:** an SPA's inputs exist before its handlers do; the first keystrokes into a form on a fresh load are swallowed. Verify that a field holds what was typed before submitting, and treat a first check run that fails on it as the finding it is.
 
 Each instance actually encountered goes in the artifacts with its evidence handle; the catalog above seeds the *checklist* discovery runs even when nothing goes wrong.
 

@@ -50,10 +50,18 @@ store). `session new` writes `apps/.current`, which is what "the current app" me
 without `--app`.
 Multi-tab: `disco targets` shows which page is `primary` (where `act` goes); `--target <id-prefix|url-part>`
 or `disco focus` picks another — a popup can become the only page if the first tab is closed.
-**Bot-scored hosts:** a public demo behind Cloudflare (Turnstile "Just a moment…") will not let headless
-Chromium in — the targets census shows the `challenges.cloudflare.com` iframe and the screenshot shows the
-checkbox. Attach to a real browser you have passed the challenge in, or use a host without it (the
-OpenMRS pack fell back from `o3.` to `dev3.openmrs.org`).
+**Look at what you attached to before investing anything.** `disco targets` + a screenshot after
+`session new`: a bot challenge, a maintenance page, a login wall for another tenant, a redirect to
+marketing — all look like "the app" to a script and cost minutes each. `session new` says so when it can
+tell (a bot-challenge page is detected and named); when it can't, the census is your check. A headless
+browser refused by a bot challenge is not going to pass it by waiting — attach to a real browser you have
+passed the challenge in, or use another host of the same build.
+
+**Long observations run in the background.** A classifier warm-up (`disco idle 120000` for minute-scale
+heartbeats) only needs the *page* to sit still — not you. Start it as a background command and spend the
+time on recon (the store, `families`, `targets`, the frames); the harness tells you when it finishes.
+Never write your own wait loop for it: `until ! pgrep -f 'disco idle'` matches its own shell's command
+line and spins forever (a real run lost two minutes to exactly that without noticing).
 
 ### 2. Explore — act, and read what happened
 
@@ -115,6 +123,15 @@ sometimes appears). This is what `apps/<target>/nav-and-quirks.md` + `ledger.md`
 
 Distill the transitions into a **function library** in the pack — plain importable TS, one job each. See
 the recipe below. Then a `check.ts` runs them against the live app to catch drift (`bun scripts/run-check.ts <target>`).
+Export a `ready` predicate from `check.ts` (the app's first anchor) so the check waits for the shell, not
+just a visible `body`. Run the check when you are *done* editing — a check launched and then invalidated by
+a patch is a minute lost — and read every result: a failing first check is usually the best bug report
+you will get (the diagnosis names the state the app was actually in).
+
+**Your own clock is the bottleneck, not the app.** In a measured 20-minute pack build the app needed 32
+seconds of settle time in total; the rest was authoring, deciding, and — the avoidable part — waiting
+wrong. `bun scripts/timing-report.ts <app>` shows page time vs daemon overhead; the gaps between your tool
+calls are the third column, and the only one you control.
 
 ## The two questions: `act()` vs `until` — the contract
 
