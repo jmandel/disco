@@ -53,6 +53,7 @@ session ls | info             list apps (runs per app) / current run info
 targets                       scoped targets + frames (primary = where act/watch/eval/screenshot go without --target)
 focus <id-prefix|url-part>    make another scoped page the primary target
 tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
+schema [table]                the store's tables + columns (what sql can select)
 sql [<product>] <query> [--json|--wide]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; cells cut at 60 chars (--wide: 200; --json: all)
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
 families [--mark-read F] [--ambient F|url-part] [--not-ambient F|url-part] [--forget]   learned families + evidence; a url-part becomes a persistent rule
@@ -243,6 +244,15 @@ switch (cmd) {
     const r = await c.call("subscribe");
     console.error(`tailing from seq ${r.lastSeq} (Ctrl-C to stop)`);
     await new Promise(() => {});
+    break;
+  }
+
+  case "schema": {
+    // the store's tables and columns, from the live DB (schema.sql is the source; this is what THIS store has)
+    const st = openStore(pos[2] ? sessionDir(pos[1]) : sessionDir());
+    const tables = st.sql<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%' ORDER BY name").map((r) => r.name);
+    for (const t of tables.filter((t) => !pos[1] || pos[2] || t === pos[1] || t.includes(pos[1]))) console.log(`${t}(${st.sql<{ name: string }>(`PRAGMA table_info(${t})`).map((c) => c.name).join(", ")})`);
+    st.close();
     break;
   }
 
