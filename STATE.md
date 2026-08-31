@@ -16,19 +16,19 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - Slice 2: act()/settlement/report/watch/awaitSettlement, vendored Playwright selectors, input dispatch (click/right/dbl/middle/hover/type/press/scroll/select/navigate/drag), OOPIF coordinate translation, self-feedback suppression, scroll-absorb, ambient DOM roots, unread-body demotion — `bun test test/gauntlet/slice2.test.ts` 14/14; unit tests (settle, attribute) green.
 
 ## In progress — platform build-out (PLATFORM.md plan)
-- Slice 1 ✅ ways-of-knowing palette named in `artifacts/README.md` (descriptive, not a schema).
-- Slice 2a ✅ function-library pattern on the gauntlet: `lib/wire.ts` + `lib/nav.ts` (generic reusable moves), `artifacts/gauntlet/lib.ts` (reference per-product library), `test/gauntlet/lib.test.ts`. Suite 87/87.
+- Slice 1 ✅ ways-of-knowing palette named in `apps/README.md` (descriptive, not a schema).
+- Slice 2a ✅ function-library pattern on the gauntlet: `lib/wire.ts` + `lib/nav.ts` (generic reusable moves), `apps/gauntlet/lib.ts` (reference per-product library), `test/gauntlet/lib.test.ts`. Suite 87/87.
 - Slice 3 ✅ usage & philosophy field guide `docs/using-disco.md` (instrument→explore→discover→characterize→automate, both instances as worked examples).
 - Slice 4 ✅ per-pack `check.ts` + one-command runner `scripts/run-check.ts <target>` (fresh browser+session, runs the check, exits status). `run-check.ts openemr` green.
-- 3rd instance ✅ `artifacts/saucedemo/` — Sauce Labs (client-rendered React SPA, no data API). DOM-first pack (`lib/nav`, no `lib/wire`) proving the reusable layer generalizes; full purchase flow via `run-check.ts saucedemo`. Fixed a real keyboard-typing bug (shifted punctuation like `_` dropped — DECISIONS #32).
-- Slice 2b ✅ OpenEMR function library `artifacts/openemr/lib.ts` (login / findPatient [finder search past page 1] / openPatient / extractSummary, anchor-oriented, wire-first, defensive) + `artifacts/openemr/check.ts` live drift loop. Validated vs demo.openemr.io: Belford (page 1) + Stone (page 2 via search) end-to-end, idempotent. Fixed a real daemon bug (prune stale same-target child frames on main-frame re-navigation, DECISIONS #31). Retired site.json → folded into lib.ts + nav-and-quirks.md.
+- 3rd instance ✅ `apps/saucedemo/` — Sauce Labs (client-rendered React SPA, no data API). DOM-first pack (`lib/nav`, no `lib/wire`) proving the reusable layer generalizes; full purchase flow via `run-check.ts saucedemo`. Fixed a real keyboard-typing bug (shifted punctuation like `_` dropped — DECISIONS #32).
+- Slice 2b ✅ OpenEMR function library `apps/openemr/lib.ts` (login / findPatient [finder search past page 1] / openPatient / extractSummary, anchor-oriented, wire-first, defensive) + `apps/openemr/check.ts` live drift loop. Validated vs demo.openemr.io: Belford (page 1) + Stone (page 2 via search) end-to-end, idempotent. Fixed a real daemon bug (prune stale same-target child frames on main-frame re-navigation, DECISIONS #31). Retired site.json → folded into lib.ts + nav-and-quirks.md.
 
 ## Slice 8 — PASSED (2026-08-30)
-- Stage (a): a fresh Fable agent ran a full discovery session against the gauntlet-as-unknown-app (51 acts): artifacts/gauntlet/ holds nav-and-quirks.md, ledger.md (interstitial n=5/5 with hypothesis + experiments), friction.md, and 3 tested defensive scripts. Commit 35ad2f6.
-- Stage (b): a SECOND cold agent, given only artifacts/ + README, executed "open a record and extract row names via the wire" FIRST TRY under both modal states with zero fixes (records 2 and 3; interstitial acknowledged then absent; 10,000 rows via the 496KB /api/rows body, task-attributed).
+- Stage (a): a fresh Fable agent ran a full discovery session against the gauntlet-as-unknown-app (51 acts): apps/gauntlet/ holds nav-and-quirks.md, ledger.md (interstitial n=5/5 with hypothesis + experiments), friction.md, and 3 tested defensive scripts. Commit 35ad2f6.
+- Stage (b): a SECOND cold agent, given only apps/ + README, executed "open a record and extract row names via the wire" FIRST TRY under both modal states with zero fixes (records 2 and 3; interstitial acknowledged then absent; 10,000 rows via the 496KB /api/rows body, task-attributed).
 
 ## Dogfood #1 — DONE (OpenEMR 8.3.0 demo, 2026-08-30)
-- Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; artifacts/openemr/dogfood-1.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
+- Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; apps/openemr/dogfood-1.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
 
 ## Next — plan slices 1–4 all done; remaining is the "later" bucket (a direction call)
 - MCP / agent-tool exposure of the pack function libraries.
@@ -50,4 +50,4 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - scrollIntoView repaints the whole viewport → absorbed before the causality window opens.
 - Small-target self-repaint (pressed/focus) suppressed from the visual channel.
 - Verdict labels are best-effort: ambient content rendering in the settle tail can retag network→dom without changing timing (DECISIONS #30) — assert timing+attribution, not the label, in non-interference tests.
-- Function libraries live in the pack (`artifacts/<target>/lib.ts`), generic moves in `lib/`; live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline.
+- Function libraries live in the pack (`apps/<target>/lib.ts`), generic moves in `lib/`; live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline.

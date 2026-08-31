@@ -1,6 +1,6 @@
-# artifacts/ — the per-product packs
+# apps/ — the per-product packs
 
-This directory is **Layer 2** (see `PLATFORM.md`): one subdir per system we explore, `artifacts/<target>/`.
+This directory is **Layer 2** (see `PLATFORM.md`): one subdir per system we explore, `apps/<target>/`.
 A pack is **not a template** — it's a loose home that accretes whatever *ways of knowing* the product
 needs. Packs differ on purpose (`gauntlet/` is function/script-heavy; `openemr/` is understanding-heavy,
 partial). The other two homes for knowledge live elsewhere: truths about the **tool** → `src/` +

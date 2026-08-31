@@ -1,5 +1,5 @@
 // One-command live drift check for a product pack: launch a headless browser, attach a scoped session,
-// open the target, run artifacts/<target>/check.ts's check(s), tear down, exit with its status. Suitable
+// open the target, run apps/<target>/check.ts's check(s), tear down, exit with its status. Suitable
 // for a scheduled regression loop. Hits the live app, so it is a script — never a *.test.ts.
 //   bun scripts/run-check.ts openemr
 import { rmSync, mkdirSync } from "node:fs";
@@ -28,7 +28,7 @@ try {
   await daemon.cdp.send("Target.createTarget", { url: cfg.url });
   await new Promise((r) => setTimeout(r, 4000)); // let the scoped page attach + load
   const s = await Session.connect(join(base, "session"));
-  const { check } = await import(`../artifacts/${name}/check.ts`);
+  const { check } = await import(`../apps/${name}/check.ts`);
   const passed = await check(s);
   s.close();
   code = passed ? 0 : 1;

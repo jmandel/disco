@@ -8,7 +8,7 @@ Constitution: [GUIDANCE.md](GUIDANCE.md). Construction plan: [BRIEF.md](BRIEF.md
 ## Docs
 
 - **[docs/using-disco.md](docs/using-disco.md)** — the field guide: how to use disco to instrument/explore/discover/characterize/automate, with worked examples.
-- **[PLATFORM.md](PLATFORM.md)** — the two-layer platform + the plan. **[GUIDANCE.md](GUIDANCE.md)** — constitution + methodology. **[artifacts/README.md](artifacts/README.md)** — the per-product packs.
+- **[PLATFORM.md](PLATFORM.md)** — the two-layer platform + the plan. **[GUIDANCE.md](GUIDANCE.md)** — constitution + methodology. **[apps/README.md](apps/README.md)** — the per-product packs.
 
 ## Quickstart: ten lines to a first observed click
 

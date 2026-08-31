@@ -5,8 +5,8 @@ did not build. This is the *usage* guide (design philosophy + how to use it well
 constitution and the discovery methodology see `GUIDANCE.md`; for what the project *is* and where it's
 going, `PLATFORM.md`; for the hard-won engine gotchas, `DECISIONS.md` #16–31.
 
-The worked examples are the two product packs: `artifacts/gauntlet/lib.ts` (a synthetic hostile app) and
-`artifacts/openemr/lib.ts` (OpenEMR 8.3.0). Read them alongside this.
+The worked examples are the two product packs: `apps/gauntlet/lib.ts` (a synthetic hostile app) and
+`apps/openemr/lib.ts` (OpenEMR 8.3.0). Read them alongside this.
 
 ## The mental model (four ideas)
 
@@ -21,7 +21,7 @@ The worked examples are the two product packs: `artifacts/gauntlet/lib.ts` (a sy
 3. **Navigate to anchors; be defensive by construction.** Robust automation asserts a known *anchor
    state*, acts, settles, asserts the next anchor — and treats every interstitial as optional (present
    *or* absent). It never assumes position.
-4. **The output is a pack, not a transcript.** What you learn is distilled into `artifacts/<target>/`:
+4. **The output is a pack, not a transcript.** What you learn is distilled into `apps/<target>/`:
    navigation notes, a function library, a ledger of what varies, evidence. The next session builds on it.
 
 ## The loop: five verbs
@@ -85,7 +85,7 @@ Model the app as **named anchors** (cheap predicates: a URL pattern + a landmark
 **transitions** between them (with their settlement profile + wire signature). Keep a **variability
 ledger**: what varied, with n-counts, and the experiment that would resolve each. `diffTrace(a, b)`
 compares two runs of "the same" step and shows the structural difference (e.g. the interstitial that only
-sometimes appears). This is what `artifacts/<target>/nav-and-quirks.md` + `ledger.md` capture.
+sometimes appears). This is what `apps/<target>/nav-and-quirks.md` + `ledger.md` capture.
 
 ### 5. Automate — write robust functions and a drift check
 
@@ -172,6 +172,6 @@ each (built / partial / deferred) lives in `DECISIONS.md` (the `OPEN` tags) and 
 
 ## Where outputs go
 
-Everything you learn becomes a pack under `artifacts/<target>/` (the ways-of-knowing palette:
-`artifacts/README.md`). Tool-level lessons become engine fixes + `DECISIONS.md`; class-of-app lessons
+Everything you learn becomes a pack under `apps/<target>/` (the ways-of-knowing palette:
+`apps/README.md`). Tool-level lessons become engine fixes + `DECISIONS.md`; class-of-app lessons
 become methodology in `GUIDANCE.md §7–8`. Every exploration sharpens the platform, not just its own pack.

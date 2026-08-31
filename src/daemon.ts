@@ -28,7 +28,7 @@ export interface TargetState {
 export interface DaemonEvent { kind: string; t: number; targetId?: string; frameId?: string; actionId?: string | null; ref?: string | number | null; summary?: unknown; seq?: number }
 export interface ActionWindow extends WindowInfo { taskSpans: Array<{ t0: number; t2: number }>; rootTargetId: string }
 export interface DaemonOptions {
-  dir: string; name: string; mode: "attach" | "launch"; port?: number; host?: string; wsUrl?: string; scope?: string; scopeTarget?: string; allTargets?: boolean;
+  dir: string; name: string; product?: string; mode: "attach" | "launch"; port?: number; host?: string; wsUrl?: string; scope?: string; scopeTarget?: string; allTargets?: boolean;
   dialogPolicy?: "accept" | "dismiss"; contract?: unknown; launched?: SessionManifest["launched"]; log?: (line: string) => void;
 }
 
@@ -74,7 +74,7 @@ export class Daemon {
     const prior = existsSync(manifestPath) ? (JSON.parse(readFileSync(manifestPath, "utf8")) as SessionManifest) : null;
     const anchor = prior?.anchorEpochMs ?? Date.now();
     d.resumed = !!prior;
-    d.manifest = { name: prior?.name ?? opts.name, dir: opts.dir, anchorEpochMs: anchor, startedWall: prior?.startedWall ?? new Date(anchor).toISOString(), mode: prior?.mode ?? opts.mode, scope: opts.scope ?? prior?.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? prior?.dialogPolicy ?? "accept", contract: opts.contract ?? prior?.contract, pid: process.pid, launched: opts.launched ?? prior?.launched };
+    d.manifest = { name: prior?.name ?? opts.name, dir: opts.dir, anchorEpochMs: anchor, startedWall: prior?.startedWall ?? new Date(anchor).toISOString(), mode: prior?.mode ?? opts.mode, product: opts.product ?? prior?.product, scope: opts.scope ?? prior?.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? prior?.dialogPolicy ?? "accept", contract: opts.contract ?? prior?.contract, pid: process.pid, launched: opts.launched ?? prior?.launched };
     if (prior) delete d.manifest.endedWall;
     if (opts.scope) { const m = opts.scope.match(/^\/(.+)\/([a-z]*)$/); if (m) d.scopeRe = new RegExp(m[1], m[2]); else d.scopeSub = opts.scope; }
     d.scopeTargetId = opts.scopeTarget ?? null;
@@ -483,7 +483,7 @@ if (import.meta.main) {
   const port = get("--attach") ? Number(get("--attach")) : undefined;
   const launchedPid = get("--launched-pid");
   const d = await Daemon.start({
-    dir, name, mode: (get("--mode") as any) ?? (launchedPid ? "launch" : "attach"), port, host: get("--host"), wsUrl: get("--ws"), scope: get("--scope"), scopeTarget: get("--scope-target"), allTargets: has("--all-targets"),
+    dir, name, product: get("--product"), mode: (get("--mode") as any) ?? (launchedPid ? "launch" : "attach"), port, host: get("--host"), wsUrl: get("--ws"), scope: get("--scope"), scopeTarget: get("--scope-target"), allTargets: has("--all-targets"),
     dialogPolicy: (get("--dialogs") as any) ?? "accept",
     launched: launchedPid ? { pid: Number(launchedPid), userDataDir: get("--user-data-dir") ?? "", port: port ?? 0, headless: has("--headless") } : undefined,
     log: has("--fg") ? (l) => console.error(l) : undefined,

@@ -9,7 +9,7 @@ const SCHEMA_PATH = join(import.meta.dir, "..", "schema.sql");
 
 export interface SessionManifest {
   name: string; dir: string; anchorEpochMs: number; startedWall: string; endedWall?: string;
-  mode: "attach" | "launch"; scope?: string; browser?: string; endpoint?: { port?: number; wsUrl?: string };
+  mode: "attach" | "launch"; product?: string; scope?: string; browser?: string; endpoint?: { port?: number; wsUrl?: string };
   dialogPolicy: "accept" | "dismiss"; contract?: unknown; pid?: number; launched?: { pid: number; userDataDir: string; port: number; headless: boolean };
 }
 
@@ -216,3 +216,68 @@ export function openStore(dir: string) {
   return api;
 }
 export type StoreReader = ReturnType<typeof openStore>;
+
+
+// ---------------------------------------------------------------------------------------------
+// Cross-run queries for one product (GUIDANCE §6: query your native way through ALL of a product's
+// logs). Sessions live at sessions/<product>/<run>/; openProduct fans a query across every run so
+// "did we ever see an AJAX call for endpoint X" is one call. Per-run results carry a `session` column.
+// ---------------------------------------------------------------------------------------------
+
+export function productDir(product: string, sessionsRoot?: string): string {
+  return join(sessionsRoot ?? join(process.cwd(), "sessions"), product);
+}
+export function productRuns(product: string, sessionsRoot?: string): string[] {
+  const root = productDir(product, sessionsRoot);
+  if (!existsSync(root)) return [];
+  return readdirSync(root).map((r) => join(root, r)).filter((d) => existsSync(join(d, "store.sqlite"))).sort();
+}
+
+export interface ProductReader {
+  product: string;
+  runs: string[];                          // absolute run dirs, oldest→newest by name
+  stores: StoreReader[];                   // one per run, read-only
+  /** Run `query` against every run's store; rows are tagged with their `session` (run name). */
+  sql<T = any>(query: string, ...args: unknown[]): Array<T & { session: string }>;
+  /** FTS "did this text ever appear anywhere" across all runs (bodies + WS + aria). */
+  appearances(text: string): Array<{ session: string; where: "body" | "ws" | "aria"; id: string; t: number; url?: string }>;
+  /** requests({urlLike, method, …}) across all runs, tagged with session. */
+  requests(f?: Parameters<StoreReader["requests"]>[0]): Array<RequestRow & { session: string }>;
+  close(): void;
+}
+
+/** Open a read-only view over every run of a product. Works with the daemon down. */
+export function openProduct(product: string, sessionsRoot?: string): ProductReader {
+  const runs = productRuns(product, sessionsRoot);
+  const stores = runs.map((d) => openStore(d));
+  const name = (d: string) => d.split("/").pop()!;
+  const api: ProductReader = {
+    product, runs, stores,
+    sql<T = any>(query: string, ...args: unknown[]) {
+      const out: Array<T & { session: string }> = [];
+      for (let i = 0; i < stores.length; i++) {
+        const session = name(runs[i]);
+        try { for (const row of stores[i].sql<T>(query, ...args)) out.push({ ...row, session }); }
+        catch (e) { throw new Error(`openProduct.sql on run ${session}: ${(e as Error).message}`); }
+      }
+      return out;
+    },
+    appearances(text: string) {
+      const out: Array<{ session: string; where: "body" | "ws" | "aria"; id: string; t: number; url?: string }> = [];
+      for (let i = 0; i < stores.length; i++) {
+        const session = name(runs[i]); const a = stores[i].appearances(text);
+        for (const b of a.bodies) out.push({ session, where: "body", id: b.id, t: b.t_start, url: b.url });
+        for (const w of a.ws) out.push({ session, where: "ws", id: String(w.seq), t: w.t });
+        for (const r of a.aria) out.push({ session, where: "aria", id: r.id, t: r.t_start });
+      }
+      return out;
+    },
+    requests(f) {
+      const out: Array<RequestRow & { session: string }> = [];
+      for (let i = 0; i < stores.length; i++) { const session = name(runs[i]); for (const r of stores[i].requests(f)) out.push({ ...r, session }); }
+      return out;
+    },
+    close() { for (const s of stores) s.close(); },
+  };
+  return api;
+}

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { startEnv, type Env, sleep } from "../helpers.ts";
 import { registerActions } from "../../src/act.ts";
 import { Session } from "../../src/client.ts";
-import * as g from "../../artifacts/gauntlet/lib.ts";
+import * as g from "../../apps/gauntlet/lib.ts";
 
 let env: Env; let s: Session;
 beforeAll(async () => {
