@@ -42,13 +42,16 @@ in your way, note it briefly and route around it.
 **0. Session contract.** Write it at the top of `nav-and-quirks.md` before acting: target, roles, stance,
 posture, what "done" means for this pass (the flows below).
 
-**1. Instrument.** First check the host lets a headless browser in: a Cloudflare/Turnstile "Just a
-moment…" page (the targets census shows a `challenges.cloudflare.com` iframe) means you must attach to a
-real browser you have passed the challenge in, or use another host of the same build (the OpenMRS pack
-fell back from `o3.` to `dev3.openmrs.org`). Then `bun cli/disco.ts session new {{PACK}} --launch --headless
---url {{BASE_URL}}` (it returns after the idle observation and leaves the daemon running). Then
-**warm the classifiers**: EHRs have minute-scale heartbeats and long-polls; run `bun cli/disco.ts idle 120000`
-once (≥ 3 cycles of the slowest heartbeat) before trusting settlement. Check `bun cli/disco.ts families`
+**1. Instrument.** First, a 5-second pre-flight — `curl -sI {{BASE_URL}}` — and read the answer: a `403`
+with a "Just a moment…" body is Cloudflare/Turnstile, which headless Chromium will not pass; do **not**
+launch against it (a P4 run lost 3.5 minutes doing exactly that). Attach to a real browser you have passed
+the challenge in, or use another host of the same build (the OpenMRS pack fell back from `o3.` to
+`dev3.openmrs.org`). Then `bun cli/disco.ts session new {{PACK}} --launch --headless --url {{BASE_URL}}`
+(it returns after the idle observation and leaves the daemon running). Then **warm the classifiers in the
+background**: EHRs have minute-scale heartbeats and long-polls, so start `bun cli/disco.ts idle 120000`
+as a background command and do your recon (step 2: reading the store, `families`, `targets`) while it
+runs — never block on it, and never write your own wait loop (`until pgrep …` matches its own shell and
+spins forever; the harness tells you when a background command finishes). Check `bun cli/disco.ts families`
 — every ambient family should be tagged ambient with evidence. EHR front-ends refetch in bursts (SWR) and
 re-read `session`/`user` on every route change: if a real heartbeat is not tagged, or a request that fired
 *with* your action is (the report names these), a **rule** is the override: `disco families --ambient
@@ -95,7 +98,10 @@ that would resolve it. Observed vs inferred must be visibly different in your no
 **6. Probe experiments (only within stance).** Timeouts (idle until the expiry warning; how is it
 delivered — dialog, redirect, toast?), a second tab, a role with fewer rights, a patient with no data.
 
-**7. Close by producing the artifacts.**
+**7. Verify, then close.** Run `bun scripts/run-check.ts {{PACK}}` only when you are done editing — a
+check launched and then invalidated by a patch is a minute lost (export a `ready` predicate from
+`check.ts` so the check waits for the app's shell, not just a visible `body`). Read every check result.
+Then produce the artifacts.
 
 ## The EHR checklist (GUIDANCE §8 — look for each; record present / absent / unobserved)
 
