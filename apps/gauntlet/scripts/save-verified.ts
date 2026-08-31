@@ -29,6 +29,6 @@ console.log(JSON.stringify({
   screenAtSettle, wire: { line: post.line, body: wireBody },
   optimisticUi: optimistic ? "YES — screen claimed success before server confirmed (202 pending)" : "no",
   completion: status ? { savStatusHttp: status.status, body: status.body_hash ? s.store.json(status.body_hash) : null } : "NOT OBSERVED within 4s",
-  toast: w.ok || w.matched ? (w.preview ?? "seen") : "not seen in 4s",
+  toast: w.matched ? (w.preview ?? "seen") : "not seen in 4s",
 }, null, 1));
 s.close();

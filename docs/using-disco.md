@@ -226,20 +226,24 @@ postcondition didn't arrive, and what to do about it.
 | not matched | `settled:dom` @0.3s | the page settled in the **wrong** state (validation error, still on login) | read `ui.added` / the diagnosis; don't retry blindly |
 | not matched | `still-active`, `pending` has requests | just slow | raise `until.budgetMs` / `awaitSettlement` |
 | not matched | `no-effect` | click swallowed (overlay, disabled, wrong element) | check the diagnosis, dismiss the interstitial, retry once |
+| matched @5s | `no-effect` | nothing observable for 500ms, *then* the state arrived (a timer, a frozen main thread, a late hop) — the CLI prints `no-effect → until matched at 5021ms` | trust `until`; the report's UI delta spans the whole wait; note the delay in the ledger |
 | — | `diagnosis: occluded by …` | something is in the way | `actIfPresent` it away, retry once |
 
 Mechanics worth knowing: the predicate is watched from dispatch; if it matches *first*, the remaining
 quiet-wait is capped to a short tail (`tailMs`, default 1s — never the 20s hung-request budget); if
 settlement finishes first, the window stays open while the predicate is awaited (`budgetMs`, default 5s).
 `until.frame` names a postcondition in another frame (a finder click whose effect is a new chart frame).
+CLI spelling: `--until <selector> [--until-visible]` (a bare selector means *present*; `--until-visible`
+means laid out with a box), `--until-fn "() => …"`, `--until-url <part> [--until-landed]`,
+`--until-budget ms`, `--until-tail ms`.
 `expect` **never waits** — it only flags a surprising report for the ledger. `settled:late` is what a
 `still-active` action becomes when the background settler sees it quiet later.
 
 ### Where the milliseconds go
 
-Every report carries `timing`: page time (`settleMs` / `reportedMs` / `untilMs`, and `absorbMs` — the
-repaint after a scroll-into-view) versus daemon overhead (`resolveMs` + `preMs` + `postMs` + `buildMs`,
-typically 20–60ms). Responsiveness is a tested contract, not a hope: a no-op reports at ≈500ms with under
+Every report carries `timing`: page time (`settleMs` / `reportedMs` / `untilMs`, and `absorbMs` — present
+only when the hit-test had to scroll the target into view *and* the viewport repainted after it) versus
+daemon overhead (`resolveMs` + `preMs` + `postMs` + `buildMs`, typically 20–60ms). Responsiveness is a tested contract, not a hope: a no-op reports at ≈500ms with under
 400ms of overhead, `watch()` notices a DOM change within ~Q, an already-true `until` costs at most the
 quiet tail. `bun scripts/timing-report.ts <app>` prints the distribution for an app's recorded runs.
 
@@ -282,9 +286,27 @@ Principles it embodies (all from real fixes — see DECISIONS #31, #35, #38):
   value with real key events (no `evaluate()` hacks); `waitForFrame` is `until` with a `frame:`.
 - **One selector language.** Playwright's, everywhere: `click`, `until`, `assertVisible`, `actIfPresent`.
 
-Generic moves live in `lib/` (product-agnostic: `until`, `reached`, `assertVisible`, `actIfPresent`,
-`waitForFrame`, `extractFromWire`, `wireHas`); product-specific functions live in the pack and lean on
-them. A move graduates from a pack to `lib/` when a second product would copy it.
+And the DOM-first counterpart, when the app has no API and a step can end in **either** of two states —
+`login` from the saucedemo pack: the postcondition is the disjunction, `firstOf` says which arm held, and
+the app's own refusal text becomes the error:
+
+```ts
+export async function login(s: Session, user: string, pass = PASSWORD): Promise<void> {
+  if (await s.evaluate<boolean>(() => location.pathname.startsWith("/inventory"))) return;      // idempotent
+  reached(await s.navigate(BASE, { until: { selector: "#login-button", visible: true } }), "login page");
+  await s.fill("#user-name", user);                                                                // fill replaces; type appends
+  await s.fill("#password", pass);
+  // the click ends in ONE of two states — wait for EITHER (performance_glitch_user shows nothing for ~5s:
+  // verdict `no-effect`, and the postcondition is what makes this safe), then ask which
+  reached(await s.click("#login-button", { until: { fn: () => !!document.querySelector(".inventory_list") || !!document.querySelector('[data-test="error"]'), budgetMs: 15000 } }), "login");
+  if ((await firstOf(s, { ok: { selector: ".inventory_list" }, err: { selector: '[data-test="error"]' } })) === "err")
+    throw new Error(`login refused: ${await s.evaluate(() => document.querySelector('[data-test="error"]')?.textContent)}`);
+}
+```
+
+Generic moves live in `lib/` (product-agnostic: `until`, `reached`, `firstOf`, `assertVisible`,
+`actIfPresent`, `waitForFrame`, `extractFromWire`, `wireHas`); product-specific functions live in the pack
+and lean on them. A move graduates from a pack to `lib/` when a second product would copy it.
 
 ## Effective-use tips & rough edges
 
@@ -300,6 +322,12 @@ them. A move graduates from a pack to `lib/` when a second product would copy it
 - **A missing frame is not an error** — `watch`/`until` wait for it (`frame:` re-resolves per check);
   from `act()` it's a `frame-not-found` diagnosis with a frame census.
 - **Watch `timing.overheadMs`** — if it grows, the daemon got slower, not the page.
+- **Third-party telemetry is not ambient by itself** — a crash reporter or analytics beacon that fires
+  per event (on a refusal, on every page load, CORS-blocked) never looks periodic, so it holds
+  settlement until it fails and trips the error sentinel. `disco families --ambient <family>` takes it out
+  of attribution *and* the settlement race. `--scope` picks tabs, not hosts.
+- **`evaluate` args are positional** (`{ args: [a, b] }` → `fn(a, b)`); `evaluateAfterArg` / `fnArg` are
+  single values. `--eval` output prints in full right under the verdict; `--json` for the whole report.
 - **`disco sql` is read-only** — it can't mutate the store; notes are written only through the daemon.
 - **Warm the classifiers** (`disco idle`) before trusting settlement on a heartbeat-heavy app.
 - Full gotcha list: `STATE.md` "Gotchas" + `DECISIONS.md` #16–31.

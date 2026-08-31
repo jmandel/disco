@@ -397,6 +397,7 @@ export class Daemon {
       }
       case "screenshot": { const t = p.targetId ? this.targets.get(p.targetId) : this.primary(); if (!t) throw new RpcError(-32602, "unknown target"); return this.captureShot(t, p.reason ?? "manual"); }
       case "evaluate": {
+        if (p.args !== undefined && !Array.isArray(p.args)) throw new RpcError(-32602, "evaluate: `args` must be an ARRAY of positional arguments — fn(a, b) ← args: [a, b]. (watch/until take a single `fnArg`; evaluateAfter a single `evaluateAfterArg`.)");
         const frame = this.resolveFrame(p.frame, p.targetId);
         const r = await this.callInFrame(frame, p.fn, p.args ?? [], p.world === "main" ? "main" : "disco");
         return { value: r.value, frame: frame.frameId, target: frame.targetId };

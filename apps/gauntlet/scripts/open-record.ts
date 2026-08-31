@@ -44,7 +44,7 @@ if (String(record.id) !== n) die(`wire returned record ${record.id}, wanted ${n}
 // The delayed interstitial: give it modalDelayMs(400)+slack to appear; acknowledge if it does.
 const w: any = await s.watch({ fn: () => { const m = document.getElementById("record-modal"); return !!m && getComputedStyle(m).display !== "none"; } }, { budgetMs: 1500 });
 let modal = "absent";
-if (w.ok || w.matched) {
+if (w.matched) {
   const ack = await s.click("#modal-ack", { budgetMs: 2000 });
   if (ack.verdict === "diagnosis") die("modal appeared but could not acknowledge", ack);
   modal = `acknowledged (${ack.action})`;

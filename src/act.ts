@@ -130,6 +130,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   let resolved: Resolved | null = null;
   let detachedRetried = false;
   let didScroll = false;
+  let tHitTest = d.now();
   let point: Point | null = null;
   if (KINDS[p.kind].target) {
     if (!p.target) throw new RpcError(-32602, `act ${p.kind} needs a target selector`);
@@ -137,6 +138,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
     if (!("objectId" in r)) return fail(await diagnose(d, frame, root, "not-found", { error: r.error, candidates: r.candidates }));
     resolved = r;
     // hit-test with one re-resolve on detachment (GUIDANCE §8 re-render races)
+    tHitTest = d.now();
     if (!NO_HIT_TEST.has(p.kind)) {
       for (let attempt = 0; ; attempt++) {
         try {
@@ -179,7 +181,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   // If resolution scrolled the target into view, the whole viewport repaints ~tens of ms later; absorb
   // that BEFORE opening the causality window so the scroll (pre-action adjustment) is not an "effect".
   const tResolved = d.now();
-  if (didScroll) await absorbVisual(d, root, defaults.scrollAbsorbMaxMs);
+  if (didScroll) await absorbVisual(d, root, defaults.scrollAbsorbMaxMs, tHitTest);
   const tAbsorbed = d.now();
   const pre = await snapshot(d, sel, frame, root, "pre");
   try { await d.callInFrame(frame, "function(t){ return window.__discoApi ? window.__discoApi.armTask(t) : 0; }", [KINDS[p.kind].task]); } catch {}
@@ -322,12 +324,16 @@ function backgroundSettle(d: Daemon, rootId: string, actionId: string, originalT
   });
 }
 
-async function absorbVisual(d: Daemon, root: TargetState, maxMs: number): Promise<void> {
+/** After scrollIntoView, wait for the viewport repaint to finish — but only if one actually happened since
+ *  the scroll (`since`): a scroll that changed nothing on screen costs one tick, not a fixed quarter second
+ *  (P4-A friction #15). */
+async function absorbVisual(d: Daemon, root: TargetState, maxMs: number, since: number): Promise<void> {
   const t0 = d.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, 60));
     const cast = root.cast;
     if (!cast || d.now() - t0 >= maxMs) return;
+    if (cast.lastChangedT < since && !cast.pending) return; // nothing repainted since the scroll
     // quiet = no decoded change recently AND no rate-capped frame still awaiting its deferred decode
     if (d.now() - cast.lastChangedT >= defaults.scrollAbsorbQuietMs && !cast.pending) return;
   }

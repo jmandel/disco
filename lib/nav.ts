@@ -54,6 +54,15 @@ export async function waitForFrame(s: Session, urlLike: string, budgetMs = 8000)
   throw new Error(`waitForFrame: frame ${JSON.stringify(urlLike)} vanished after appearing`);
 }
 
+/** After an act whose `until` was a DISJUNCTION (success OR the app's own error banner), say which one
+ *  holds now: the first key whose predicate matches (one check each, no waiting), or null. The pattern:
+ *    const r = await s.click("#login", { until: { fn: () => ok() || banner() } });
+ *    if ((await firstOf(s, { ok: { selector: ".inventory_list" }, err: { selector: '[data-test="error"]' } })) === "err") throw new Error(await s.evaluate(() => …banner text…)); */
+export async function firstOf<K extends string>(s: Session, preds: Record<K, Pred>, opts: { frame?: string } = {}): Promise<K | null> {
+  for (const k of Object.keys(preds) as K[]) if ((await s.watch(preds[k], { budgetMs: 0, frame: opts.frame })).matched) return k;
+  return null;
+}
+
 export const describePred = (p: Pred): string => p.selector ? `${p.selector}${p.visible ? " (visible)" : ""}` : p.urlLike ? `request ${p.urlLike}${p.landed ? " landed" : ""}` : "predicate";
 
 /** One line of a diagnosis for error messages: reason, near-matches, what was pending. */

@@ -27,29 +27,26 @@ export async function launchChromium(opts: { headless?: boolean; userDataDir: st
     ...(opts.args ?? []),
     opts.url ?? "about:blank",
   ];
-  const proc = Bun.spawn([exe, ...args], { stdout: "ignore", stderr: "pipe", stdin: "ignore" });
-  const wsUrl = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Chromium did not report a DevTools endpoint within 20s")), 20000);
-    let buf = "";
-    (async () => {
-      const reader = proc.stderr!.getReader();
-      const dec = new TextDecoder();
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value);
-        const m = buf.match(/DevTools listening on (ws:\/\/\S+)/);
-        if (m) { clearTimeout(timer); resolve(m[1]); void drain(reader); return; }
-        if (buf.length > 200_000) buf = buf.slice(-50_000);
-      }
-      clearTimeout(timer);
-      reject(new Error("Chromium exited before reporting DevTools endpoint: " + buf.slice(-500)));
-    })();
-  });
+  // Chromium's stderr goes to a FILE we poll for the DevTools line — never a pipe: a piped stderr kept the
+  // launching process alive for the browser's lifetime (`disco session new --launch … | tail` hung until
+  // `session end`; P4-A friction #4).
+  mkdirSync(opts.userDataDir, { recursive: true });
+  const errPath = join(opts.userDataDir, "chromium.stderr.log");
+  const proc = Bun.spawn([exe, ...args], { stdout: "ignore", stderr: Bun.file(errPath), stdin: "ignore" });
+  const wsUrl = await (async () => {
+    const t0 = Date.now();
+    for (;;) {
+      const text = await Bun.file(errPath).text().catch(() => "");
+      const m = text.match(/DevTools listening on (ws:\/\/\S+)/);
+      if (m) return m[1];
+      if (proc.exitCode !== null) throw new Error("Chromium exited before reporting DevTools endpoint: " + text.slice(-500));
+      if (Date.now() - t0 > 20000) throw new Error("Chromium did not report a DevTools endpoint within 20s (see " + errPath + ")");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  })();
   const port = Number(new URL(wsUrl).port);
   return { proc, pid: proc.pid, port, wsUrl, userDataDir: opts.userDataDir, async kill() { try { proc.kill("SIGTERM"); } catch {} await Promise.race([proc.exited, new Promise((r) => setTimeout(r, 3000))]); try { proc.kill("SIGKILL"); } catch {} } };
 }
-async function drain(reader: ReadableStreamDefaultReader<Uint8Array>) { try { for (;;) { const { done } = await reader.read(); if (done) break; } } catch {} }
 
 /** Read the port of a running managed browser from its profile dir (Chromium writes DevToolsActivePort). */
 export function readActivePort(userDataDir: string): number | null {

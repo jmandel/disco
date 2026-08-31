@@ -19,6 +19,7 @@ export function handleNetwork(d: Daemon, t: TargetState, e: CdpEvent): void {
     case "Network.dataReceived": {
       const id = d.reqAlias.get(p.requestId) ?? p.requestId;
       const inf = d.inflight.get(id);
+      if (!inf) return; // unknown id (e.g. a data: URL we never recorded)
       if (inf) { inf.lastData = d.now(); if (inf.stallTimer) { clearTimeout(inf.stallTimer); armStallTimer(d, t, inf); } }
       return;
     }
@@ -56,6 +57,10 @@ export function handleNetwork(d: Daemon, t: TargetState, e: CdpEvent): void {
 }
 
 function onRequest(d: Daemon, t: TargetState, p: RequestWillBeSent) {
+  // Inline resources are not network: a `data:` URL "request" carries the whole payload as its path, lands in
+  // `requests`/`families` as multi-KB rows, and — attributed `task` — turned pure client-side route changes into
+  // `settled:network` (P4-A friction #5). Later events for the same id find no row and are ignored.
+  if (/^(data|blob):/i.test(p.request.url)) return;
   d.learnClock(p.timestamp, p.wallTime);
   const tStart = d.monoToT(p.timestamp);
   let id = p.requestId;
@@ -101,6 +106,7 @@ function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
   const at = d.monoToT(p.timestamp);
   const r = p.response;
   const inf = d.inflight.get(id);
+  if (!inf) return; // unknown id (e.g. a data: URL we never recorded)
   const streaming = p.type === "EventSource" || /event-stream/i.test(r.mimeType ?? "");
   if (inf) { inf.mime = r.mimeType; inf.status = r.status; inf.streaming = streaming; }
   d.store.update("requests", { t_response: at, status: r.status, status_text: r.statusText, mime: r.mimeType, resp_headers: JSON.stringify(r.headers ?? {}), from_cache: r.fromDiskCache ? 1 : 0, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
@@ -143,6 +149,7 @@ async function onFinished(d: Daemon, t: TargetState, p: LoadingFinished) {
   const id = d.reqAlias.get(p.requestId) ?? p.requestId;
   const at = d.monoToT(p.timestamp);
   const inf = d.inflight.get(id);
+  if (!inf) return; // unknown id (e.g. a data: URL we never recorded)
   if (inf?.stallTimer) clearTimeout(inf.stallTimer);
   const patch: Record<string, unknown> = { t_end: at, encoded_size: p.encodedDataLength };
   let size: number | null = null;
@@ -180,6 +187,7 @@ function onFailed(d: Daemon, t: TargetState, p: LoadingFailed) {
   d.store.update("requests", { t_end: at, error: p.errorText, body_state: p.canceled ? "none" : "error" }, "id=?", [id]);
   d.attrib.observeEnd(id, at);
   const inf = d.inflight.get(id);
+  if (!inf) return; // unknown id (e.g. a data: URL we never recorded)
   if (inf) {
     d.inflight.delete(id);
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: id, summary: { u: short(inf.url), ms: Math.round(at - inf.tStart), a: inf.attribution, error: p.errorText, canceled: !!p.canceled } });

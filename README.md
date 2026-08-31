@@ -9,6 +9,7 @@ Constitution: [GUIDANCE.md](GUIDANCE.md). Construction plan: [BRIEF.md](BRIEF.md
 
 - **[docs/using-disco.md](docs/using-disco.md)** — the field guide: how to use disco to instrument/explore/discover/characterize/automate, with worked examples.
 - **[PLATFORM.md](PLATFORM.md)** — the two-layer platform + the plan. **[GUIDANCE.md](GUIDANCE.md)** — constitution + methodology. **[apps/README.md](apps/README.md)** — the per-product packs.
+- **[SURFACE.md](SURFACE.md)** — the whole surface on one page: store tables, every `Session` method, the CLI tree.
 
 ## Quickstart: ten lines to a first observed click
 
@@ -17,7 +18,8 @@ bun install
 bun gauntlet &                                  # the hostile demo SPA on :4800
 chromium --remote-debugging-port=9222 http://localhost:4800 &   # any Chromium you can attach to — SHOWING the app
 bun cli/disco.ts session new gauntlet --attach 9222 --scope localhost:4800   # -> apps/gauntlet/store/
-#   idle-observes the open page for 30s to learn its ambient traffic (skipped if nothing is scoped yet; --no-idle to skip)
+#   idle-observes the open page for 30s to learn its ambient traffic (skipped if nothing is scoped yet; --no-idle to skip),
+#   then RETURNS, leaving the daemon running in the background (`session end` stops it; `--fg` keeps it attached)
 bun cli/disco.ts act click 'role=button[name="Load Chart"]' --until-fn "() => document.querySelector('#chart-status')?.textContent === 'idle'"
 #   act:1  click role=button[name="Load Chart"]  →  settled:visual  (settled 872ms, reported 1172ms; 3 req, 2 mut, 5 px)
 #     timing: page 1172ms (settled 872, reported 1172, until 433) + overhead 115ms (resolve 85, pre 16, post 11, build 3) = 1287ms
@@ -54,6 +56,20 @@ await s.note(`rows are wire-available at ${r.wire!.attributed[0].family}`, { kin
 s.close();
 ```
 
+   The whole `Session` surface, one screen (details: [SURFACE.md](SURFACE.md)):
+
+   ```ts
+   connect(appOrDir?) → Session                    s.act({ kind, target?, …opts }) → Report   ← the ONE primitive; the verbs are sugar:
+   s.click|rightclick|dblclick|middleclick|hover(target, opts)   s.type(target, text, opts) appends   s.fill(target, text, opts) replaces ("" clears)
+   s.press(key, opts)   s.scroll({ target?, deltaY? }, opts)   s.select(target, value, opts)   s.navigate(url, opts)   s.drag(target, to | {dx,dy}, opts)
+   opts = { frame?, targetId?, budgetMs?, quietMs?, noEffectMs?, maxBudgetMs?, evaluateAfter?, evaluateAfterArg?, world?, until?, expect? }
+   s.watch(pred, { budgetMs?, frame? }) → { matched, elapsedMs, … }      s.awaitSettlement({ action?, budgetMs?, frame? }) → Report
+   s.evaluate(fn, { args?: any[], frame?, targetId?, world? }) → value     ← args is an ARRAY of positional parameters: fn(a, b) ← args: [a, b]
+   s.note(text, { kind?, name?, action?, data? })   s.targets()   s.info()   s.screenshot()   s.families()   s.idle(ms?)   s.focusTarget(id)
+   s.onEvent(fn) → unsubscribe   s.cdp(method, params, { targetId? | browser? })   s.end()   s.close()
+   s.store → sql | requests | body/json/bodyBytes | appearances | timeline | screenshotAt | action | frames | diffTrace | runs
+   ```
+
 3. **The CLI** — every command is sugar over the two above; `disco help` for the tree.
 
 `s.click(sel, opts)` / `s.type` / `s.fill` / `s.press` / … are one-line sugar over `s.act({ kind, … })`: one
@@ -63,10 +79,12 @@ answers *am I where I need to be?* — automation always passes `until`.
 
 ## ⚠️ In-page functions: closures do not transfer
 
-`evaluate`, `evaluateAfter`, and `watch({fn})` ship your function **as source** into the page. It runs
-there with nothing from your script's scope — no imported helpers, no captured variables. Pass data via
-`args`/`evaluateAfterArg`; return JSON-serializable values. `world: "main"` sees the page's globals;
-the default isolated world does not (but shares the DOM).
+`evaluate`, `evaluateAfter`, and `watch({fn})` / `until: {fn}` ship your function **as source** into the page.
+It runs there with nothing from your script's scope — no imported helpers, no captured variables. Pass data
+in — three spellings for one idea, by arity: `evaluate(fn, { args: [a, b] })` is **positional** (an array,
+`fn(a, b)`); `evaluateAfter` takes one value as `evaluateAfterArg`; `watch`/`until` `fn` takes one value as
+`fnArg`. Return JSON-serializable values. `world: "main"` sees the page's globals; the default isolated
+world does not (but shares the DOM).
 
 ## Reports in one screen
 
@@ -130,14 +148,35 @@ uncapturable such as an `unread` fire-and-forget body after its 1.2s grace) | `{
 with `fnArg`, truthy = match). A `frame` that doesn't exist yet is waited for, not thrown on; from `act()` it is
 a `frame-not-found` diagnosis with a frame census.
 
+One report, annotated (every path is `json_extract(report, '$…')`-able from `actions.report`):
+
+```
+{ action: "act:12", kind: "click", verdict: "settled:network",           -- $.verdict
+  target: { selector, preview, frame, count?, detachedRetried? },
+  settle: { ms, reportedMs, timeline: [{t, what}], counts, pending? },    -- $.settle.reportedMs
+  until:  { matched, elapsedMs, preview? | request?, diagnosis? },        -- $.until.matched, $.until.elapsedMs
+  timing: { resolveMs, absorbMs, preMs, settleMs, reportedMs, untilMs?, waitMs, postMs, buildMs, overheadMs, totalMs },
+  ui:     { added: [aria lines], removed, addedMore, removedMore, changedBoxes, ambientChurn? },
+  wire:   { attributed: [{ m, p, s, ms, body, family, a, line }], more, ambientInWindow, otherActivity, ws, sse },  -- $.wire.attributed[0].p
+  env:    { url, urlChanged?, navigated?, focus?, dialogs?, sentinels?, writeFlag?, newTargets?, classifierImmature?, classifierIdleMs? },
+  evaluateAfter, shots: { pre, post }, aria: { pre, post }, cursor: { from, to }, diagnosis?, extended? }
+```
+e.g. `SELECT id, verdict, json_extract(report,'$.until.elapsedMs') FROM actions WHERE json_extract(report,'$.until.matched')=1`.
+
 ## Timing model (GUIDANCE §4.2 + DECISIONS #16)
 
 Settlement = quiescence race (network scoped to attributed-non-ambient requests / DOM minus ambient
 churn roots / pixels minus the learned ignore mask and the target's own repaint) with Q=300ms, a fast
 `no-effect` tier at 500ms, and a budget that measures **time since the last attributed network
 evidence** (in-flight requests suspend it; `maxBudgetMs` bounds hung ones). Give the classifiers idle
-time (`disco idle`, or the default idle observation at session start) before acting — reports carry
-`classifierImmature` until then.
+time (`disco idle`, or the default idle observation at session start) before acting — reports say how far
+along it is (`ambient classifier immature: 30s of 90s`). **The ambient rule:** a request family is ambient
+once it has ≥3 occurrences at a regular cadence (inter-arrival cv ≤ 0.3) or reissues as a chained long-poll,
+observed while no action window is open; `disco families` shows the evidence, `families --ambient F` /
+`--not-ambient F` overrides it, and ambient families are excluded from attribution **and** from the
+settlement race. Per-event third-party traffic (crash/telemetry reporters that fire on a refusal, a
+CORS-blocked beacon) never looks periodic — mark it ambient yourself. **`--scope` selects tabs** (targets
+whose URL matches), not hosts: every request a scoped tab makes is recorded, third parties included.
 
 ## Responsiveness is measured
 

@@ -1,6 +1,6 @@
 # Navigation & quirks — "disco gauntlet" @ http://localhost:4820 (session `dryrun`, 2026-08-30)
 
-Discovery per GUIDANCE §7; evidence lives in `sessions/dryrun/store.sqlite` (+blobs). Citations are
+Discovery per GUIDANCE §7; evidence lives in `apps/gauntlet/store/store.sqlite (run "dryrun")` (+blobs). Citations are
 action ids (`act:N`, rows in `actions` with full reports) and event cursors (`ev:a-b` in `events.seq`).
 Companion docs: `ledger.md` (variability, n counts, experiments), `friction.md`, `scripts/`.
 

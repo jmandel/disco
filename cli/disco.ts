@@ -235,6 +235,7 @@ switch (cmd) {
       if (f("ambient")) await c.call("family.mark", { family: f("ambient"), ambient: true });
       if (f("not-ambient")) await c.call("family.mark", { family: f("not-ambient"), ambient: false });
       const fams = await c.call("families");
+      console.log(`${"".padEnd(8)} ${"write".padEnd(7)} ${"count".padStart(4)}  family  (ambient reason)   — ambient = periodic (≥${defaults.ambientMinCount} samples, gap cv ≤ ${defaults.ambientMaxCv}) or chained long-poll, seen while no action window was open; excluded from attribution AND settlement`);
       for (const x of fams) console.log(`${x.ambient ? "ambient " : "        "} ${x.writeKind.padEnd(7)} ${String(x.count).padStart(4)}  ${x.family}${x.reason ? "  (" + x.reason + ")" : ""}`);
     });
     break;

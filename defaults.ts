@@ -14,6 +14,7 @@ export const defaults = {
   scrollAbsorbMaxMs: 800,  // scrollIntoView repaint absorbed before the window opens (DECISIONS: gotchas)
   scrollAbsorbQuietMs: 180, //   … considered absorbed after this much cast quiet
   diagnosisDomActiveMs: 1000, // diagnosis.domActive = a DOM mutation within this of the failure
+  sentinelDedupeMs: 5000,  // identical sentinel firings (same name/url/status) within this collapse to one
   stalledEvictMs: 60000,   // stalled/unread in-flight requests leave `inflight` after this (review F4: don't haunt diagnoses)
   ambientDom: { minSamples: 5, spanMs: 1500, medianMs: 600, bigBatch: 12 }, // a DOM root is ambient churn when it recurs ≥minSamples times at ≤medianMs cadence over ≥spanMs of idle; batches bigger than bigBatch are real work regardless
   // --- attribution (GUIDANCE §4.4, BRIEF §1.13) ---

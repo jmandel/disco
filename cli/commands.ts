@@ -63,7 +63,9 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
 export function printReport(r: any, flags: Record<string, string | boolean>, ctx: Ctx) {
   if (flags.json) return ctx.out(r);
   const s = r.settle;
-  console.log(`${r.action}  ${r.kind}${r.target?.selector ? " " + r.target.selector : ""}  →  ${r.verdict}${s ? `  (settled ${s.ms}ms, reported ${s.reportedMs}ms${s.counts ? `; ${s.counts.requests} req, ${s.counts.mutations} mut, ${s.counts.visuals} px` : ""})` : ""}`);
+  const late = r.until?.matched && r.until.elapsedMs > (s?.reportedMs ?? 0) ? `  → until matched at ${r.until.elapsedMs}ms` : ""; // the effect came AFTER the race closed (timer / frozen thread / late hop)
+  console.log(`${r.action}  ${r.kind}${r.target?.selector ? " " + r.target.selector : ""}  →  ${r.verdict}${s ? `  (settled ${s.ms}ms, reported ${s.reportedMs}ms${s.counts ? `; ${s.counts.requests} req, ${s.counts.mutations} mut, ${s.counts.visuals} px` : ""})` : ""}${late}`);
+  if (r.evaluateAfter !== undefined) { const j = JSON.stringify(r.evaluateAfter) ?? "undefined"; console.log(`  eval: ${j.length > 2000 ? j.slice(0, 2000) + ` …(+${j.length - 2000} chars; --json for all of it)` : j}`); }
   if (r.timing) console.log(`  timing: page ${r.timing.waitMs}ms (settled ${r.timing.settleMs}, reported ${r.timing.reportedMs}${r.timing.untilMs !== undefined ? `, until ${r.timing.untilMs}` : ""}) + overhead ${r.timing.overheadMs}ms (resolve ${r.timing.resolveMs}, pre ${r.timing.preMs}, post ${r.timing.postMs}, build ${r.timing.buildMs})${r.timing.absorbMs ? ` + scroll-absorb ${r.timing.absorbMs}ms` : ""} = ${r.timing.totalMs}ms`);
   if (r.target?.detachedRetried) console.log(`  note: element detached mid-dispatch; re-resolved once (re-render race)`);
   if (r.until) {
@@ -93,7 +95,6 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
   if (r.env?.writeFlag) console.log(`  ✎ writes: ${r.env.writeFlag.join("; ")}`);
   if (r.env?.classifierImmature) console.log(`  (ambient classifier immature: ${Math.round((r.env.classifierIdleMs ?? 0) / 1000)}s of ${Math.round(defaults.classifierWarmupMs / 1000)}s idle observed — \`disco idle ${Math.max(1000, defaults.classifierWarmupMs - (r.env.classifierIdleMs ?? 0))}\` with the page open finishes it)`);
   if (r.env?.castBlind) console.log(`  (tab not visible: screencast blind)`);
-  if (r.evaluateAfter !== undefined) console.log(`  eval: ${JSON.stringify(r.evaluateAfter)?.slice(0, 300)}`);
   if (s?.pending) console.log(`  still moving: ${[...s.pending.channels, ...s.pending.requests.map((x: string) => "req " + x)].join(", ") || "(nothing identified)"}`);
   console.log(`  cursor ev:${r.cursor.from}-${r.cursor.to}  shots pre:${r.shots?.pre?.slice(0, 10) ?? "-"} post:${r.shots?.post?.slice(0, 10) ?? "-"}`);
 }
