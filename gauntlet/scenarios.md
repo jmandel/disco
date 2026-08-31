@@ -342,6 +342,14 @@ trap (debounces, `requestIdleCallback`, second-hop fetches that aren't attribute
 Knob: `renderDelayMs` / `?renderDelay=`.
 **G§4.2, §9** — the postcondition (`until`) is the readiness contract; the verdict is the evidence.
 
+### 28. Fake stream — ordinary data mislabeled as an event-stream (`#s-28`)
+`button#load-fake-stream` "Load fake stream" → `fetch GET /api/fake-stream`, which answers **one complete
+payload** with `Content-Type: text/event-stream` and closes; the page `await res.text()`s it whole and sets
+`#fake-stream-out` = "got N chars". No `EventSource` is involved, so `sse_events` stays empty — a
+mime-type-only "stream" hiding ordinary data. The capture layer must store the body when the response
+FINISHES (a true stream never does).
+**G§3.4, §8** — streaming capture limits; DECISIONS #51.
+
 ## Server API summary
 
 | Method | Path | Response |

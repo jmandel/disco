@@ -420,6 +420,10 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       return json({ ...(body ?? {}), ok: true });
     }
 
+    if (path === "/api/fake-stream") {
+      // one COMPLETE ordinary payload behind a stream mime: the response finishes normally (scenario 28)
+      return new Response("<envelope><encounters><e id=\"1\">complete payload behind a stream mime<\/e><\/encounters><\/envelope>", { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" } });
+    }
     if (path === "/api/sse") {
       counters.sse++;
       const stream = counters.sse;

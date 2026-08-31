@@ -111,6 +111,17 @@ describe("kinds and predicates", () => {
     await s.evaluate(() => document.getElementById("ovl-test")?.remove());
   }, 15000);
 
+  test("ordinary data mislabeled as text/event-stream is captured when the response finishes", async () => {
+    const r = await s.click("#load-fake-stream", { until: { urlLike: "/api/fake-stream", landed: true } });
+    expect(r.until!.matched).toBe(true);
+    // the snapshot fires after the unread-body grace (~1.2s); wait for the state to move, not a fixed beat
+    let row = s.store.requests({ urlLike: "/api/fake-stream" }).at(-1)!;
+    for (let i = 0; i < 20 && row.body_state === "streaming"; i++) { await sleep(200); row = s.store.requests({ urlLike: "/api/fake-stream" }).at(-1)!; }
+    expect(row.mime).toContain("text/event-stream");
+    expect(["ok", "streamed"]).toContain(String(row.body_state));          // not "streaming": the readable body was snapshotted
+    expect(s.store.body(row.body_hash!)).toContain("complete payload behind a stream mime");
+  }, 15000);
+
   test("Cookie / Set-Cookie headers are captured (ExtraInfo events merged into the request rows)", async () => {
     try {
       await s.navigate(env.gauntlet.origin + "/login.html", { until: { selector: "#login", visible: true } });

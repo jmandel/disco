@@ -121,6 +121,19 @@ function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
   d.store.update("requests", { t_response: at, status: r.status, status_text: r.statusText, mime: r.mimeType, resp_headers: JSON.stringify(respH), from_cache: r.fromDiskCache ? 1 : 0, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
   if (streaming && inf) {
     // Streaming requests never "finish"; for settlement purposes they are done once headers arrive.
+    // But a "stream" is sometimes ordinary data behind a stream mime (DECISIONS #51) — and Chromium may
+    // withhold loadingFinished even after such a response closes. After the grace, snapshot the body if it
+    // is readable: a true EventSource errors here and stays `streaming`; a readable one becomes `streamed`.
+    setTimeout(async () => {
+      const row = d.store.get<{ bs: string | null; te: number | null }>("SELECT body_state bs, t_end te FROM requests WHERE id=?", id);
+      if (!row || row.te !== null || row.bs !== "streaming") return;
+      try {
+        const res = await d.send<{ body: string; base64Encoded: boolean }>(t, "Network.getResponseBody", { requestId: id.split(":")[0] });
+        const bytes = res.base64Encoded ? Buffer.from(res.body, "base64") : new TextEncoder().encode(res.body);
+        const stored = d.store.storeBody(new Uint8Array(bytes), inf.mime ?? null);
+        d.store.update("requests", { body_hash: stored.hash, resp_size: stored.size, body_state: "streamed" }, "id=? AND body_state='streaming'", [id]);
+      } catch {}
+    }, defaults.unreadBodyGraceMs);
     d.inflight.delete(id);
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: id, summary: { s: r.status, u: short(inf.url), ms: Math.round(at - inf.tStart), a: inf.attribution, streaming: true } });
   }
@@ -163,7 +176,17 @@ async function onFinished(d: Daemon, t: TargetState, p: LoadingFinished) {
   const patch: Record<string, unknown> = { t_end: at, encoded_size: p.encodedDataLength };
   let size: number | null = null;
   if (inf?.streaming) {
-    patch.body_state = "streaming";
+    // A TRUE event-stream never reaches loadingFinished. One that does is usually ordinary data mislabeled
+    // as `text/event-stream` (real-world find: one complete envelope behind a stream mime — the app's primary
+    // answer, unminable from the store). The body is sitting in Chromium: take it. (DECISIONS #51; true
+    // streams remain the documented Fetch-domain door.)
+    try {
+      const res = await d.send<{ body: string; base64Encoded: boolean }>(t, "Network.getResponseBody", { requestId: p.requestId });
+      const bytes = res.base64Encoded ? Buffer.from(res.body, "base64") : new TextEncoder().encode(res.body);
+      const stored = d.store.storeBody(new Uint8Array(bytes), inf?.mime ?? null);
+      patch.body_hash = stored.hash; patch.resp_size = stored.size; patch.body_state = stored.truncated ? "truncated" : "ok";
+      size = stored.size;
+    } catch { patch.body_state = "streaming"; }
   } else if (inf?.method === "HEAD" || inf?.status === 204 || inf?.status === 304) {
     patch.body_state = "none";
   } else if (p.encodedDataLength > defaults.bodyBlobCap) {

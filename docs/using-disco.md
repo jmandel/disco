@@ -269,7 +269,10 @@ CLI spelling: `--until <selector> [--until-visible]` (a bare selector means *pre
 means laid out with a box), `--until-fn "() => …"`, `--until-url <part> [--until-landed]`,
 `--until-budget ms`, `--until-tail ms`.
 `expect` **never waits** — it only flags a surprising report for the ledger. `settled:late` is what a
-`still-active` action becomes when the background settler sees it quiet later.
+`still-active` action becomes when the background settler sees it quiet later. And on a screen you have
+never seen, **act bare first**: read the delta, then write the predicate from the ids it showed you —
+guessing an `until` for an unknown screen produces `budget-expired` failures that look like the app's
+fault while the aria delta was already telling you it worked.
 
 ### Where the milliseconds go
 

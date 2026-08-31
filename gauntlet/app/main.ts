@@ -375,6 +375,13 @@ $("open-child").addEventListener("click", () => { window.open("/child.html", "_b
 // ---------------------------------------------------------------------------
 // #19 SSE
 // ---------------------------------------------------------------------------
+// #28 fake stream: a plain fetch whose response claims text/event-stream but is one complete payload
+$("load-fake-stream").addEventListener("click", async () => {
+  const res = await fetch("/api/fake-stream");
+  const txt = await res.text();
+  setText("fake-stream-out", `got ${txt.length} chars`);
+});
+
 $("start-sse").addEventListener("click", () => {
   const log = $("sse-log");
   log.replaceChildren();

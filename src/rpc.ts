@@ -33,12 +33,14 @@ class Outbox {
   private chunks: Uint8Array[] = [];
   private off = 0;
   private enc = new TextEncoder();
-  push(sock: { write(d: Uint8Array): number }, line: string) { this.chunks.push(this.enc.encode(line)); this.flush(sock); }
+  queued = 0; written = 0; // lifetime byte counters: a large queued-minus-written gap points at the transport
+  push(sock: { write(d: Uint8Array): number }, line: string) { const b = this.enc.encode(line); this.queued += b.length; this.chunks.push(b); this.flush(sock); }
   flush(sock: { write(d: Uint8Array): number }) {
     while (this.chunks.length) {
       const c = this.chunks[0];
       const n = sock.write(this.off ? c.subarray(this.off) : c);
       if (n < 0) return; // socket gone; close() will clean up
+      this.written += n;
       this.off += n;
       if (this.off < c.length) return; // kernel buffer full — the rest goes out on drain
       this.chunks.shift(); this.off = 0;
@@ -92,7 +94,7 @@ export function serveRpc(sockPath: string, handler: RpcHandler, opts: { onClose?
 /** Client side: connect to the daemon socket; `call` awaits a response; `onEvent` receives notifications. */
 export class RpcClient {
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; method: string; bytes: number }>();
   private eventHandlers = new Set<(params: any) => void>();
   private sock!: Awaited<ReturnType<typeof Bun.connect>>;
   closed = false;
@@ -119,9 +121,14 @@ export class RpcClient {
     if (this.closed) return Promise.reject(new Error("rpc closed"));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`rpc ${method}: no response within ${timeoutMs}ms`)); }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
-      this.out.push(this.sock, JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      const line = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        const also = [...this.pending.values()].map((p) => p.method).slice(0, 3);
+        reject(new Error(`rpc: no response to ${method} #${id} (params ${line.length}B, ${timeoutMs}ms; conn sent ${this.out.written}/${this.out.queued}B${this.out.written < this.out.queued ? " — QUEUED BYTES UNSENT: transport, not the daemon" : ""}${also.length ? `; also outstanding: ${also.join(", ")}` : ""})`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer, method, bytes: line.length });
+      this.out.push(this.sock, line);
     });
   }
   onEvent(fn: (params: any) => void): () => void { this.eventHandlers.add(fn); return () => this.eventHandlers.delete(fn); }

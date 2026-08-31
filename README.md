@@ -124,7 +124,7 @@ page with translated coordinates.
 
 ## Capture limits (recorded, never hidden)
 
-Streaming bodies (`streaming`), unread fire-and-forget bodies (`unread` — fetched when Chromium still
+Streaming bodies (`streaming`; when a streaming-flagged body turns out readable it is snapshotted as `streamed`, and `ok` if the response finishes), unread fire-and-forget bodies (`unread` — fetched when Chromium still
 has them buffered), evicted bodies (`evicted`), late-attached targets (`targets.late=1` — anything
 before `observed_from` is an unobserved prefix, including **WebSockets opened pre-attach**, which CDP
 cannot enumerate retroactively; reload the tab if you need their frames). Requests that begin within
