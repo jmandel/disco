@@ -1,6 +1,6 @@
 // Managed Chromium launch (GUIDANCE §3.2 launch mode). Used by the test harness from Slice 1 and by
 // `disco session new --launch` (Slice 6). Parses the DevTools endpoint from stderr.
-import { mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface Launched { proc: ReturnType<typeof Bun.spawn>; pid: number; port: number; wsUrl: string; userDataDir: string; kill(): Promise<void> }
@@ -32,6 +32,7 @@ export async function launchChromium(opts: { headless?: boolean; userDataDir: st
   // `session end`; P4-A friction #4).
   mkdirSync(opts.userDataDir, { recursive: true });
   const errPath = join(opts.userDataDir, "chromium.stderr.log");
+  writeFileSync(errPath, ""); // a reused profile keeps the previous launch's "DevTools listening on …" line (stranger #2 friction #2)
   const proc = Bun.spawn([exe, ...args], { stdout: "ignore", stderr: Bun.file(errPath), stdin: "ignore" });
   const wsUrl = await (async () => {
     const t0 = Date.now();

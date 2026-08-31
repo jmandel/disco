@@ -24,8 +24,11 @@ export const defaults = {
   chainedPollGapMs: 250,   // next poll starting within this of the previous END => chained (long-poll) …
   longPollMinHoldMs: 1000, //   … provided the previous request was HELD at least this long (a burst refetch is not a long-poll)
   burstCollapseMs: 100,    // starts within this of each other are one occurrence for cadence (SWR refetch bursts)
+  cronMinGapMs: 10000,     // two samples ≥ this apart, an exact multiple of cronUnitMs (± cronToleranceMs), both outside windows → periodic already
+  cronUnitMs: 5000,
+  cronToleranceMs: 150,
   trailingAttributionMs: 1500, // requests this soon after a window closes (same root, no new window) tag "trailing"
-  classifierWarmupMs: 90000, // idle observation before reports stop saying "classifier: immature" (EHRs use ~60s heartbeats; need ≥3 cycles — dogfood #1)
+  classifierWarmupMs: 90000, // idle observation before reports stop saying "classifier: immature" (a 60s heartbeat needs ≥3 samples ≈ 200s of idle — dogfood #1, stranger #2)
   idleObserveMs: 30000,    // `disco session new` idle observation (skippable); for minute-scale EHR heartbeats run `disco idle 120000` once (dogfood #1)
   // --- capture (GUIDANCE §3.4) ---
   bodyTextCap: 2_000_000,  // bytes of textual body kept in SQLite (and FTS); blob always keeps full

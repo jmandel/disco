@@ -437,19 +437,21 @@ function runWatch(d: Daemon, sel: Selectors, frameOf: () => FrameInfo | null, ro
     } catch (e) { if (e instanceof PageFnError) throw e; }
     return { ok: false };
   };
+  // Combinators recurse (an `any` inside an `all` used to be evaluated as a leaf and never matched — stranger #2 friction #1).
+  const checkPred = async (p: WatchPred): Promise<{ ok: boolean; preview?: string; request?: string; which?: string }> => {
+    if (p.any?.length) {
+      for (const [i, arm] of p.any.entries()) { const r = await checkPred(arm); if (r.ok) return { ...r, which: r.which !== undefined && arm.any ? r.which : (arm.name ?? String(i)) }; }
+      return { ok: false };
+    }
+    if (p.all?.length) {
+      let last: { ok: boolean; preview?: string; request?: string; which?: string } = { ok: false };
+      for (const arm of p.all) { last = await checkPred(arm); if (!last.ok) return { ok: false }; }
+      return { ...last, ok: true };
+    }
+    return checkOne(p);
+  };
   const check = async (): Promise<{ ok: boolean; preview?: string; request?: string; which?: string; fatal?: string }> => {
-    try {
-      if (pred.any?.length) {
-        for (const [i, arm] of pred.any.entries()) { const r = await checkOne(arm); if (r.ok) return { ...r, which: arm.name ?? String(i) }; }
-        return { ok: false };
-      }
-      if (pred.all?.length) {
-        let last: { ok: boolean; preview?: string; request?: string } = { ok: false };
-        for (const arm of pred.all) { last = await checkOne(arm); if (!last.ok) return { ok: false }; }
-        return { ...last, ok: true };
-      }
-      return await checkOne(pred);
-    } catch (e) { return { ok: false, fatal: (e as Error).message }; }
+    try { return await checkPred(pred); } catch (e) { return { ok: false, fatal: (e as Error).message }; }
   };
   const expiryDiagnosis = async (): Promise<Diagnosis> => {
     const fr = frameOf();

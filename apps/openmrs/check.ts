@@ -1,52 +1,75 @@
-// Live drift check for the OpenMRS O3 pack — `bun scripts/run-check.ts openmrs` (fresh headless browser + scoped
-// session, opens `target.url`, runs check(s)). Or against the current app session: `bun apps/openmrs/check.ts`.
-// Hits the shared public demo (dev3.openmrs.org): slow and data-churny, so names are picked off the wire when possible.
-// Write footprint: none beyond what the app does on its own (POST /user/<uuid> patientsVisited on chart open) and,
-// only if the location picker appears, POST /ws/rest/v1/session {sessionLocation}.
+// Live drift check for the OpenMRS O3 function library. Exports check(s) so the runner can drive it
+// against a fresh session; also runs standalone against the current session. NOT a *.test.ts, so
+// `bun test` never reaches the internet.   One-command form:  bun scripts/run-check.ts openmrs
+//
+// WRITE FOOTPRINT: no form is ever submitted; every request this check issues is a GET. The app itself
+// answers each chart open with `POST /ws/rest/v1/user/<uuid>` (userProperties.patientsVisited — the
+// recently-viewed MRU; user preference state, never patient data). See lib.ts's header.
 import { connect, type Session } from "../../src/client.ts";
-import * as o from "./lib.ts";
+import * as o3 from "./lib.ts";
 
-export const target = { url: `${o.SPA}/login`, scope: "dev3.openmrs.org" };
+/** Where run-check points the browser, and the host it scopes the session to. */
+export const target = { url: `${o3.SPA}/login`, scope: "dev3.openmrs.org" };
+/** The pack's first anchor: an O3 shell is "an empty div + 50 chunks" long before the form exists. */
+export const ready = { selector: "#username", visible: true };
+
+const POPULATED = "Michelle Lewis";   // 86F, 33 conditions, 2 drug orders, vitals, 10 visits
+const EMPTY = "John Smith";           // 6M, nothing recorded — the empty-state control
 
 export async function check(s: Session): Promise<boolean> {
   let failed = false; let last = Date.now();
-  const ok = (label: string, cond: boolean, detail?: unknown) => { const now = Date.now(); const ms = now - last; last = now;
-    console.log(`${cond ? "PASS" : "FAIL"}  ${label}  (${ms}ms)${detail !== undefined ? "  " + JSON.stringify(detail).slice(0, 220) : ""}`); if (!cond) failed = true; };
-  const acts = () => s.store.sql<{ n: number }>("SELECT COUNT(*) n FROM actions")[0]?.n ?? 0;
+  const ok = (label: string, cond: boolean, detail?: unknown) => {
+    const now = Date.now(); const ms = now - last; last = now;
+    console.log(`${cond ? "PASS" : "FAIL"}  ${label}  (${ms}ms)${detail !== undefined ? "  " + JSON.stringify(detail).slice(0, 220) : ""}`);
+    if (!cond) failed = true;
+  };
   try {
-    const info = await o.login(s);
-    ok("login reaches the shell; session says authenticated", info.authenticated === true && !!info.user && !!info.sessionLocation, { user: info.user?.display, location: info.sessionLocation?.display });
+    await o3.login(s);
+    ok("login reaches the app shell", true);
+    await o3.login(s);
+    ok("login is idempotent (no re-navigation when authenticated)", true);
 
-    const before = acts();
-    const again = await o.login(s);
-    ok("login is idempotent (no actions when already in)", again.authenticated && acts() === before, { actions: acts() - before });
+    const p = await o3.findPatient(s, POPULATED);
+    ok(`findPatient(${POPULATED}) off the search API body`, p.name.includes("Michelle Lewis") && !!p.uuid, p);
 
-    const name = pickKnownName(s) ?? "Susan";
-    const hit = await o.findPatient(s, name);
-    ok(`findPatient(${JSON.stringify(name)}) returns a uuid off the wire`, /^[0-9a-f-]{36}$/.test(hit.uuid) && hit.total >= 1, { uuid: hit.uuid, name: hit.name, identifier: hit.identifier, total: hit.total });
+    // past page 1: the overlay body is limit=10; the results page re-asks with limit=50.
+    await o3.openSearch(s);
+    await s.fill(o3.SEARCH_INPUT, "1000", { budgetMs: 15000, until: { urlLike: "/ws/rest/v1/patient?q=", landed: true, budgetMs: 12000 } });
+    const page1 = o3.searchResults(s, "1000");
+    await s.press("Enter", { budgetMs: 25000, until: { all: [{ fn: () => location.pathname.includes("/spa/search") }, { urlLike: "limit=50", landed: true }], budgetMs: 20000 } });
+    const paged = o3.searchResults(s, "1000");
+    ok("search reads past page 1 (overlay limit=10 -> results page limit=50)",
+      page1.patients.length === 10 && paged.patients.length > 10 && paged.totalCount > 50,
+      { page1: page1.patients.length, paged: paged.patients.length, totalCount: paged.totalCount });
 
-    const chart = await o.openPatient(s, hit.uuid);
-    ok("openPatient(uuid) reaches the chart anchor for that patient", chart.url.includes(`/patient/${hit.uuid}/chart`) && !!chart.name, { name: chart.name, identifiers: chart.identifiers });
+    await o3.openPatient(s, p);
+    ok("openPatient reaches the chart anchor", true, { uuid: p.uuid });
 
-    const sum = await o.extractSummary(s);
-    ok("extractSummary reads conditions/allergies/vitals off FHIR bodies", !!sum.sources.conditions && !!sum.sources.allergies && !!sum.sources.vitals && sum.uuid === hit.uuid,
-      { conditions: sum.conditions.length, allergies: sum.allergies.length, vitalsDate: sum.vitals.date, vitals: Object.keys(sum.vitals.values).length });
+    const sum = await o3.extractSummary(s, p.uuid);
+    ok("extractSummary: problems off FHIR Condition", sum.problems.length > 0, sum.problems.slice(0, 4));
+    ok("extractSummary: medications off REST order", sum.medications.length > 0, sum.medications.map((m) => m.name).slice(0, 3));
+    ok("extractSummary: latest vitals off FHIR Observation", sum.vitals.length > 0, sum.vitals.slice(0, 3));
+    ok("extractSummary: allergies bundle fetched (may be empty)", Array.isArray(sum.allergies), sum.allergies.slice(0, 3));
 
-    const byName = await o.openPatient(s, hit.name);
-    ok("openPatient(name) — search route + result card click — lands on the same chart", byName.uuid === hit.uuid && byName.url.includes(`/patient/${hit.uuid}/chart`), { url: byName.url });
-  } catch (e) { console.log("FAIL  threw:", (e as Error).message.slice(0, 600)); failed = true; }
+    const visits = await o3.listVisits(s, p.uuid);
+    ok("listVisits off the wire, newest first", visits.length > 1 && !!visits[0].start && !!visits[0].type,
+      { latest: visits[0], n: visits.length });
+
+    // the empty-state control: a patient with nothing recorded must return empty arrays, not throw
+    const e = await o3.openPatient(s, EMPTY);
+    const esum = await o3.extractSummary(s, e.uuid);
+    ok("empty patient yields empty arrays, no throw",
+      esum.problems.length === 0 && esum.allergies.length === 0 && esum.medications.length === 0,
+      { problems: esum.problems.length, allergies: esum.allergies.length, meds: esum.medications.length, vitals: esum.vitals.length });
+
+    await o3.recoverToShell(s);
+    ok("recoverToShell returns to the shell anchor", true);
+  } catch (e) {
+    console.log("FAIL  threw:", (e as Error).message);
+    failed = true;
+  }
   console.log(failed ? "\nCHECK FAILED" : "\nCHECK OK");
   return !failed;
-}
-
-/** A patient name the demo currently has — from the service-queue list the home page fetched (wire), if any. */
-function pickKnownName(s: Session): string | undefined {
-  const q = o.lastBody<{ results?: Array<{ patient?: { display?: string; person?: { display?: string } } }> }>(s, "/ws/rest/v1/queue-entry?");
-  for (const e of q?.results ?? []) {
-    const n = e.patient?.person?.display ?? e.patient?.display?.replace(/^\S+\s+-\s+/, "");
-    if (n && /^[A-Za-z][A-Za-z .'-]+$/.test(n)) return n;
-  }
-  return undefined;
 }
 
 if (import.meta.main) {

@@ -86,6 +86,8 @@ export class Session {
     return this.act({ kind: "drag", target, ...(typeof to === "string" ? { to } : { toOffset: to }), ...o });
   }
   awaitSettlement(o: { action?: string; budgetMs?: number; frame?: string } = {}): Promise<Report> { return this.rpc.call("settle", o, (o.budgetMs ?? 30000) + 30000); }
+  /** Alias of awaitSettlement — the CLI verb is `disco settle`. */
+  settle(o: { action?: string; budgetMs?: number; frame?: string } = {}): Promise<Report> { return this.awaitSettlement(o); }
   watch(pred: PredOptions, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult> {
     return this.rpc.call("watch", { ...stringifyPred(pred), ...o }, (o.budgetMs ?? 30000) + 30000);
   }

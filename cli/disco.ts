@@ -53,14 +53,14 @@ session ls | info             list apps (runs per app) / current run info
 targets                       scoped targets + frames (primary = where act/watch/eval/screenshot go without --target)
 focus <id-prefix|url-part>    make another scoped page the primary target
 tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
-sql [<product>] <query> [--json]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; table cells cut at 60 chars, --json for full values
+sql [<product>] <query> [--json|--wide]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; cells cut at 60 chars (--wide: 200; --json: all)
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
 families [--mark-read F] [--ambient F|url-part] [--not-ambient F|url-part] [--forget]   learned families + evidence; a url-part becomes a persistent rule
 rules [--remove id] [--json]  per-app overrides: attribution rules + sentinel mutes (persist across runs)
 sentinels [--mute name [--selector s] [--text t] [--url u]] [--unmute id]   mute noisy sentinels (recorded, not reported)
 idle [ms] [--json]            idle-observe to warm the ambient classifier; prints the ambient digest (--json: full families)
 screenshot [--out file.jpg]   capture now; prints the blob hash
-blob <hash|prefix> [--out file]  copy a blob out / print text (any hash argument accepts a prefix, e.g. the 12-char handles in reports)
+blob|body <hash|prefix> [--out file]  copy a blob out / print text (any hash argument accepts a prefix, e.g. the 12-char handles in reports)
 eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
 cdp <Method> [json params] [--target id | --browser]
 act <kind> [target] [--frame f] [--target id-prefix|url-part] [--budget ms] [--eval "fn"] [--until sel [--until-visible] | --until-fn "fn" | --until-url part [--until-landed]] [--until-budget ms] [--until-tail ms] [--json]
@@ -256,7 +256,7 @@ switch (cmd) {
     else if (!rows.length) console.log("(no rows)");
     else {
       const cols = Object.keys(rows[0]);
-      const MAX = 60; let cut = false;
+      const MAX = has("wide") ? 200 : 60; let cut = false;
       const cell = (v: unknown) => { const s = String(v ?? "").replace(/\n/g, " "); if (s.length <= MAX) return s; cut = true; return s.slice(0, MAX - 1) + "…"; };
       const w = cols.map((c) => Math.min(MAX, Math.max(c.length, ...rows.map((r: any) => String(r[c] ?? "").length))));
       console.log(cols.map((c, i) => c.padEnd(w[i])).join("  "));
@@ -286,7 +286,8 @@ switch (cmd) {
       }
       const fams = await c.call("families");
       console.log(`${"".padEnd(8)} ${"write".padEnd(7)} ${"count".padStart(4)}  family  (ambient reason)   — ambient = periodic (≥${defaults.ambientMinCount} samples, gap cv ≤ ${defaults.ambientMaxCv}) or chained long-poll, seen while no action window was open; excluded from attribution AND settlement`);
-      for (const x of fams) console.log(`${x.ambient ? "ambient " : "        "} ${x.writeKind.padEnd(7)} ${String(x.count).padStart(4)}  ${x.family}${x.reason ? "  (" + x.reason + ")" : ""}`);
+      const cadence = (x: any) => { const g: number[] = x.evidence?.gaps ?? []; if (x.ambient || !g.length) return ""; const need = Math.max(0, defaults.ambientMinCount - (x.count ?? 0)); return `  gaps ${g.slice(-3).map((v: number) => v >= 1000 ? Math.round(v / 1000) + "s" : v + "ms").join(",")}${x.evidence?.cv != null ? " cv " + x.evidence.cv : ""}${need ? ` — ${need} more sample${need > 1 ? "s" : ""} to classify` : x.evidence?.outsideWindow === 0 ? " — never seen outside an action window" : ""}`; };
+      for (const x of fams) console.log(`${x.ambient ? "ambient " : "        "} ${x.writeKind.padEnd(7)} ${String(x.count).padStart(4)}  ${x.family}${x.reason ? "  (" + x.reason + ")" : ""}${cadence(x)}`);
     });
     break;
   }
@@ -309,7 +310,7 @@ switch (cmd) {
     break;
   }
 
-  case "blob": {
+  case "body": case "blob": {
     const hash = pos[1] ?? die("blob <hash-or-prefix>");
     const st = openStore(sessionDir());
     let p: string; try { p = st.blobPath(hash); } finally { st.close(); }

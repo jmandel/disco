@@ -118,6 +118,14 @@ describe("kinds and predicates", () => {
     await setCtl({ slowMs: 100 });
   }, 20000);
 
+  test("combinators nest: an `any` inside an `all` is evaluated, not treated as a leaf", async () => {
+    const w = await s.watch({ all: [{ fn: () => true }, { any: [{ selector: "#never-exists" }, { selector: "#load-chart", visible: true, name: "chart" }] }] }, { budgetMs: 1500 });
+    expect(w.matched).toBe(true);
+    expect(w.which).toBe("chart");
+    const miss = await s.watch({ all: [{ fn: () => true }, { any: [{ selector: "#never-1" }] }] }, { budgetMs: 300 });
+    expect(miss.matched).toBe(false);
+  }, 10000);
+
   test("a ReferenceError inside a page function fails fast with the closure hint (not `false` until the budget)", async () => {
     const t0 = performance.now();
     const w = await s.watch({ fn: "() => !!document.querySelector(NOT_DEFINED_CONST)" }, { budgetMs: 5000 });

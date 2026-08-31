@@ -93,9 +93,13 @@ export class Attributor {
     let attribution: Attribution = "none"; let actionId: string | null = null;
     if (win) {
       actionId = win.actionId;
+      const inTask = win.taskSpans?.some((s) => r.tStart >= s.t0 - 2 && r.tStart <= s.t2 + defaults.taskTierSlackMs) ?? false;
       if (r.redirectFrom && this.byId.get(r.redirectFrom)?.attribution !== "none" && this.byId.get(r.redirectFrom)?.attribution !== "ambient") attribution = "dependency";
-      else if (ambientNow) attribution = "ambient";
-      else if (win.taskSpans?.some((s) => r.tStart >= s.t0 - 2 && r.tStart <= s.t2 + defaults.taskTierSlackMs)) attribution = "task";
+      // A request that starts inside the input's own task (≤30ms of the click) is the action's, even if its family is a
+      // learned poll: the same URL can be the queue dashboard's 60s poll AND one request per search-result row
+      // (stranger #2 ledger). An explicit `ambient` RULE still wins — that is what rules are for.
+      else if (rule === "ambient" || (ambientNow && !inTask)) attribution = "ambient";
+      else if (inTask) attribution = "task";
       else attribution = "window";
     } else if (r.redirectFrom) {
       const prev = this.byId.get(r.redirectFrom);
@@ -121,7 +125,7 @@ export class Attributor {
   /** Periodicity (regular cadence) or chained (long-poll) → ambient, given ≥1 occurrence outside any window. */
   private classify(f: FamilyState) {
     if (f.ambientReason === "manual") return;
-    if (f.count < defaults.ambientMinCount || f.outsideWindow < 1) return;
+    if (f.count < 2 || f.outsideWindow < 1) return; // ≥ ambientMinCount for cadence/chained; 2 suffice for a cron-shaped gap (below)
     // Cadence is measured between BURSTS: SWR-style pages refetch a family 2–3× within a few ms on every
     // cycle, which made a clean 60s heartbeat look like gaps [0, 60001, 2, 120066, 33] (cv ≈ 1.5, never
     // ambient — P4-B friction #5). Starts within burstCollapseMs of the previous one are one occurrence.
@@ -135,6 +139,12 @@ export class Attributor {
       const sd = Math.sqrt(gaps.reduce((a, g) => a + (g - mean) ** 2, 0) / gaps.length);
       cv = mean > 0 ? sd / mean : NaN;
       periodic = mean >= 500 && cv < defaults.ambientMaxCv; // sub-500ms "cadence" is a burst, not a heartbeat
+    } else if (gaps.length === 1 && f.outsideWindow >= 2) {
+      // Two samples an EXACT round period apart (60 001 ms, 30 004 ms…) are a timer, not a coincidence: a 60 s
+      // heartbeat would otherwise need ≥4 minutes of idle to reach three samples (stranger #2 friction #3).
+      const g = gaps[0], unit = defaults.cronUnitMs;
+      periodic = g >= defaults.cronMinGapMs && Math.abs(g - Math.round(g / unit) * unit) <= defaults.cronToleranceMs;
+      cv = 0;
     }
     // chained = a LONG-POLL: each start follows the previous end within chainedPollGapMs AND the previous
     // request was held by the server (≥ longPollMinHoldMs). A read endpoint re-fetched back-to-back on every

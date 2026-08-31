@@ -43,8 +43,8 @@ console line, dialog, navigation, and a screencast — to `apps/mysite/store/` (
 **Have the app open before `session new`** (attach mode): the 30-second idle observation learns the page's
 ambient traffic, and an empty browser teaches it nothing (it is skipped when nothing is scoped). **Let the
 classifiers warm up** before you lean on settlement — reports say how far along it is
-(`ambient classifier immature: 41s of 90s`); `disco idle 120000` for an EHR (minute-scale heartbeats need
-≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never record a human's mail/bank tabs;
+(`ambient classifier immature: 41s of 90s`); for an EHR, ≥3 cycles of its slowest heartbeat — `disco idle
+200000` for a 60 s cadence (DECISIONS #29, #45). Scope is mandatory in attach mode so you never record a human's mail/bank tabs;
 in launch mode it is optional (the browser is yours — a scope still keeps popups to other hosts out of the
 store). `session new` writes `apps/.current`, which is what "the current app" means for every command
 without `--app`.
@@ -57,8 +57,12 @@ tell (a bot-challenge page is detected and named); when it can't, the census is 
 browser refused by a bot challenge is not going to pass it by waiting — attach to a real browser you have
 passed the challenge in, or use another host of the same build.
 
-**Long observations run in the background.** A classifier warm-up (`disco idle 120000` for minute-scale
-heartbeats) only needs the *page* to sit still — not you. Start it as a background command and spend the
+**Long observations run in the background.** A classifier warm-up only needs the *page* to sit still — not
+you. Size it from the slowest heartbeat: a family is ambient after **3 occurrences** at a regular cadence
+seen while no action window is open, so a 60 s heartbeat needs ~3–4 minutes of idle (`disco idle 200000`),
+not the 2 minutes older notes suggested; `disco families` shows each family's samples and gaps so far
+("×2, gaps 60s — one more cycle"), and a rule (`--ambient <url-part>`) is always available when waiting
+is not worth it. Start it as a background command and spend the
 time on recon (the store, `families`, `targets`, the frames); the harness tells you when it finishes.
 Never write your own wait loop for it: `until ! pgrep -f 'disco idle'` matches its own shell's command
 line and spins forever (a real run lost two minutes to exactly that without noticing).

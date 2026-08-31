@@ -1,160 +1,263 @@
-# Navigation & quirks — OpenMRS O3 reference application (dev3.openmrs.org), 2026-08-30
+# OpenMRS O3 — navigation & quirks
 
-Discovery per GUIDANCE §7 against the public dev demo, `admin` / `Admin123`. Evidence lives in
-`apps/openmrs/store/` (run 1 = the aborted o3 attempt, **run 2 = everything below**); citations are act ids
-(`act:N`, rows in `actions`) and event cursors (`ev:a-b`). Companions: `ledger.md`, `friction.md`, `lib.ts`,
-`check.ts`, `screenshots/`.
+Instance #4 of the pack series. Everything here was observed through disco against the **public demo**
+build; every claim cites an act id (`act:N`, this pack's `store/`, run 2 unless noted) or a store query.
+Observed = seen in a report/body. Inferred = reasoned from the product, not directly seen; marked *(inferred)*.
 
-**Host note.** The task named `https://o3.openmrs.org`. It sits behind a Cloudflare Turnstile challenge that a
-headless Chromium does not pass — the page stays at `403 "Just a moment..."` with a `challenges.cloudflare.com`
-iframe (run 1, `screenshots/o3-cloudflare-turnstile.jpg`; the plain `curl` gets a 403, a browser-UA `curl` a 200,
-so it is bot-scoring, not IP blocking). Everything here is **dev3.openmrs.org**, the same reference application
-build (`openmrs-esm-*-app` 10.x/11.x/12.x pre-releases, core `10.0.1-pre.5263`).
+## 0. Session contract
 
-## 1. Layout
+| | |
+|---|---|
+| **Target** | OpenMRS O3 Reference Application 3.x, `https://dev3.openmrs.org/openmrs/spa` |
+| **Host note** | The job named `o3.openmrs.org`. **It is Cloudflare-gated**: `session new --launch --headless` there attached to a bot challenge (`title "Just a moment..."`, disco's own instrument-step detector said so — run 1). Switched to `dev3.openmrs.org`, the same O3 build, which serves headless browsers directly. |
+| **Roles** | `admin` / `Admin123` → roles **System Developer + Provider** (`GET /ws/rest/v1/session`, run 2). A second, lower-privilege role was probed — see §9. |
+| **Stance** | **Read-only.** No form that persists was submitted: no orders, notes, demographics edits, visit start/stop, queue changes. Reads delivered over POST would have been fine; the app makes none (§ wire.md). |
+| **Data posture** | Synthetic demo data on a public OpenMRS demo server. No PHI. |
+| **Budget** | ~25 min of driving; depth over breadth. |
+| **Done means** | login · findPatient (past page 1, read off the wire) · openPatient · extractSummary (problems/allergies/meds/latest vitals) · list visits + latest visit date/type off the wire; ≥3 patients in the ledger; `bun scripts/run-check.ts openmrs` green. |
 
-A single-page app (React + single-spa microfrontends, Carbon design system) under `/openmrs/spa/…`. **No
-iframes, no shadow DOM, no canvas** on the pages visited; one CDP target the whole time. The backend is
-OpenMRS REST (`/openmrs/ws/rest/v1/*`) plus FHIR R4 (`/openmrs/ws/fhir2/R4/*`); everything the UI shows is JSON
-on the wire first. `routes.registry.json` (captured on load) lists the page routes: `login`, `home`, `search`,
-`^patient/.+/chart`, `patient/<uuid>/edit`, `logout`, `patient-registration`, `laboratory`, `forms`, ….
+## 1. Architecture (observed)
 
-- **Header** (every logged-in page): location pin + current location, `button[aria-label="Change location"]`,
-  `button[aria-label="Search patient"]` (**the shell landmark**), Implementer Tools, Add patient, My Account,
-  App Menu.
-- **Home** `/spa/home/service-queues` — left nav (Service queues / Appointments / Patient lists / Laboratory /
-  Wards / Billing), "Attending" cards, "Waiting List" table (Carbon DataTable).
-- **Chart** `/spa/patient/<uuid>/chart/<tab>` — patient banner (avatar, name, sex, tags, identifiers, Actions),
-  left nav of tabs (Patient summary, Vitals & Biometrics, Medications, Orders, Results, Visits, Allergies,
-  Conditions, Immunizations, Procedures, Attachments, Programs, Appointments, Billing history, Growth chart),
-  right-hand action rail (order basket, notes, …). Widgets are independent microfrontends that each fetch
-  their own data — the page is "loaded" per widget, never as a whole (`still-active` on every chart open).
-- **Search** — two faces of one component: the header icon opens an overlay with `[data-testid="patientSearchBar"]`
-  (act:9) and the full page `/spa/search?query=<q>` renders the same bar + a "Refine search" panel (act:13).
-  Results are `<a href="/openmrs/spa/patient/<uuid>/chart/">` cards.
+**One page, no frames.** `disco targets` after launch shows a single target with a single frame
+(`https://dev3.openmrs.org/openmrs/spa/login`) — no iframes anywhere in the flows below, no cross-origin
+islands, no shadow DOM in the paths driven, no canvas. This is the opposite of the OpenEMR pack's nested
+`dynamic_finder.php` / `demographics.php` world: **no `frame:` argument is needed anywhere in `lib.ts`.**
 
-Selector strategy: **`data-testid` where O3 provides one** (`patientSearchBar`, `patient-banner-button-col`,
-`numeric-observation-card`, `searchPatientIcon`), then **`role=`+accessible name** (Carbon buttons carry
-`aria-label`s), then attribute selectors on stable form names (`input[name="loginLocations"]`, `#username`,
-`#password`). Never Carbon ids (`#search-input-:r5o:` — React `useId`, changes per mount) and never CSS-module
-classes (`-esm-patient-banner__patient-banner__container___S…` — hashed).
+**A micro-frontend SPA.** The shell is `openmrs-esm-app-shell` loading an **import map**
+(`GET /openmrs/spa/importmap.json`, `routes.registry.json`) of independently versioned ESM apps —
+`openmrs-esm-primary-navigation-app-10.0.1`, `-patient-search-app-11.1.1`, `-patient-chart-app`,
+`-service-queues-app`, `-billing-app`, `-laboratory-app` … Each route change lazily loads that app's JS
+chunks, so **the first visit to a route is chunk-heavy and slow; the second is not** (measured: first
+chart open 5.6 s vs. later sections sub-second — §5). UI kit is **Carbon Design System** (`cds--*`
+classes); ids like `#username`/`#password` exist on the login form, but inside the app the stable handles
+are **ARIA roles/names and `data-testid`**, not ids (§4 selector strategy).
 
-## 2. Anchors (cheap predicates — `lib.ts::whereAmI` reads all of them in one `evaluate`)
+**Routing** is client-side under `/openmrs/spa/…` (`react-router`); `location.pathname` is the cheapest
+anchor predicate and it is *always* correct after a transition (no hash routing, no `#`).
 
-| anchor | URL | landmark | notes |
-|---|---|---|---|
-| `login.username` | `/spa/login` | `button[type=submit]` with text **Continue**; `#username` | `#password` is ALSO in the DOM here (hidden) — do not use it to tell the steps apart |
-| `login.password` | `/spa/login` | submit button **Log in**; `#password` visible | reached client-side from Continue (no wire, act:2 settled:visual 110ms) |
-| `login.location` | `/spa/login/location[?returnToUrl=…&update=true]` | `input[name="loginLocations"]` radios (50), searchbox "Search for a location", **Confirm** submit | act:5–8; `screenshots/location-picker.jpg` |
-| `home` | `/spa/home/*` | header `button[aria-label="Search patient"]` | lands on `/home/service-queues` after login |
-| `shell` | any other `/spa/*` | same header button | generic "logged in" |
-| `search` | `/spa/search?query=…` | `[data-testid="patientSearchBar"]` | result cards `a[href*="/patient/<uuid>/chart"]` |
-| `chart` | `/spa/patient/<uuid>/chart/<tab>` | `[data-testid="patient-banner-button-col"]` | the banner needs `GET /fhir2/R4/Patient/<uuid>`; widgets keep loading after it |
+**Two APIs, side by side** (full table in `wire.md`):
+- `/openmrs/ws/rest/v1/…` — the OpenMRS REST API, with a projection language in the query string
+  (`?v=custom:(uuid,display,person:(uuid,age,gender))`). Session, patient search, visits, queues.
+- `/openmrs/ws/fhir2/R4/…` — FHIR R4. `Condition`, `AllergyIntolerance`, `MedicationRequest`,
+  `Observation`, `Location`, `Patient`. **The chart's clinical facts are FHIR bundles.**
 
-Recovery from anywhere: `login(s)` — it reads `whereAmI`, navigates to `/spa/login` if lost (an authenticated user
-is bounced back into the shell, handled), and treats the location picker as optional.
+**Auth = a servlet session cookie.** `GET /ws/rest/v1/session` returns
+`{authenticated, user:{uuid,display,roles:[…]}, sessionLocation, currentProvider, locale}` and is the
+app's own "am I logged in" probe; it is re-read on route changes (SWR revalidation), which is why it must
+**not** be classified ambient (§2). Login itself is `GET /ws/rest/v1/session` with a Basic auth header —
+**there is no login POST** (observed: zero POSTs in the whole run — see `wire.md`). Logout is
+`DELETE /ws/rest/v1/session`. No bearer token, no refresh, no `Authorization` header after login.
 
-## 3. Transitions (settlement profile + wire signature)
+## 2. Ambient traffic, and the rules the pack registers
 
-| transition | act | verdict, settle | wire signature | notes |
-|---|---|---|---|---|
-| Load `/spa/login` | run-check act:1 | `still-active` ~1.7s, `until #username` 753ms | `importmap.json`, `routes.registry.json`, `config-core_demo.json`, `GET /ws/rest/v1/session` ×2 (`authenticated:false`), ~50 JS chunks | **Cold load hydrates late**: the form can render before handlers attach (run-check #1 failure — see §5.1) |
-| fill `#username` → Continue | act:1–2, 20–21, 24–25 | `settled:dom` ~110ms; Continue `settled:visual` ~120ms, until `Log in` button ≤26ms | none | purely client-side step switch |
-| fill `#password` → Log in (good creds) | act:4 (ev:455-626), act:31, run-check act:5 | `still-active` 1.1–1.6s (79 req) | **`GET /ws/rest/v1/session` with `Authorization: Basic …` → 200 `{authenticated:true, user, sessionLocation, currentProvider}`** (task), then the home bundle: `/module`, `/addresstemplate`, `/relationshiptype`, `/patientidentifiertype`, `/metadatamapping/termmapping`, `/idgen/*`, `/fhir2/R4/Location?_tag=queue location`, `/queue-entry`, `/queue-entry-metrics`, `/obs?patient=…` | login is a **GET, not a POST**; URL → `/spa/home/service-queues`; **no location picker** when the user has `userProperties.defaultLocation` (admin does: "Mobile Clinic") — n=3 logins, 0 pickers |
-| Log in (bad creds) | act:23, act:27 | `settled:visual` ~190–280ms, 0 attributed req | `GET /ws/rest/v1/session → 200 {authenticated:false}` (**no 401**; the daemon tagged it `ambient` — §5.4) | inline Carbon notification `.cds--inline-notification--error[role=status]` "Error Invalid username or password"; form drops back to the **username** step (`screenshots/login-invalid-credentials.jpg`) |
-| Change location (header) | act:5 (ev:694-709) | `settled:network` 294ms | `GET /session`; `GET /fhir2/R4/Location?_summary=data&_count=50&_tag=Login+Location` (41.7KB bundle = the radio list), `Location?_id=<current>`, `Location?_count=1&_tag=Login+Location` | URL `/spa/login/location?returnToUrl=<from>&update=true` |
-| pick a location radio | act:6 ✗ / act:7 ✓ | act:6 **diagnosis: occluded** by `span.cds--radio-button__appearance` (the input is visually hidden); act:7 `settled:dom` 8ms | none | **click the `label[for="<uuid>"]`**, not `role=radio` |
-| Confirm location | act:8 (ev:716-763) | `settled:network` 840ms, until shell 506ms | `POST /ws/rest/v1/session {"sessionLocation":"<uuid>"}` ✎ → 200; `POST /ws/rest/v1/user/<userUuid>` ✎ (`userProperties.defaultLocation`); then the home bundle again | snackbar `alertdialog "Location updated"` (sentinel dialog + toast); back at `returnToUrl` |
-| header Search patient | act:9 (ev:767-809) | `still-active` 1.1s, until searchbox 75ms | 10× `GET /rest/v1/patient/<uuid>` ("recent patients" = `userProperties.patientsVisited`), then `/person/<uuid>`, `/visit?patient=` per card | overlay; input autofocused |
-| type in the search bar | act:10 (ev:911-947) | `settled:dom` 110ms, until wire 1013ms | **`GET /ws/rest/v1/patient?q=<text>&v=custom:(patientId,uuid,voided,identifiers,display,patientIdentifier:(uuid,identifier),person:(gender,age,birthdate,birthdateEstimated,personName,addresses,display,dead,deathDate),attributes:(…))&includeDead=false&limit=10&totalCount=true`** → `{results:[…], totalCount}` (window); then per hit `/visit?patient=`, `/person/<uuid>` | debounced (~300ms); spaces encode as `+` (`q=Susan+Lopez`, act:16) |
-| navigate `/spa/search?query=<q>` | act:13, 14, 16, 17; run-check act:6 | `navigated` 1.3–2.4s, until wire 1.0–1.9s | full SPA reload (~130 req) + the same `patient?q=` request | the deterministic form `lib.ts::findPatient` uses |
-| click a result card | act:11 (ev:949-1207), 15, 18 | `still-active` 1.8–2.7s (112 req) or `settled:visual` 42ms with until 1.1s | **`POST /ws/rest/v1/user/<userUuid>` ✎** (patientsVisited — a write on a read flow), `GET /fhir2/R4/Patient/<uuid>?_summary=data`, `/rest/v1/visit?patient=…&includeInactive=false`, `/visit/<uuid>`, `/person/<uuid>`, `/billing/patientPaymentStatus/<uuid>`, `/order?…`, `/fhir2/R4/Observation` ×3 (vitals, biometrics, one empty code set), `/conceptreferencerange/*` ×3, `/fhir2/R4/Condition?patient=…` | URL `/patient/<uuid>/chart/patient-summary`; widgets settle one by one — the banner is the anchor, not the page |
-| chart tab Allergies | act:12 (ev:1209-1215) | `settled:network` 287ms, until 203ms | `GET /fhir2/R4/AllergyIntolerance?patient=<uuid>&_summary=data` (task) | client-side route; only this tab fetches allergies |
-| `/spa/logout` | act:19 (ev:2928-3087) | `navigated` 767ms | `DELETE /ws/rest/v1/session → 204` ✎; then `GET /ws/rest/v1/module → 500` (harmless, app keeps going) | lands on `/spa/login` at the username step |
+**The heartbeat is 60.0 s and the classifier cannot learn it in a sane warm-up.** The service-queues home
+dashboard refreshes three families on one timer; measured inter-arrival gaps, no action window open
+(run 2, `t_start` 81.5 s → 141.5 s):
 
-Settlement stats (run 2, 31 acts, `bun scripts/timing-report.ts openmrs`): `settled:dom` p50 111ms;
-`settled:visual` p50 124ms; `settled:network` p50 294ms; `navigated` p50 1.4s; `still-active` p50 1.4s, max 2.7s
-(chart open). `until` matched 24/24, p50 197ms, p90 1.1s, max 1.9s. Daemon overhead 5% of act time.
+| family | gap |
+|---|---|
+| `GET /ws/rest/v1/queue-entry` | 60 051 ms |
+| `GET /ws/rest/v1/obs?…concept=736e8771…` | 60 001 ms |
+| `GET /ws/fhir2/R4/Location?…_tag=queue location` | 60 003 ms |
 
-## 4. Wire-available facts (prefer these over scraping — §2.3)
+`disco idle 150000` (2.5 cycles) reported **"133 families, 0 ambient"** — the ambient rule needs ≥3
+samples, so a 60 s heartbeat needs **≥4 minutes** of idle. Rather than pay that, the pack states the
+conclusion as rules (`lib.ts::registerRules`, called from `login`, so every run starts right):
 
-| fact | endpoint | shape |
+| rule | why | evidence |
 |---|---|---|
-| who am I / where am I logged in | `GET /ws/rest/v1/session` (re-fetched on every page; ~25× in the run) | `{authenticated, locale, user:{uuid,display,systemId,userProperties:{defaultLocation, patientsVisited, starredPatientLists, …}}, sessionLocation:{uuid,display}, currentProvider:{uuid,display}}` |
-| login locations | `GET /ws/fhir2/R4/Location?_summary=data&_count=50&_tag=Login+Location` | FHIR Bundle, `entry[].resource.{id,name}` (50 here; the picker's searchbox covers the rest) |
-| patient search | `GET /ws/rest/v1/patient?q=…` (params above) | `results[].{uuid, display:"<id> - <name>", identifiers[].{identifier,preferred,identifierType}, person:{display,gender,age,birthdate,dead}}`, `totalCount` |
-| patient header | `GET /ws/fhir2/R4/Patient/<uuid>?_summary=data` | FHIR Patient: `name[0].text`, `gender`, `birthDate`, `identifier[].value` |
-| conditions (problem list) | `GET /ws/fhir2/R4/Condition?patient=<uuid>&category=…problem-list-item&_count=100&_summary=data` | Bundle; `resource.code.text`, `clinicalStatus.coding[0].code`, `onsetDateTime`, `recordedDate` (Susan Lopez: 15) |
-| allergies | `GET /ws/fhir2/R4/AllergyIntolerance?patient=<uuid>&_summary=data` | Bundle (0 entries for the sampled patient — the shape of a populated one is **unobserved**, ledger #7) |
-| vitals | `GET /ws/fhir2/R4/Observation?subject:Patient=<uuid>&code=5085,5086,5087,5088,5092,…&_summary=data&_sort=-date&_count=100` | Bundle of numeric Observations: `code.text` ("Systolic blood pressure", "Pulse", "Temperature (c)", "Respiratory rate", "Arterial blood oxygen saturation (pulse oximeter)"), `valueQuantity.{value,unit}`, `effectiveDateTime`; 64 entries = 8 vitals sets |
-| biometrics | same, `code=5090,5089,1343,1342` | Weight (kg), Height (cm), MUAC; **BMI is computed client-side, not on the wire** |
-| active visit | `GET /ws/rest/v1/visit?patient=<uuid>&v=custom:(…encounters…)&includeInactive=false` | `results[].{uuid, visitType.display, startDatetime, stopDatetime, location.display, encounters[]}` |
-| waiting list / attending | `GET /ws/rest/v1/queue-entry?v=custom:(…)&status=<uuid>&isEnded=false` | `results[].{patient:{uuid,display,person:{display,age,gender},identifiers}, queue.display, status.display, priority.display, startedAt}` — a free list of **patient names that exist right now** (`check.ts::pickKnownName`) |
-| SPA config | `GET /openmrs/spa/config-core_demo.json`, `routes.registry.json`, `importmap.json` | which apps/routes are mounted |
+| `ignore("queue-entry")` | dashboard poll (`queue-entry` + `queue-entry-metrics`) | 60 051 ms gap, idle window |
+| `ignore("_tag=queue")` | dashboard poll (FHIR queue `Location`) | 60 003 ms gap, idle window |
+| `mute("toast", text "loading"/"Loading")` | every lazily-loaded micro-frontend raises a Carbon "Loading…" toast; 38 toast-sentinel firings in run 2, none of them information | act:4, act:23, act:30 |
+| `mute("error", url "$SPA_PATH")` | **every full page load** 404s on `GET /openmrs/spa/$SPA_PATH/icon_144x144….png` — an un-substituted template literal in the manifest, an app bug, not a signal | act:1, act:8 |
 
-Concept uuids on the wire (each is `<n>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`): the "vitals" request asks for
-`5085,5086,5087,5088,5092,5090,5089,5242` (systolic, diastolic, pulse, temperature, SpO2, height, weight, respiratory
-rate — matched to `code.text` in the bodies); the "biometrics" request asks for `5090,5089,1343,1342`; a third request
-for `165095` returned 0 entries for this patient. (Mapping of 1343/1342/165095 is inferred from the widget — MUAC and
-two unknowns — not observed as named observations.)
+**A rule deliberately NOT registered** (this is the interesting one): `obs?…&concept=736e8771-…` *looks*
+like the third leg of the poll, and I did mark it ambient at first — then act:16's report showed the
+**patient-search results list firing the identical URL once per row**, i.e. an action's own traffic
+tagged `attribution=ambient`. The URLs are byte-identical, so no URL-substring rule can separate them.
+The rule was removed (`disco rules --remove 2`); the poll is left attributed and the dashboard is simply
+left behind after login. *This is the "a request that fired with your action is tagged ambient" case from
+the field guide, met in the wild.*
 
-## 5. Failure modes actually seen (instances of the §8 catalog)
+## 3. Anchors (cheap predicates)
 
-1. **Cold-load hydration race (re-render race).** `run-check` #1: `#username` rendered, `fill` + `Continue` looked
-   fine, then `role=button[name="Log in"]` was not found and the diagnosis still listed the **Continue** button +
-   pending JS chunks. The form re-rendered over the fill (controlled input reset → HTML5 `required` swallowed the
-   submit with zero DOM change). Handled in `lib.ts::login`: postcondition of the fill is `#username.value === u`,
-   postcondition of Continue is the **Log in** button (not `#password`, which exists hidden throughout), and the
-   step retries once. The second cold run passed (run-check act:1–5).
-2. **Hidden native inputs behind Carbon's custom controls.** `role=radio[name=…]` resolves to the `<input>` that Carbon
-   hides under `span.cds--radio-button__appearance` → `diagnosis: occluded` (act:6). Recipe: click the
-   `label[for="<uuid>"]` (act:7). Expect the same for checkboxes/toggles.
-3. **Conditional interstitial — the location picker.** Present after login only when the user has no stored
-   default location (or the deployment forces it); absent for `admin` on dev3 (n=3). Reached deliberately via
-   "Change location" (act:5). `login()` handles both directions; **an unobserved branch** remains: the picker
-   appearing directly after Log in (same route/component, but n=0 — ledger #2).
-4. **Login's own request classified ambient.** The app fetches `GET /ws/rest/v1/session` in 2–3-request bursts on
-   every page; after ~20 the classifier tagged the family `ambient (chained)`, so act:23/27/31's reports show
-   "0 req, ~1 ambient" for the one request that decides login. `lib.ts` reads the newest session body from the
-   store regardless of attribution (`sessionInfo`) — never gate on the report's attributed list for this family.
-5. **Writes on read flows.** Opening a chart POSTs `/ws/rest/v1/user/<uuid>` (patientsVisited); picking a location
-   POSTs `/session` and `/user/<uuid>`; logout DELETEs `/session`. All flagged ✎ correctly. There is no way to open
-   a chart without the userProperties write — declare it in any read-only stance.
-6. **Widget-by-widget loading.** Every chart open is `still-active` at 1.8–2.7s (dom + pixels) while 100+ requests
-   land; "the page is ready" is meaningless — anchor on the banner and on the specific FHIR body you need.
-7. **Sentinel noise.** The toast sentinel fires on Carbon `role=status` loaders ("loading", "Loading …",
-   "Logging in…", "Submitting") and on **DataTable rows** (`"Auto9263 Patient15--Not UrgentWaiting…"`, `"Osteoarthritis
-   of knee04 — Aug — 2026Active…"`): 50 toast sentinels in run 2, ~3 real. The error sentinel fires on the manifest
-   icon 404. Read them as a hint, never as a gate (`friction.md` #8).
-8. **Home-page polls.** `/queue-entry` ×2, `/fhir2/R4/Location` ×2, `/obs?patient=…` ×3 re-fetch every ~60s (SWR
-   revalidation; one 120s gap observed under headless throttling). Not auto-classified after 120s idle (bursts of the
-   same family give cv 1.3–1.9); marked manually with `disco families --ambient` for `queue-entry` and `obs`
-   (**not** `Location` — that family also carries the login-location list, ledger #5).
-9. **Post-login actionable toast (optional, non-blocking).** "Some modules have unresolved backend dependencies"
-   — a Carbon `cds--actionable-notification--toast[role=alertdialog]` top-right with **View modules** / **close
-   notification**; not `aria-modal`, persists until closed, overlaps the header area (act:31 sentinel dialog seq 63;
-   1 of 4 logins). Dismissed by `login()` via `actIfPresent(s, 'role=alertdialog >> role=button[name="close
-   notification"]')` (act:32, `settled:visual` 20ms). Selector chaining (`>>`) works as README promises.
-10. **No native dialogs, no beforeunload, no session-expiry warning** in ~30 minutes of driving; `react-joyride`
-    (user-onboarding tour) is mounted but never showed a step on a fresh profile (ledger #4).
+| Anchor | URL | Landmark | `lib.ts` |
+|---|---|---|---|
+| **login** | `/openmrs/spa/login` | `#username` visible | `assertLoginPage` |
+| **shell** | any `/openmrs/spa/…` that is not `/login` | `[data-testid="searchPatientIcon"]` **or** the search-panel input **or** `button[aria-label="App Menu"]` | `assertShell` |
+| **search results** | `/openmrs/spa/search?query=<q>` | `h2` "N search results", `a[href*="/chart"]` | — |
+| **chart** | `/openmrs/spa/patient/<uuid>/chart/<section>` | `role=link[name="Patient summary"]` (the chart's left nav) | `assertChart(uuid?)` |
+| **chart section** | `…/chart/{patient-summary,vitals-and-biometrics,medications,orders,results,visits,allergies,conditions,…}` | the section's own widget + its request | `openSection` |
 
-## 6. Auth / session behaviour
+Two traps, both paid for:
 
-- Login = `GET /ws/rest/v1/session` with `Authorization: Basic base64(user:pass)`; success is `authenticated:true`
-  in the body, failure is `authenticated:false` with HTTP 200. The JSESSIONID cookie then carries the session; the
-  app re-GETs `/session` on every route change (that is why it is "ambient").
-- Logout = `DELETE /ws/rest/v1/session` (204) via `/spa/logout`.
-- `userProperties.defaultLocation` decides whether the location picker appears; `Confirm` writes it (`POST /user/<uuid>`).
-- Idle timeout: not observed within the run (longest idle ≈ 2.5 min); no keepalive beyond the SWR polls. Open (ledger #8).
+1. **The shell landmark must be a disjunction.** Opening the patient-search overlay *replaces* the header
+   magnifier with a "Close Search Panel" button, so a single-selector shell anchor reports "shell not
+   reached" while you are standing in the shell (check run 2 failed exactly there).
+2. **Route slugs are lowercase and hyphenated; link labels are not.** `role=link[name="Allergies"]` →
+   `/chart/allergies`; `"Vitals & Biometrics"` → `/chart/vitals-and-biometrics`. act:25 asserted
+   `endsWith("/Allergies")` and the diagnosis census printed the real URL in one turn.
 
-## 7. How to drive it (the short version — `lib.ts`)
+## 4. Selector strategy
+
+- **ARIA roles/names first** (`role=link[name="Visits"]`, `role=button[name="Confirm"]`) — Carbon renders
+  real roles and the labels are stable across the micro-frontend versions.
+- **`data-testid` where it exists** — only three in the shell (`searchPatientIcon`,
+  `globalImplementerToolsButton`, `patient-banner-button-col`); use them when present.
+- **Never ids inside the app.** They are React `useId` output: `#search-input-:r1j:`,
+  `#table-toolbar-search-:rr:` — new every render. (`#username` / `#password` on the *login* page are
+  real and stable.)
+- **CSS-module class *prefixes*** are stable, hashes are not: `form[class*="patient-search-bar"]` works,
+  `.-esm-patient-search__patient-search-bar__searchArea___AwmMr` will not survive a rebuild.
+- **Beware the second search box.** `input[type=search]` matches the queue table's "Search this list"
+  filter on the home dashboard *before* it matches the patient search. The first check run typed a
+  patient name into the queue filter and waited 12 s for a request that was never going to fire
+  (act:33 diagnosis: `focused: "#table-toolbar-search-:rr:"`). `lib.ts::SEARCH_INPUT` is the fix.
+
+## 5. Transitions (settle profile + wire signature)
+
+Measured on the demo over a full `run-check` (durations are the check's per-step wall clock, which
+includes disco overhead of ~6 % — `bun scripts/timing-report.ts openmrs`).
+
+| Transition | Action | Verdict | Settle | Postcondition (`until`) | Wire signature |
+|---|---|---|---|---|---|
+| login → username step | `fill #username` + click `button[type=submit]` | `settled:dom` / `settled:visual` | 114–152 ms | `#password` **visible** (it is in the DOM from the start — `visible` matters) | none |
+| username → shell | `fill #password` + click submit | `still-active` (chunk storm) | ~1 000 ms | `any[picker \| shell \| refusal]`, ~5.0 s total | `GET /ws/rest/v1/session` (Basic) then ~40 JS chunks for every micro-frontend |
+| shell → search overlay | click `[data-testid="searchPatientIcon"]` | `still-active` | ~1 030 ms | search input visible (34 ms) | `session`, `patient/<uuid>` ×7 (recent list) |
+| overlay → results | `fill SEARCH_INPUT` (debounced) | `settled:dom` | 26–374 ms | `urlLike "/ws/rest/v1/patient?q="` **landed** (445–580 ms) | one `patient?q=…&limit=10&totalCount=true` |
+| overlay → results page | `press Enter` | `settled:network` | 434–2 400 ms | pathname `/spa/search` **and** `limit=50` landed | `patient?q=…&limit=50`, then `visit?patient=` + `obs?…` per row |
+| results page → more pages | `scroll` | `settled:network` | ~230 ms | next `patient?q=` landed | one more 50-row page per scroll (373 results ⇒ 300 read in the check) |
+| results → chart | click `a[href*="<uuid>"]` | `settled:visual` (51–59 ms!) | 51–59 ms | `pathname includes /patient/<uuid>/chart` **and** `role=link[name="Patient summary"]` — **1.9 s** | `fhir2/R4/Patient`, `Condition`, `Observation` ×3, `order`, `visit`, `conceptreferencerange`, `billing/patientPaymentStatus`, **`POST user/<uuid>` (userProperties)** |
+| chart → section | click `role=link[name="…"]` | `settled:network` / `still-active` | 311–1 205 ms | pathname ends `/…<slug>` **and** the section's request landed | Allergies → `AllergyIntolerance`; Visits → `visit` (history) + `encounter` + `encountertype` |
+| anywhere → shell | `navigate /spa/home` | `navigated` | 1 690–1 834 ms | shell landmark **or** `#username` (session died) | full app-shell reload |
+
+**Final settle profile** (`bun scripts/timing-report.ts openmrs`, 71 actions, run 2):
 
 ```
-login(s)                       whereAmI → (navigate /spa/login) → fill+Continue (retry once) → fill+Log in
-                               → shell | location picker (label click + Confirm) | inline error (throws with the text)
-findPatient(s, name)           login → navigate /spa/search?query=… until GET /patient?q= landed → results off the wire
-openPatient(s, uuid|name)      (findPatient) → click the card if on screen else navigate /patient/<uuid>/chart
-                               until URL + banner → Patient FHIR body
-extractSummary(s)              assertChart → Condition / Observation(vitals+biometrics) / AllergyIntolerance bodies
-                               (opens the tab that fetches a missing one) → reduced facts + which endpoint each came from
+verdict            n   settle_ms                  wait_ms (page)             overhead_ms (daemon)
+settled:network   25   p50 453  p90 733  max 2596 p50 771  p90 2896 max 12003 p50 46  p90 85  max 110
+settled:dom       18   p50 152  p90 374  max 409  p50 514  p90 1221 max 8003  p50 14  p90 104 max 142
+settled:visual    12   p50 98   p90 112  max 124  p50 401  p90 414  max 2378  p50 20  p90 91  max 468
+still-active      11   p50 1048 p90 1310 max 4602 p50 1048 p90 1310 max 4602  p50 182 p90 760 max 768
+navigated          3   p50 1690 p90 1690 max 1834 p50 1990 p90 1990 max 2134  p50 57  p90 57  max 77
+until: 52 actions, matched 48; elapsed p50 310  p90 1942  max 12000     overhead share: 6%
 ```
+
+The four unmatched `until`s are the four diagnoses this run produced — each one a real finding
+(§3 trap 2, the non-existent pagination control, the wrong search box), not a flake.
+
+**The click that settles in 59 ms is the headline.** Opening a chart reports `settled:visual` at 51–59 ms
+— the router swapped the view instantly — while the chart itself needs **1.9 s** more before its left nav
+exists. *The verdict is evidence; `until` is the gate*, and this app is the clean demonstration.
+
+## 6. Interstitials, dialogs, and other conditional UI
+
+| Thing | Verdict | Handling |
+|---|---|---|
+| **Login location picker** (`/spa/login/location`) | **absent** for `admin` on this demo (n=0/6 logins) — the user already carries a `sessionLocation` ("Outpatient Clinic") | first-class optional: `login` waits for `any[picker \| shell \| refusal]` and, if the picker came, selects the first radio and Confirms |
+| **Conditional chart-open modal** (allergy warning, break-the-glass, care gaps, "what's new") | **absent** — n=0/6 chart opens, `sentinels` shows **zero** dialog firings in the whole run (38 toasts, 5 error 404s, no dialogs) | still treated as optional by construction; a modal would occlude the next click and disco's diagnosis names it |
+| **Native dialogs / `beforeunload`** | **absent** — `env.dialogs` empty in **all 71 actions** of run 2 (`SELECT count(*) … json_extract(report,'$.env.dialogs')`) | session policy handles them if they ever appear |
+| **Carbon "Loading…" toasts** | **present, constantly** — 38 sentinel firings, all noise | muted by rule |
+| **The "vitals out of date" banner** | present for some patients (Lewis: "These vitals are out of date", last vitals 19-Jul-2026) | informational only; not a gate |
+| **Billing tag in the patient banner** | varies per patient: `PAID / No outstanding bills` (Susan Lopez) vs `UNPAID / Outstanding bill(s) present` (Lewis, Kenneth Carter) | ledger row 5 |
+
+## 7. The write that a read-only stance must declare
+
+Opening a chart makes the app **POST the logged-in user's own preferences**:
+`POST /ws/rest/v1/user/<user-uuid>?v=custom:(userProperties)` with
+`patientsVisited: "<uuid>,<uuid>,…"` — the recently-viewed MRU — plus `defaultLocale`, `defaultLocation`,
+`starredPatientLists` and `order_favorites_drugs` echoed back unchanged (act:38, act:43;
+`write_kind=write`). **No patient data is written**, and it is unavoidable through the UI, but it is a
+server-state change and it is why the search overlay shows "10 recent search results" on a *fresh*
+browser profile: that list is server-side, per user, and shared by everyone using the demo's `admin`.
+It is declared in `lib.ts`'s header and in `openPatient`'s docstring rather than hidden.
+
+## 8. Keyboard recipes
+
+Nothing in these flows needs a keyboard-only widget: there is no med-search combobox, date picker or
+order-entry grid on the read paths (all of those live behind *write* forms, out of stance). The two
+recipes that matter:
+
+- **Search → full results page:** type into `SEARCH_INPUT`, then **`press Enter`**. This is the only way to
+  the `limit=50` results page; there is no "see all results" button. Postcondition:
+  `all: [ pathname includes "/spa/search", urlLike "limit=50" landed ]`.
+- **Two-step login:** `#username` → `button[type=submit]` ("Continue") → `#password` (now *visible*) →
+  the same `button[type=submit]` ("Log in"). One selector, two different buttons — the postcondition
+  distinguishes them.
+
+`fill` (replaces) is right for both search and login; `type` (appends) is only needed if you want to
+watch the debounce fire per keystroke.
+
+## 9. Recovery
+
+`recoverToShell(s)` — `navigate /openmrs/spa/home` with the postcondition
+`any[ shell landmark | #username ]`. It gets you out of a half-loaded section, a stray overlay or a dead
+route; if the *session* has died it lands on `#username` and `assertShell` then throws the honest
+"still on login? session expired?" instead of hanging. From the shell, every other anchor is one
+transition away. (A chart is also directly addressable: `navigate /spa/patient/<uuid>/chart/patient-summary`
+— `openPatient` uses that as its fallback when no search hit is on screen.)
+
+## 10. The EHR failure-mode checklist (GUIDANCE §8) — verdict per item
+
+| # | Item | Verdict | Evidence / note |
+|---|---|---|---|
+| 1 | Conditional interstitials on chart open | **absent** (n=0/6 opens) | `sentinels` has **zero** dialog firings in run 2; charts open straight to `patient-summary`. Handled as optional anyway. |
+| 2 | Toasts / transient banners | **present** (noise, not signal) | 38 Carbon "Loading…" toast firings; every lazily-loaded micro-frontend raises one. Muted by rule. Async *failures* would land here too — none seen. |
+| 3 | Spinners that lie | **present** | The results page renders skeleton rows + a `progressbar` while the debounce is in flight (act:6 UI delta). Never gate on the spinner; gate on the response landing. |
+| 4 | Re-render races on virtual-DOM lists | **unobserved** (no `detachedRetried` in any report) | React 18 + SWR; plausible under fast retyping. `fill` + a landed-response postcondition avoided it. |
+| 5 | Virtualized / incrementally-loaded lists | **present** | `q=1000` → `totalCount: 373`; the DOM held ~20 rows while the wire had already delivered 300 (act:19/act:20, heading counted 250 → 300 → 373). **The full dataset is on the wire** — `searchResults()` reads it. |
+| 6 | iframes / cross-origin islands | **absent** | `disco targets`: one target, one frame, for the entire session. No `frame:` argument anywhere in `lib.ts`. |
+| 7 | Shadow DOM | **absent** on the driven paths | every selector resolved with plain CSS/ARIA. |
+| 8 | Canvas regions | **unobserved** on the driven paths | the "Growth chart" section is a plausible canvas/SVG island — not opened (out of the flow set). Open question 3. |
+| 9 | Focus traps / keyboard-only widgets | **absent** on read paths | the only keyboard recipe needed is `press Enter` in the search box (§8). Med/order search comboboxes live behind write forms — out of stance. |
+| 10 | Debounced / async-validated inputs | **present** | the patient search is debounced (~300 ms) and fires one request per settled term; the postcondition is the response **landing**, never the keystrokes. |
+| 11 | Session expiry + keepalive | **partially observed** | No keepalive ping exists (the only timer is the 60 s dashboard refresh, and it stops when you leave that route). `GET /ws/rest/v1/session` on every route change *is* the liveness check; a dead session returns `authenticated:false` and the shell bounces to `/login`. **The expiry warning itself was not observed** (the demo's timeout outlives a 60-minute session) — open question 1. `recoverToShell` detects the bounce and `assertShell` throws honestly. |
+| 12 | Multi-window flows | **absent so far** | A second tab opened via CDP is a normal scoped target sharing the session cookie (`disco targets` shows both, `focus` switches); no flow in this set spawns a window. Print/attachment flows untested — open question 4. |
+| 13 | Reads delivered over POST | **absent** | 1258 GET vs 5 POST across all runs; `--mark-read` never needed. See `wire.md` "The read-POST pass". |
+| 14 | Optimistic UI | **not reachable read-only** | every write path is out of stance. The one write the app makes on its own (`userProperties`) is fire-and-forget with no UI at all. |
+| 15 | Native dialogs / `beforeunload` | **absent** | `env.dialogs` empty in **all 71 actions** of run 2 (`SELECT count(*) … json_extract(report,'$.env.dialogs')`); navigating away from a chart never prompts. |
+| 16 | Bot challenges | **present — on the host the job named** | `o3.openmrs.org` served a Cloudflare interstitial to headless Chromium (run 1: title "Just a moment…", 3 `challenge-platform` POSTs). `dev3.openmrs.org` — same build — does not. |
+| 17 | Cold-load hydration races | **not triggered, but real** | the login form's inputs exist before the app's handlers; the two-step form makes this visible (the password field is in the DOM but not rendered). Every step verifies the field's effect before submitting. |
+| 18 | Third-party telemetry | **absent** | no analytics or crash reporter; every request is same-origin. |
+
+## 11. Open questions (and the probe that resolves each)
+
+1. **What is the session timeout, and how is expiry delivered — dialog, redirect, or a silent 401 storm?**
+   Not observed: the session survived the whole run. *Probe:* leave a chart open, poll
+   `GET /ws/rest/v1/session` from the store until `authenticated:false`, then act and read the report
+   (expect either a bounce to `/login` or a burst of 401s on the next SWR revalidation). Budget: ~40 min idle.
+2. **Does the location picker ever appear on this build?** `admin` has a `sessionLocation` already.
+   *Probe:* log in as a user with no default location, or clear `userProperties.defaultLocation`
+   (a write — out of stance). The absent path is exercised today; the present path is code-only.
+3. **Is "Growth chart" (or Results trendlines) canvas-rendered?** If so, those facts are pixels, not DOM.
+   *Probe:* open `…/chart/growth-chart` on a pediatric patient (John Smith, 6y) and count
+   `canvas`/`svg` nodes; check whether the same numbers are on the wire as `Observation`.
+4. **Do attachments / print flows open a second window?** *Probe:* open `…/chart/attachments` on a
+   patient that has one and watch `env.newTargets`.
+5. **Does a lower-privilege role see a different chart?** All observations are `System Developer` +
+   `Provider` (i.e. everything). *Probe:* a nurse/clerk account on the demo, then diff the left-nav link
+   set and the failing requests (403s) with `store.diffTrace`.
+6. **Why did the `userProperties` POST fire on only 2 of 6 chart opens?** *Probe:* open five charts in a
+   row from a fresh login and correlate the POSTs with `patientsVisited` membership (hypothesis: it fires
+   only when the MRU list actually changes).
+
+## 12. Screenshots (all cited above)
+
+| File | What it shows |
+|---|---|
+| `screenshots/anchor-1-login.jpg` | login anchor, step 1 (username only — the password field exists but is not rendered) |
+| `screenshots/anchor-2-shell-service-queues.jpg` | shell anchor: `/home/service-queues`, the 60 s-polling dashboard |
+| `screenshots/anchor-3-search-overlay.jpg` | the patient-search overlay with its server-side "10 recent search results" |
+| `screenshots/anchor-4-search-results-page.jpg` | `/spa/search?query=jo` — 13 results, no pagination control (act:16) |
+| `screenshots/anchor-5-chart-summary-populated.jpg` | chart anchor, Michelle Lewis (dense patient, UNPAID banner tag) |
+| `screenshots/anchor-6-chart-visits.jpg` | Visits section — the visit table `listVisits` shadows with the wire |
+| `screenshots/empty-patient-chart.jpg` | the same anchor for a patient with nothing recorded (John Smith) |
+| `screenshots/empty-patient-allergies.jpg` | Allergies section, empty state ("There are no allergy intolerances…") |
+| `screenshots/diagnosis-act17-no-pagination.jpg` | the diagnosis shot for act:17 — `.cds--pagination button[aria-label*="Next"]` does not exist because the results page has no pagination at all |
+
+## 13. Pack contents
+
+`lib.ts` (flows) · `check.ts` (12-step live drift check, `bun scripts/run-check.ts openmrs`) ·
+`wire.md` (where the facts live) · `ledger.md` (variability) · `friction.md` (tool friction) ·
+`screenshots/` · `store/` (gitignored, run-tagged — every act id above is re-queryable with
+`bun cli/disco.ts sql openmrs "…"`).

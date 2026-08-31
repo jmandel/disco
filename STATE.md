@@ -42,7 +42,10 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - Decided + built (DECISIONS #43): `until: { any | all }` with `which`; per-app URL-substring rules (`disco rules`, `families
   --ambient|--not-ambient <url-part>`, `session new --ignore`, `s.ignore/attend`); sentinel mutes (`disco sentinels --mute`,
   `s.mute`; recorded muted=1, never reported); ReferenceError in a page function fails fast with the closure hint.
-- OPEN: query-key-aware family identity (only if rules prove insufficient); `until` nesting deeper than one level.
+- Stranger #2 (Opus) re-ran the EHR job from `prompts/characterize-ehr.md` with the fixed tool: 26m06s, 12/12, deeper pack
+  (adopted); its three tool bugs fixed (nested combinators, relaunch stale port, cron-shaped cadence) + task tier over a
+  learned ambient flag (DECISIONS #45).
+- OPEN: query-key-aware family identity (only if rules prove insufficient).
 
 ## In progress — platform build-out (PLATFORM.md plan)
 - Slice 1 ✅ ways-of-knowing palette named in `apps/README.md` (descriptive, not a schema).

@@ -102,7 +102,7 @@ never a bare timeout.
 
 | helper | desugars to |
 |---|---|
-| `requests({urlLike, method, actionId, status, family, since, until})` | `SELECT * FROM requests WHERE url LIKE ? AND … ORDER BY t_start` |
+| `requests({urlLike, method, actionId, status, family, since, until})` | `SELECT * FROM requests WHERE url LIKE ? AND … ORDER BY t_start` (a bare `urlLike` fragment is wrapped in `%…%`) |
 | `body(hash)` / `json(hash)` / `bodyBytes(hash)` | `SELECT text FROM bodies WHERE hash=?`, else read `blobs/xx/hash` |
 | `appearances(text)` | FTS `MATCH` over `bodies_fts` + `ws_fts`, joined to `requests`/`ws_frames`, plus aria-snapshot blobs |
 | `timeline(t0, t1)` | `SELECT … FROM events WHERE t BETWEEN ? AND ?` interleaved with `notes` |
@@ -149,7 +149,7 @@ started after dispatch; `landed` = the response is back and the body's fate deci
 uncapturable such as an `unread` fire-and-forget body after its 1.2s grace) | `{fn, fnArg?}` (in-page, called
 with `fnArg`, truthy = match) | **`{ any: [pred, …] }`** (one arm holds; `until.which` names it) | **`{ all: [pred, …] }`**
 (every arm holds — a wire-AND-dom postcondition is `all: [{ urlLike, landed: true }, { selector }]`); arms take a
-`name`. A `frame` that doesn't exist yet is waited for, not thrown on; from `act()` it is a `frame-not-found`
+`name` and combinators nest. A `frame` that doesn't exist yet is waited for, not thrown on; from `act()` it is a `frame-not-found`
 diagnosis with a frame census. A ReferenceError inside a page function fails the wait **immediately** with the
 closure hint (page functions capture nothing from your script), never `false` until the budget.
 

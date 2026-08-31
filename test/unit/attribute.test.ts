@@ -101,3 +101,27 @@ describe("rules (DECISIONS #43): URL-substring overrides", () => {
     expect(a.isAmbient("GET h/api/session", "http://h/api/session?x=1")).toBe(false);
   });
 });
+
+describe("stranger #2 fixes (DECISIONS #45)", () => {
+  test("a request inside the input's own task tier is the action's even if its family is a learned poll; an explicit ambient rule still wins", () => {
+    const win = { current: { actionId: "act:1", tStart: 1000, targetId: "T1", taskSpans: [{ t0: 1000, t2: 1010 }] } as WindowInfo };
+    const rules = { ambient: [] as string[], notAmbient: [] as string[] };
+    const a = new Attributor({ now: () => 0, windowFor: (_t, t) => (t >= 1000 ? win.current : null), onFamily: () => {}, startT: 0, rules: () => rules });
+    for (const [i, t] of [0, 60000, 120000].entries()) a.observeRequest(req("p" + i, "http://h/api/obs?concept=x", t));
+    expect(a.isAmbient("GET h/api/obs")).toBe(true);
+    expect(a.observeRequest(req("q1", "http://h/api/obs?concept=x", 1005)).attribution).toBe("task");   // fired with the click
+    expect(a.observeRequest(req("q2", "http://h/api/obs?concept=x", 1500)).attribution).toBe("ambient"); // just the poll
+    rules.ambient.push("/api/obs");
+    expect(a.observeRequest(req("q3", "http://h/api/obs?concept=x", 1005)).attribution).toBe("ambient"); // the rule is explicit
+  });
+  test("two samples an exact round period apart, outside windows, classify as periodic (a 60s cron needs no 4-minute wait)", () => {
+    const { a } = makeAttributor();
+    a.observeRequest(req("c0", "http://h/api/session", 0));
+    a.observeRequest(req("c1", "http://h/api/session", 60003));
+    expect(a.isAmbient("GET h/api/session")).toBe(true);
+    const { a: b } = makeAttributor();
+    b.observeRequest(req("d0", "http://h/api/thing", 0));
+    b.observeRequest(req("d1", "http://h/api/thing", 47321)); // not a round period: two user actions
+    expect(b.isAmbient("GET h/api/thing")).toBe(false);
+  });
+});

@@ -1,293 +1,383 @@
-// Function library for OpenMRS O3 (reference application, public dev demo) — product instance #4.
-// Plain importable TS: anchor in → act WITH the postcondition → facts off the wire → anchor out.
-// Discovery evidence: apps/openmrs/store (run 2, dev3.openmrs.org), acts cited in nav-and-quirks.md.
+// Function library for OpenMRS O3 (Reference Application 3.x) — product instance #4.
+// Plain, importable, composable, anchor-oriented, wire-first, defensive functions.
+// Built and validated against the public demo build at dev3.openmrs.org (o3.openmrs.org is Cloudflare-gated
+// against headless browsers — see nav-and-quirks.md §0).
 //
 //   import { connect } from "../../src/client.ts";
-//   import * as o from "./lib.ts";
+//   import * as o3 from "./lib.ts";
 //   const s = await connect("openmrs");
-//   await o.login(s);                                  // idempotent; handles the location picker if it appears
-//   const p = await o.findPatient(s, "Susan");         // off GET /ws/rest/v1/patient?q=…
-//   await o.openPatient(s, p.uuid);                    // chart anchor (patient banner)
-//   const sum = await o.extractSummary(s);             // conditions / allergies / latest vitals off FHIR bodies
+//   await o3.login(s);                                   // idempotent; handles the location picker either way
+//   const p = await o3.findPatient(s, "Michelle Lewis");  // read off the REST search body, paging past page 1
+//   await o3.openPatient(s, p);                           // -> chart anchor
+//   const sum = await o3.extractSummary(s, p.uuid);       // FHIR Condition/AllergyIntolerance/Observation + REST order
+//   const visits = await o3.listVisits(s, p.uuid);        // visits[0] = latest (date + type), off the wire
 //
-// Write footprint: login() POSTs /ws/rest/v1/session (+ /user/<uuid> userProperties) ONLY when it has to pick
-// a location; opening a chart makes the app itself POST /user/<uuid> (patientsVisited) — unavoidable, app-side.
+// ===========================================================================================
+// WRITE FOOTPRINT — declared honestly, per GUIDANCE §9:
+//   * No function here submits a form. No orders, notes, allergies, demographics, visits or queue
+//     changes are created, edited or deleted. Every request these functions ISSUE is a GET.
+//   * `openPatient` nevertheless causes ONE server write, made by the app itself and unavoidable
+//     through the UI: `POST /ws/rest/v1/user/<user-uuid>?v=custom:(userProperties)`, which appends the
+//     patient to the logged-in user's `patientsVisited` MRU (and echoes back defaultLocale /
+//     defaultLocation / starredPatientLists / order_favorites_drugs unchanged). It writes **user
+//     preference state, never patient data** (observed act:38, act:43; `write_kind=write`).
+//     Read-only orchestration should know this before it runs `openPatient`.
+//   * `logout` DELETEs the server session. It destroys no data, is called by nothing else here, and
+//     never by `check.ts`.
+// ===========================================================================================
 import type { Session } from "../../src/client.ts";
-import type { Report } from "../../src/report.ts";
-import { until, reached, assertVisible, actIfPresent } from "../../lib/nav.ts";
+import { reached, until, assertVisible, actIfPresent } from "../../lib/nav.ts";
+import { extractFromWire, wireHas } from "../../lib/wire.ts";
 
-export const ORIGIN = "https://dev3.openmrs.org";
-export const SPA = `${ORIGIN}/openmrs/spa`;
-export const CREDS = { username: "admin", password: "Admin123" };
+export const HOST = "https://dev3.openmrs.org";
+export const SPA = `${HOST}/openmrs/spa`;
+export const CREDENTIALS = { admin: "Admin123" };
 
-/** Selectors (Carbon design system + O3 test ids). Prefer data-testid / role+name; ids are React-generated (:r5o:). */
-export const SEL = {
-  username: "#username",
-  password: "#password",
-  continueBtn: 'role=button[name="Continue"]',
-  loginBtn: 'role=button[name="Log in"]',
-  locationRadios: 'input[name="loginLocations"]',
-  locationConfirm: 'role=button[name="Confirm"]',
-  shell: 'button[aria-label="Search patient"]',            // header search icon: present on every logged-in page
-  searchBar: '[data-testid="patientSearchBar"]',
-  chartBanner: '[data-testid="patient-banner-button-col"]', // patient banner action column: the chart anchor
-  backendDepsToastClose: 'role=alertdialog >> role=button[name="close notification"]', // actionable toast after login (act:32)
-};
+/** The patient-search overlay's input. NOT `input[type=search]`: the service-queues home dashboard
+ *  renders a SECOND search box (the queue table's "Search this list" filter) and a bare `input[type=search]`
+ *  resolves to it — the first check run typed the patient name into the queue filter and waited 12s for a
+ *  search that was never going to fire (run 2, act:33 diagnosis: focus was `#table-toolbar-search-:rr:`).
+ *  Both stable handles are used: the CSS-module form wrapper, then the placeholder. The React `id`s are
+ *  `useId` output (`search-input-:r1j:`) and change every render — never select on them. */
+/** The app's own refusal banner (Carbon). Observed text: "Error — Invalid username or password". */
+export const ERROR_NOTIFICATION = ".cds--inline-notification--error, .cds--actionable-notification--error";
 
-const SEL_ERR = '.cds--inline-notification--error, [role="status"].cds--inline-notification';
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const SLOW = 45000; // dev3 is a shared, slow demo: chart loads carry 100+ requests (act:11 settled at 2.7s, still-active)
+export const SEARCH_INPUT = 'css=form[class*="patient-search-bar"] input[type=search], input[placeholder^="Search for a patient"]';
 
-// ---------------------------------------------------------------------------------------------------------------
-// Anchors — cheap predicates (URL + landmark), read in ONE in-page round trip.
+/** The chart's left-nav sections. Route slugs are LOWERCASE and hyphenated; the link *labels* are not
+ *  (`role=link[name="Vitals & Biometrics"]` -> `/chart/vitals-and-biometrics`). A postcondition that
+ *  tests the pathname must use the slug (act:25 failed on `/Allergies` and the diagnosis named the truth). */
+export const SECTIONS = {
+  summary: "patient-summary", vitals: "vitals-and-biometrics", medications: "medications", orders: "orders",
+  results: "results", visits: "visits", allergies: "allergies", conditions: "conditions",
+  programs: "programs", appointments: "appointments", attachments: "attachments",
+} as const;
+export type Section = keyof typeof SECTIONS;
 
-export type Where = "login.username" | "login.password" | "login.location" | "home" | "search" | "chart" | "shell" | "other";
-export interface Position { where: Where; url: string; path: string; patientUuid?: string }
+// ---------------------------------------------------------------------------------------------
+// Per-app rules (persist in the store; re-registered on every login so a fresh run starts right)
+// ---------------------------------------------------------------------------------------------
 
-/** Where are we? Never assumes position — every pack function starts here. */
-export async function whereAmI(s: Session): Promise<Position> {
-  const v = await s.evaluate<{ url: string; path: string; u: boolean; p: boolean; radios: number; shell: boolean; banner: boolean; searchBar: boolean }>(() => ({
-    url: location.href, path: location.pathname,
-    // NOTE: #password is in the DOM (hidden) during the username step — the step is told by which submit button is up
-    u: [...document.querySelectorAll('button[type="submit"]')].some((b) => b.textContent?.trim() === "Continue"),
-    p: [...document.querySelectorAll('button[type="submit"]')].some((b) => b.textContent?.trim() === "Log in"),
-    radios: document.querySelectorAll('input[name="loginLocations"]').length,
-    shell: !!document.querySelector('button[aria-label="Search patient"]'),
-    banner: !!document.querySelector('[data-testid="patient-banner-button-col"]'),
-    searchBar: !!document.querySelector('[data-testid="patientSearchBar"]'),
+/** Register this product's attribution rules + sentinel mutes. Idempotent (rules dedupe per app).
+ *  Evidence for each is in nav-and-quirks.md §2 — every one was measured, none guessed. */
+export async function registerRules(s: Session): Promise<void> {
+  // The service-queues home dashboard re-fetches on a 60.0s timer (measured gaps 60051 / 60001 / 60003 ms
+  // across three families, no action window open). 150s of `disco idle` sees only TWO cycles, and the
+  // ambient rule needs >=3 samples — so the classifier cannot learn a 60s heartbeat in a sane warm-up.
+  await s.ignore("queue-entry");   // /ws/rest/v1/queue-entry + queue-entry-metrics (dashboard only)
+  await s.ignore("_tag=queue");    // /ws/fhir2/R4/Location?_summary=data&_tag=queue%20location
+  // NOT ignored, deliberately: /ws/rest/v1/obs?...&concept=736e8771-... . It looks like part of the same
+  // poll, but the patient-search results list fires the SAME url per row (act:16) — an ambient rule there
+  // mis-attributes an action's own traffic. Left attributed; documented instead.
+  // Sentinel noise: the app shell renders a Carbon "loading" toast on every lazy-loaded micro-frontend,
+  // and every full page load 404s on a template-literal that was never substituted.
+  await s.mute("toast", { text: "loading" });
+  await s.mute("toast", { text: "Loading" });
+  await s.mute("error", { url: "$SPA_PATH" });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Anchors (GUIDANCE §7.3): cheap predicates that name where we are
+// ---------------------------------------------------------------------------------------------
+
+/** Anchor: the login page (username field present). */
+export async function assertLoginPage(s: Session, budgetMs = 15000): Promise<void> {
+  await until(s, { selector: "#username", visible: true }, { budgetMs, msg: "assertLoginPage: not on the O3 login page" });
+}
+
+/** Anchor: the authenticated app shell — a `/spa/` route that is not `/login`, with the primary-nav
+ *  header rendered. The header landmark is a DISJUNCTION on purpose: opening the patient-search overlay
+ *  REPLACES the magnifier with a "Close Search Panel" button, so a single-selector anchor would report
+ *  "shell not reached" while standing in the shell with the search panel open (check run 2 failed exactly
+ *  there). Any one of the three proves the primary navigation is mounted. */
+export async function assertShell(s: Session, budgetMs = 20000): Promise<void> {
+  // ONE in-page predicate, not `all: [fn, { any: [...] }]` — a nested `any` inside `all` never matches in
+  // this build of disco (measured: flat `any` true in 5ms, the same arm nested inside `all` false for the
+  // whole budget; friction.md #3). Flat combinators only.
+  await until(s, { fn: () => location.pathname.includes("/spa/") && !location.pathname.includes("/login")
+    && !!document.querySelector('[data-testid="searchPatientIcon"], form[class*="patient-search-bar"] input[type=search], button[aria-label="App Menu"]') },
+    { budgetMs, msg: "assertShell: app shell not reached (still on login? session expired?)" });
+}
+
+/** Anchor: a patient chart is open (optionally a specific patient uuid). */
+export async function assertChart(s: Session, uuid?: string, budgetMs = 25000): Promise<void> {
+  await until(s, { all: [
+    { fn: (u?: string) => location.pathname.includes("/patient/") && location.pathname.includes("/chart") && (!u || location.pathname.includes(u)), fnArg: uuid },
+    { selector: 'role=link[name="Patient summary"]' },
+  ] }, { budgetMs, msg: `assertChart: patient chart not reached${uuid ? ` for ${uuid}` : ""}` });
+}
+
+// ---------------------------------------------------------------------------------------------
+// login / logout
+// ---------------------------------------------------------------------------------------------
+
+/** Log in and reach the shell anchor. Idempotent: returns immediately when already authenticated.
+ *  Handles O3's TWO-STEP login form (username -> Continue -> password -> Log in) and the location
+ *  picker, which is present for some users/locations and absent for others — both paths are first class.
+ *  Detects the app's own refusal notification instead of timing out on it.
+ *  WRITES: none (the login handshake is `GET /ws/rest/v1/session` with a Basic header). */
+export async function login(s: Session, opts: { user?: string; pass?: string } = {}): Promise<void> {
+  await registerRules(s);
+  const user = opts.user ?? "admin";
+  const pass = opts.pass ?? CREDENTIALS[user as keyof typeof CREDENTIALS] ?? "Admin123";
+  const authed = await s.evaluate<boolean>(() => location.pathname.includes("/spa/") && !location.pathname.includes("/login")).catch(() => false);
+  if (authed) { await assertShell(s); return; }
+
+  if (!(await s.evaluate<boolean>(() => !!document.querySelector("#username")).catch(() => false)))
+    reached(await s.navigate(`${SPA}/login`, { budgetMs: 30000, until: { selector: "#username", visible: true, budgetMs: 25000 } }), "login: open login page");
+  await assertLoginPage(s);
+
+  // Step 1 — username. The password field EXISTS in the DOM from the start but is not rendered until
+  // Continue; the postcondition is therefore `visible`, not merely present.
+  await s.fill("#username", user);
+  reached(await s.click('css=button[type="submit"]', { budgetMs: 15000, until: { selector: "#password", visible: true, budgetMs: 10000 } }), "login: Continue (username step)");
+
+  // A refusal banner from a PREVIOUS attempt survives on the page — leave it there and the next login
+  // matches the "refused" arm instantly and throws about a failure that already happened (observed: a
+  // good login right after a bad one threw `login refused: (no text)`). Clear it first, both ways.
+  await actIfPresent(s, `css=${ERROR_NOTIFICATION} button[aria-label*="close" i]`, { budgetMs: 400 });
+
+  // Step 2 — password. Ends in ONE of three states: the location picker, the app shell, or a refusal
+  // notification. Wait for the disjunction (never for one arm), then ask which one holds.
+  await s.fill("#password", pass);
+  const r = reached(await s.click('css=button[type="submit"]', { budgetMs: 30000, until: { any: [
+    { name: "picker", fn: () => location.pathname.includes("/login/location") },
+    { name: "shell", fn: () => location.pathname.includes("/spa/") && !location.pathname.includes("/login") },
+    { name: "refused", selector: `css=${ERROR_NOTIFICATION}` },
+  ], budgetMs: 25000 } }), "login: submit password");
+
+  if (r.until?.which === "refused") {
+    // read it while it is still on screen; the banner is transient
+    const msg = await s.evaluate<string>((sel: string) => (document.querySelector(sel)?.textContent ?? "").replace(/^error icon/i, "").trim() || "(no text)",
+      { args: [ERROR_NOTIFICATION] }).catch(() => "(unreadable)");
+    throw new Error(`login refused by the app: ${msg || r.until.preview || "(no text)"}`);
+  }
+
+  // The location picker is conditional (absent for `admin` on this demo — its user already has a
+  // sessionLocation). Present OR absent, both fine: pick the first location and confirm if it is there.
+  if (await actIfPresent(s, 'css=input[type="radio"], .cds--radio-button__label', { budgetMs: 1500 }))
+    await actIfPresent(s, 'role=button[name="Confirm"]', { budgetMs: 1500 });
+  await actIfPresent(s, 'role=button[name="Confirm"]', { budgetMs: 800 });
+
+  await assertShell(s);
+}
+
+/** End the server session and return to the login page. WRITES: `DELETE /ws/rest/v1/session` (session
+ *  state only — no patient data). Not called by check.ts. */
+export async function logout(s: Session): Promise<void> {
+  await s.click('role=button[name="My Account"]', { budgetMs: 8000 }).catch(() => {});
+  reached(await s.click('role=button[name="Logout"]', { budgetMs: 20000, until: { selector: "#username", visible: true, budgetMs: 15000 } }), "logout");
+}
+
+// ---------------------------------------------------------------------------------------------
+// patient search — the facts come off the REST search body, never the rendered rows
+// ---------------------------------------------------------------------------------------------
+
+export interface Patient { uuid: string; name: string; identifier: string; gender: string; age: number; birthdate: string }
+
+const asPatient = (r: any): Patient => ({
+  uuid: r.uuid,
+  name: r.person?.personName?.display ?? String(r.display ?? "").replace(/^\S+\s+-\s+/, ""),
+  identifier: r.patientIdentifier?.identifier ?? r.identifiers?.[0]?.identifier ?? "",
+  gender: r.person?.gender ?? "", age: r.person?.age ?? NaN, birthdate: (r.person?.birthdate ?? "").slice(0, 10),
+});
+
+/** Every patient the app has fetched for a given search term, merged across ALL pages captured on the
+ *  wire (the overlay asks for limit=10; the results page asks for limit=50 and then keeps paging as you
+ *  scroll — so one term can have several bodies). Deduped by uuid; `totalCount` is the server's total. */
+export function searchResults(s: Session, term: string): { patients: Patient[]; totalCount: number } {
+  const rows = s.store.requests({ urlLike: "%/ws/rest/v1/patient?q=%" }).filter((r) => r.body_hash);
+  const mine = rows.filter((r) => {
+    const q = new URL(r.url).searchParams.get("q");
+    return q != null && q.toLowerCase() === term.toLowerCase();
+  });
+  const byUuid = new Map<string, Patient>(); let total = 0;
+  for (const r of mine) {
+    const j = s.store.json(r.body_hash!) as { results?: any[]; totalCount?: number };
+    total = Math.max(total, j.totalCount ?? 0);
+    for (const p of j.results ?? []) if (p?.uuid && !byUuid.has(p.uuid)) byUuid.set(p.uuid, asPatient(p));
+  }
+  return { patients: [...byUuid.values()], totalCount: total };
+}
+
+/** Open the header patient-search overlay (idempotent — does nothing if the box is already there). */
+export async function openSearch(s: Session): Promise<void> {
+  if ((await s.watch({ selector: SEARCH_INPUT, visible: true }, { budgetMs: 0 })).matched) return;   // already open
+  await assertShell(s);
+  reached(await s.click('css=[data-testid="searchPatientIcon"]', { budgetMs: 15000,
+    until: { selector: SEARCH_INPUT, visible: true, budgetMs: 10000 } }), "openSearch");
+}
+
+/** Find a patient by name (or identifier) and return the record **read off the search API's response**.
+ *  Works past page 1: the overlay's body is limit=10, so when the wanted patient is not in it and the
+ *  server says there are more, this escalates to the full results page (limit=50 + scroll paging) and
+ *  re-reads. Leaves that patient's link on screen so `openPatient` can click it.
+ *  WRITES: none. */
+export async function findPatient(s: Session, name: string, opts: { pages?: number } = {}): Promise<Patient> {
+  await openSearch(s);
+  const hit = (ps: Patient[]) => ps.find((p) => p.name.toLowerCase().includes(name.toLowerCase()) || p.identifier.toLowerCase() === name.toLowerCase());
+
+  // 1. the overlay's debounced search (fill replaces any residual term); the postcondition is the search
+  //    response LANDING — never the rendered rows, which lag it and are virtualized.
+  reached(await s.fill(SEARCH_INPUT, name, { budgetMs: 15000,
+    until: { urlLike: "/ws/rest/v1/patient?q=", landed: true, budgetMs: 12000 } }), `findPatient(${name}): overlay search`);
+  let { patients, totalCount } = searchResults(s, name);
+  let found = hit(patients);
+
+  // 2. past page 1: Enter opens /spa/search?query=… which re-asks with limit=50 and renders everything.
+  if (!found && totalCount > patients.length) {
+    reached(await s.press("Enter", { budgetMs: 25000,
+      until: { all: [{ fn: () => location.pathname.includes("/spa/search") }, { urlLike: "limit=50", landed: true }], budgetMs: 20000 } }),
+      `findPatient(${name}): full results page`);
+    ({ patients, totalCount } = searchResults(s, name));
+    found = hit(patients);
+    // 3. still more on the server than we have? the results list pages in on scroll.
+    for (let i = 0; !found && patients.length < totalCount && i < (opts.pages ?? 3); i++) {
+      await s.scroll({ deltaY: 20000 }, { budgetMs: 12000, until: { urlLike: "/ws/rest/v1/patient?q=", landed: true, budgetMs: 8000 } }).catch(() => {});
+      ({ patients, totalCount } = searchResults(s, name));
+      found = hit(patients);
+    }
+  }
+  if (!found) throw new Error(`findPatient: no patient matching ${JSON.stringify(name)} in ${patients.length} wire-read result(s) of ${totalCount} the server reports`);
+  return found;
+}
+
+// ---------------------------------------------------------------------------------------------
+// chart
+// ---------------------------------------------------------------------------------------------
+
+/** Open a patient's chart and reach the chart anchor. Takes a `Patient`, a uuid, or a name (which is
+ *  searched first). Clicking the search hit is the real user path; a bare uuid with no link on screen
+ *  falls back to the chart route (a read-only GET navigation). Every interstitial is optional both ways.
+ *  WRITES: none of its own — but the app answers a chart open with `POST /ws/rest/v1/user/<uuid>`
+ *  (`userProperties.patientsVisited`, the recently-viewed MRU). User preference state, no patient data;
+ *  unavoidable through the UI. See the header. */
+export async function openPatient(s: Session, target: Patient | string): Promise<Patient> {
+  const p: Patient = typeof target === "string"
+    ? (/^[0-9a-f-]{36}$/i.test(target) ? { uuid: target, name: "", identifier: "", gender: "", age: NaN, birthdate: "" } : await findPatient(s, target))
+    : target;
+
+  const linkSel = `css=a[href*="${p.uuid}"]`;
+  const post = { all: [
+    { fn: (u: string) => location.pathname.includes(`/patient/${u}/chart`), fnArg: p.uuid },
+    { selector: 'role=link[name="Patient summary"]' },
+  ], budgetMs: 25000 };
+
+  if ((await s.watch({ selector: linkSel, visible: true }, { budgetMs: 0 })).matched)
+    reached(await s.click(linkSel, { budgetMs: 30000, until: post }), `openPatient(${p.name || p.uuid}): search hit`);
+  else
+    reached(await s.navigate(`${SPA}/patient/${p.uuid}/chart/${SECTIONS.summary}`, { budgetMs: 40000, until: post }), `openPatient(${p.uuid}): chart route`);
+
+  // Conditional interstitials on chart open. None was ever observed on this build (n=0/4 patients), but
+  // all are treated as optional by construction: a modal would occlude the next click and the diagnosis
+  // would name it. Cheap, bounded, and correct when absent.
+  await actIfPresent(s, 'role=button[name="Close"] >> nth=0', { budgetMs: 300 }).catch(() => {});
+  await assertChart(s, p.uuid);
+  return p;
+}
+
+/** Navigate to one of the chart's left-nav sections and wait for its data to land. Idempotent.
+ *  `wireLike` is the section's own request; when it is already captured for this patient the wait is
+ *  skipped (SWR may serve from cache and never re-ask). WRITES: none. */
+export async function openSection(s: Session, uuid: string, section: Section, wireLike?: string): Promise<void> {
+  const slug = SECTIONS[section];
+  if (await s.evaluate<boolean>((sl: string) => location.pathname.endsWith(`/${sl}`), { args: [slug] }).catch(() => false)) {
+    if (!wireLike || wireHas(s.store, wireLike)) return;
+  }
+  const label = { summary: "Patient summary", vitals: "Vitals & Biometrics", medications: "Medications", orders: "Orders",
+    results: "Results", visits: "Visits", allergies: "Allergies", conditions: "Conditions", programs: "Programs",
+    appointments: "Appointments", attachments: "Attachments" }[section];
+  const post = { all: [
+    { fn: (sl: string) => location.pathname.endsWith(`/${sl}`), fnArg: slug },
+    ...(wireLike && !wireHas(s.store, wireLike) ? [{ urlLike: wireLike, landed: true }] : []),
+  ], budgetMs: 20000 };
+  reached(await s.click(`role=link[name="${label}"]`, { budgetMs: 25000, until: post }), `openSection(${section})`);
+}
+
+export interface Vital { name: string; value: number | string; unit: string; when: string }
+export interface Medication { name: string; dose: string; frequency: string; route: string; orderNumber: string; action: string; dateActivated: string; active: boolean }
+export interface ChartSummary { uuid: string; problems: string[]; allergies: string[]; medications: Medication[]; vitals: Vital[]; source: Record<string, string> }
+
+const bundleEntries = (j: any): any[] => (j?.entry ?? []).map((e: any) => e.resource).filter(Boolean);
+
+/** Problems, allergies, medications and the latest vitals for the open chart — **all read off the wire**
+ *  (FHIR `Condition`, FHIR `AllergyIntolerance`, FHIR `Observation`, REST `order`), never scraped.
+ *  The patient-summary dashboard fetches conditions / vitals / medications; allergies live on their own
+ *  section, so this visits it when that bundle has not been captured for this patient yet.
+ *  `source` says which endpoint each fact came from. WRITES: none. */
+export async function extractSummary(s: Session, uuid?: string): Promise<ChartSummary> {
+  const id = uuid ?? await s.evaluate<string>(() => location.pathname.split("/patient/")[1]?.split("/")[0] ?? "");
+  await assertChart(s, id);
+
+  if (!wireHas(s.store, `Condition?patient=${id}`)) await openSection(s, id, "summary", `Condition?patient=${id}`);
+  if (!wireHas(s.store, `AllergyIntolerance?patient=${id}`)) await openSection(s, id, "allergies", `AllergyIntolerance?patient=${id}`);
+
+  const cond = extractFromWire<any>(s.store, { urlLike: `Condition?patient=${id}`, optional: true });
+  const alg = extractFromWire<any>(s.store, { urlLike: `AllergyIntolerance?patient=${id}`, optional: true });
+  const ord = extractFromWire<any>(s.store, { urlLike: `rest/v1/order?patient=${id}`, optional: true });
+
+  const problems = bundleEntries(cond)
+    .filter((c) => (c.clinicalStatus?.coding?.[0]?.code ?? "active") === "active")
+    .map((c) => c.code?.text ?? c.code?.coding?.[0]?.display).filter(Boolean);
+  const allergies = bundleEntries(alg)
+    .map((a) => a.code?.text ?? a.code?.coding?.[0]?.display ?? a.reaction?.[0]?.substance?.text).filter(Boolean);
+  const medications: Medication[] = ((ord?.results ?? []) as any[]).map((o) => ({
+    name: o.drug?.display ?? o.concept?.display ?? o.display ?? o.orderNumber,
+    dose: [o.dose, o.doseUnits?.display].filter(Boolean).join(" "),
+    frequency: o.frequency?.display ?? "", route: o.route?.display ?? "",
+    orderNumber: o.orderNumber ?? "", action: o.action ?? "", dateActivated: (o.dateActivated ?? "").slice(0, 10),
+    active: !o.dateStopped && (!o.autoExpireDate || new Date(o.autoExpireDate) > new Date()),
   }));
-  const m = v.path.match(/\/spa\/patient\/([0-9a-f-]{36})\/chart/i);
-  let where: Where = "other";
-  if (/\/spa\/login\/location/.test(v.path) && v.radios > 0) where = "login.location";
-  else if (/\/spa\/login/.test(v.path) && v.p) where = "login.password";
-  else if (/\/spa\/login/.test(v.path) && v.u) where = "login.username";
-  else if (m && v.banner) where = "chart";
-  else if (/\/spa\/search/.test(v.path) && v.searchBar) where = "search";
-  else if (/\/spa\/home/.test(v.path) && v.shell) where = "home";
-  else if (v.shell) where = "shell";
-  return { where, url: v.url, path: v.path, patientUuid: m?.[1] };
+
+  return { uuid: id, problems, allergies, medications, vitals: latestVitals(s, id),
+    source: { problems: "GET /ws/fhir2/R4/Condition?patient=…&category=…problem-list-item", allergies: "GET /ws/fhir2/R4/AllergyIntolerance?patient=…",
+      medications: "GET /ws/rest/v1/order?patient=…&careSetting=…&orderTypes=…", vitals: "GET /ws/fhir2/R4/Observation?subject:Patient=…&code=…&_sort=-date" } };
 }
 
-/** Anchor: logged in — the header (with its "Search patient" icon) is up. */
-export async function assertShell(s: Session, budgetMs = 10000): Promise<void> {
-  await assertVisible(s, SEL.shell, "openmrs: not in the logged-in shell (header search icon missing)", { budgetMs });
-}
-
-/** Anchor: a patient chart — URL /patient/<uuid>/chart + the banner's action column rendered. */
-export async function assertChart(s: Session, uuid?: string, budgetMs = 10000): Promise<string> {
-  await until(s, { fn: (u: string) => (!u || location.pathname.includes(`/patient/${u}/chart`)) && !!document.querySelector('[data-testid="patient-banner-button-col"]'), fnArg: uuid ?? "" },
-    { budgetMs, msg: `openmrs: not at the chart anchor${uuid ? ` for ${uuid}` : ""}` });
-  const pos = await whereAmI(s);
-  if (!pos.patientUuid) throw new Error(`openmrs: chart URL has no patient uuid (${pos.url})`);
-  return pos.patientUuid;
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Wire helpers — the store is the fact source; the DOM is for acting.
-
-/** Newest captured JSON body whose URL contains `urlLike` (SQL LIKE fragment, % added), optionally after a time. */
-export function lastBody<T = any>(s: Session, urlLike: string, opts: { since?: number; actionId?: string } = {}): T | undefined {
-  const rows = s.store.sql<{ body_hash: string | null; t_start: number }>(
-    `SELECT body_hash, t_start FROM requests WHERE url LIKE ? AND body_hash IS NOT NULL AND status BETWEEN 200 AND 299` +
-    (opts.since !== undefined ? ` AND t_start >= ${Number(opts.since)}` : "") + (opts.actionId ? ` AND action_id = '${opts.actionId.replace(/'/g, "")}'` : "") +
-    ` ORDER BY t_start DESC LIMIT 1`, `%${urlLike}%`);
-  const row = rows[0];
-  return row?.body_hash ? (s.store.json(row.body_hash) as T) : undefined;
-}
-
-export interface SessionInfo { authenticated: boolean; user?: { uuid: string; display: string }; sessionLocation?: { uuid: string; display: string }; currentProvider?: { uuid: string; display: string } }
-
-/** The latest /ws/rest/v1/session body the app fetched — who is logged in, where. (The app re-fetches it on every
- *  page; a login is just this GET with a Basic Authorization header, the truth is `authenticated`.) */
-export function sessionInfo(s: Session): SessionInfo | undefined {
-  return lastBody<SessionInfo>(s, "/ws/rest/v1/session");
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// login — idempotent; two-step form (username → Continue → password → Log in); optional location picker.
-
-export interface LoginOpts { username?: string; password?: string; /** preferred location name or uuid when the picker appears */ location?: string; budgetMs?: number }
-
-export async function login(s: Session, opts: LoginOpts = {}): Promise<SessionInfo> {
-  const budgetMs = opts.budgetMs ?? SLOW;
-  let pos = await whereAmI(s);
-  // (0) already in? the shell is up and the last session body says authenticated → nothing to do (idempotent)
-  if (pos.where === "home" || pos.where === "shell" || pos.where === "chart" || pos.where === "search") {
-    const info = sessionInfo(s);
-    if (info?.authenticated) return info;
+/** The most recent value of each vital/biometric the chart fetched, off the FHIR `Observation` bundles
+ *  (they are already sorted `-date`, but this reduces by timestamp so order is not assumed). */
+export function latestVitals(s: Session, uuid: string): Vital[] {
+  const rows = s.store.requests({ urlLike: `%fhir2/R4/Observation%` }).filter((r) => r.body_hash && r.url.includes(uuid));
+  const best = new Map<string, Vital>();
+  for (const r of rows) for (const o of bundleEntries(s.store.json(r.body_hash!))) {
+    const name = o.code?.coding?.[0]?.display ?? o.code?.text; const when = o.effectiveDateTime ?? "";
+    if (!name || o.valueQuantity?.value == null) continue;
+    const prev = best.get(name);
+    if (!prev || when > prev.when) best.set(name, { name, value: o.valueQuantity.value, unit: o.valueQuantity.unit ?? "", when });
   }
-  // (1) not on a login page → go there. An authenticated user hitting /login is bounced to home (returns the shell).
-  if (!pos.where.startsWith("login.")) {
-    reached(await s.navigate(`${SPA}/login`, { budgetMs, until: { fn: () => !!document.querySelector("#username") || !!document.querySelector('button[aria-label="Search patient"]'), budgetMs } }), "login: open login page");
-    pos = await whereAmI(s);
-    if (pos.where === "home" || pos.where === "shell") { const info = sessionInfo(s); if (info?.authenticated) return info; }
-  }
-  // (2) username step (act:1-2: Continue swaps the field for the password field client-side; no wire)
-  if (pos.where === "login.username") {
-    // Retry once: on a cold load the React form can re-render over the fill (controlled input → empty → the `required`
-    // validation swallows Continue with no DOM change) — run-check #1 failed exactly there.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const u = opts.username ?? CREDS.username;
-      reached(await s.fill(SEL.username, u, { until: { fn: (x: string) => (document.querySelector("#username") as HTMLInputElement | null)?.value === x, fnArg: u, budgetMs: 5000 } }), "login: fill username");
-      const r = await s.click(SEL.continueBtn, { until: { selector: SEL.loginBtn, visible: true, budgetMs: 10000 } });
-      if (r.verdict !== "diagnosis" && r.until?.matched) break;
-      if (attempt === 1) reached(r, "login: Continue");
-    }
-    pos = await whereAmI(s);
-  }
-  // (3) password step: GET /ws/rest/v1/session with Basic auth (act:4), then EITHER the shell, OR the location picker,
-  //     OR an inline error. Wait for any of the three; decide from the wire + DOM, never from the verdict.
-  if (pos.where === "login.password") {
-    reached(await s.fill(SEL.password, opts.password ?? CREDS.password), "login: fill password");
-    // (closures do not transfer into the page: the error selector travels as fnArg)
-    const r = await s.click(SEL.loginBtn, { budgetMs, until: { budgetMs, fnArg: SEL_ERR, fn: (err: string) =>
-      !!document.querySelector('button[aria-label="Search patient"]') || document.querySelectorAll('input[name="loginLocations"]').length > 0 || !!document.querySelector(err) } });
-    reached(r, "login: Log in");
-    pos = await whereAmI(s);
-    if (pos.where === "login.password" || pos.where === "login.username") {
-      // bad credentials: GET /session answers 200 {authenticated:false} (no 401) and the form drops back to the username
-      // step with an inline "Invalid username or password" notification (act:23)
-      const info = sessionInfo(s);
-      const alert = await s.evaluate<string>((err: string) => (document.querySelector(err) as HTMLElement | null)?.innerText?.trim() ?? "", { args: [SEL_ERR] });
-      throw new Error(`login: still on the login page after Log in (verdict ${r.verdict}; session.authenticated=${info?.authenticated}; notification=${JSON.stringify(alert)})`);
-    }
-  }
-  // (4) the location picker — present OR absent (absent when the user has a stored default location; act:4 skipped it,
-  //     act:5-8 reached it via "Change location"). Radios are visually hidden by Carbon: click the LABEL (act:6 vs act:7).
-  if (pos.where === "login.location") {
-    if (opts.location) {
-      const uuid = UUID_RE.test(opts.location) ? opts.location : await locationUuidByName(s, opts.location);
-      reached(await s.click(`label[for="${uuid}"]`, { until: { fn: (u: string) => (document.querySelector('input[name="loginLocations"]:checked') as HTMLInputElement | null)?.value === u, fnArg: uuid, budgetMs: 5000 } }), `login: pick location ${opts.location}`);
-    } else {
-      // keep the pre-checked one; if nothing is checked, take the first radio (any location is fine for a demo)
-      const checked = await s.evaluate<string | null>(() => (document.querySelector('input[name="loginLocations"]:checked') as HTMLInputElement | null)?.value ?? null);
-      if (!checked) {
-        const first = await s.evaluate<string>(() => (document.querySelector('input[name="loginLocations"]') as HTMLInputElement).value);
-        reached(await s.click(`label[for="${first}"]`, { until: { fn: () => !!document.querySelector('input[name="loginLocations"]:checked'), budgetMs: 5000 } }), "login: pick first location");
-      }
-    }
-    // Confirm → POST /ws/rest/v1/session {sessionLocation} ✎ (+ POST /user/<uuid>), returnToUrl → shell (act:8)
-    reached(await s.click(SEL.locationConfirm, { budgetMs, until: { selector: SEL.shell, visible: true, budgetMs } }), "login: Confirm location");
-  }
-  await assertShell(s, budgetMs);
-  // (5) optional, non-blocking interstitial: an actionable toast "Some modules have unresolved backend dependencies"
-  //     (role=alertdialog, top-right, seen 1/4 logins — act:31). Dismiss if it shows up; absent path is first-class.
-  await actIfPresent(s, SEL.backendDepsToastClose, { budgetMs: 1500 });
-  const info = sessionInfo(s);
-  if (!info?.authenticated) throw new Error(`login: shell is up but the last /ws/rest/v1/session body says authenticated=${info?.authenticated}`);
-  return info;
+  return [...best.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Resolve a login-location name → uuid from the FHIR bundle the picker fetched (Location?_tag=Login+Location). */
-async function locationUuidByName(s: Session, name: string): Promise<string> {
-  const bundle = lastBody<{ entry?: Array<{ resource: { id: string; name: string } }> }>(s, "/ws/fhir2/R4/Location?%_tag=Login%");
-  const hit = bundle?.entry?.find((e) => e.resource.name.toLowerCase() === name.toLowerCase());
-  if (hit) return hit.resource.id;
-  // not on the wire (e.g. beyond the first 50) → the picker's own search box, then read the radio
-  reached(await s.fill('role=searchbox[name="Search for a location"]', name, { until: { fn: (n: string) => [...document.querySelectorAll('label[for]')].some((l) => l.textContent?.trim().toLowerCase() === n.toLowerCase()), fnArg: name, budgetMs: 10000 } }), `login: search location ${name}`);
-  const uuid = await s.evaluate<string | null>((n: string) => ([...document.querySelectorAll('label[for]')].find((l) => l.textContent?.trim().toLowerCase() === n.toLowerCase()) as HTMLLabelElement | undefined)?.htmlFor ?? null, { args: [name] });
-  if (!uuid) throw new Error(`login: location ${JSON.stringify(name)} not offered by the picker`);
-  return uuid;
+export interface Visit { uuid: string; type: string; start: string; stop: string | null; encounters: number }
+
+/** The patient's visits, newest first, **read off the wire** (`GET /ws/rest/v1/visit?patient=…`).
+ *  `visits[0]` is the latest — its `.start` and `.type` are the "latest visit date and type".
+ *  Note the app asks for this twice with different projections: the banner's call returns only the ACTIVE
+ *  visit, the Visits section's call returns the history — so the richest captured body wins.
+ *  WRITES: none. */
+export async function listVisits(s: Session, uuid?: string): Promise<Visit[]> {
+  const id = uuid ?? await s.evaluate<string>(() => location.pathname.split("/patient/")[1]?.split("/")[0] ?? "");
+  await assertChart(s, id);
+  await openSection(s, id, "visits");
+  await until(s, { selector: "css=table" }, { budgetMs: 15000, msg: "listVisits: the visits table never rendered" });
+
+  // Several bodies match; the Visits section's (largest) is the history. (Its URL really does contain a
+  // double slash — `/openmrs//ws/rest/v1/visit` — an O3 url-building quirk, so match loosely.)
+  const rows = s.store.requests({ urlLike: `%/ws/rest/v1/visit?patient=${id}%` }).filter((r) => r.body_hash);
+  let best: any[] = [];
+  for (const r of rows) { const j = s.store.json(r.body_hash!); if ((j?.results?.length ?? 0) >= best.length) best = j.results ?? []; }
+  return best.map((v: any) => ({
+    uuid: v.uuid, type: v.visitType?.display ?? v.visitType?.name ?? "", start: v.startDatetime,
+    stop: v.stopDatetime ?? null, encounters: (v.encounters ?? []).length,
+  })).sort((a: Visit, b: Visit) => (a.start < b.start ? 1 : -1));
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// findPatient — the search page route + the REST search response (never the rendered cards).
-
-export interface PatientHit { uuid: string; name: string; identifier?: string; gender?: string; age?: number; birthdate?: string; dead?: boolean; display: string }
-export interface SearchResult extends PatientHit { total: number; all: PatientHit[]; query: string }
-
-interface RestPatient { uuid: string; display: string; identifiers?: Array<{ identifier: string; preferred?: boolean }>; person?: { display?: string; gender?: string; age?: number; birthdate?: string; dead?: boolean } }
-
-export async function findPatient(s: Session, name: string, opts: { budgetMs?: number } = {}): Promise<SearchResult> {
-  const budgetMs = opts.budgetMs ?? SLOW;
-  await login(s); // precondition: in the shell (no-op when already in)
-  // The full-page search route fires GET /ws/rest/v1/patient?q=<name>&v=custom:(…)&limit=10&totalCount=true on load
-  // (act:13). The postcondition is THAT request landing — the cards are downstream of it.
-  const q = encodeURIComponent(name);
-  const r = reached(await s.navigate(`${SPA}/search?query=${q}`, { budgetMs, until: { urlLike: `/ws/rest/v1/patient?q=${q.replace(/%20/g, "+")}`, landed: true, budgetMs } }), `findPatient(${name})`);
-  const body = lastBody<{ results: RestPatient[]; totalCount?: number }>(s, `/ws/rest/v1/patient?q=`, { since: s.store.action(r.action)?.t_start });
-  if (!body) throw new Error(`findPatient(${name}): search request matched but no body captured (verdict ${r.verdict})`);
-  const all = body.results.map(toHit);
-  if (all.length === 0) throw new Error(`findPatient(${name}): 0 results (totalCount ${body.totalCount ?? "?"})`);
-  const lname = name.trim().toLowerCase();
-  const best = all.find((h) => h.name.toLowerCase() === lname) ?? all[0];
-  return { ...best, total: body.totalCount ?? all.length, all, query: name };
-}
-
-function toHit(p: RestPatient): PatientHit {
-  const pref = p.identifiers?.find((i) => i.preferred) ?? p.identifiers?.[0];
-  return { uuid: p.uuid, name: p.person?.display ?? p.display.replace(/^\S+\s+-\s+/, ""), identifier: pref?.identifier, gender: p.person?.gender, age: p.person?.age, birthdate: p.person?.birthdate, dead: p.person?.dead, display: p.display };
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// openPatient — reach the chart anchor for a uuid or a name; click the result card when it is on screen, else navigate.
-
-export interface ChartInfo { uuid: string; name?: string; gender?: string; birthDate?: string; identifiers: string[]; url: string }
-
-export async function openPatient(s: Session, uuidOrName: string, opts: { budgetMs?: number } = {}): Promise<ChartInfo> {
-  const budgetMs = opts.budgetMs ?? SLOW;
-  const uuid = UUID_RE.test(uuidOrName) ? uuidOrName : (await findPatient(s, uuidOrName)).uuid;
-  const pos = await whereAmI(s);
-  if (pos.where === "chart" && pos.patientUuid === uuid) return chartInfo(s, uuid, pos.url);
-  const untilChart = { fn: (u: string) => location.pathname.includes(`/patient/${u}/chart`) && !!document.querySelector('[data-testid="patient-banner-button-col"]'), fnArg: uuid, budgetMs };
-  const card = `a[href*="/patient/${uuid}/chart"]`;
-  let r: Report;
-  if (pos.where === "search" && (await s.watch({ selector: card, visible: true }, { budgetMs: 1500 })).matched) {
-    r = reached(await s.click(card, { budgetMs, until: untilChart }), `openPatient(${uuid}): click result card`); // act:11
-  } else {
-    r = reached(await s.navigate(`${SPA}/patient/${uuid}/chart`, { budgetMs, until: untilChart }), `openPatient(${uuid}): navigate`);
-  }
-  await assertChart(s, uuid, budgetMs);
-  return chartInfo(s, uuid, (await whereAmI(s)).url, s.store.action(r.action)?.t_start);
-}
-
-function chartInfo(s: Session, uuid: string, url: string, since?: number): ChartInfo {
-  const p = lastBody<{ name?: Array<{ text?: string }>; gender?: string; birthDate?: string; identifier?: Array<{ value: string }> }>(s, `/ws/fhir2/R4/Patient/${uuid}`, { since });
-  return { uuid, name: p?.name?.[0]?.text, gender: p?.gender, birthDate: p?.birthDate, identifiers: p?.identifier?.map((i) => i.value) ?? [], url };
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// extractSummary — clinical facts off the FHIR bodies the chart widgets fetched. Navigates a chart tab only when
-// the fact it needs was never fetched (allergies live on their own tab; conditions + vitals on the summary).
-
-export interface Summary {
-  uuid: string; name?: string;
-  conditions: Array<{ name: string; status?: string; onset?: string; recorded?: string }>;
-  allergies: Array<{ substance: string; category?: string[]; severity?: string; reactions: string[]; status?: string }>;
-  vitals: { date?: string; values: Record<string, { value: number; unit?: string }> ; observations: number };
-  sources: Record<string, string>; // fact → endpoint it came from
-}
-
-interface Bundle<R = any> { total?: number; entry?: Array<{ resource: R }> }
-
-export async function extractSummary(s: Session, opts: { budgetMs?: number } = {}): Promise<Summary> {
-  const budgetMs = opts.budgetMs ?? SLOW;
-  const uuid = await assertChart(s, undefined, budgetMs);
-  const sources: Record<string, string> = {};
-  const need = async <T,>(label: string, urlLike: string, tab: string, landedLike: string): Promise<T | undefined> => {
-    let b = lastBody<T>(s, urlLike);
-    if (!b) { // never fetched for this patient → open the chart tab that fetches it, postcondition = that request landing
-      reached(await s.click(`nav a[href$="/chart/${tab}"], aside a[href$="/chart/${tab}"]`, { budgetMs, until: { urlLike: landedLike, landed: true, budgetMs } }), `extractSummary: open ${tab} tab`);
-      b = lastBody<T>(s, urlLike);
-    }
-    if (b) sources[label] = urlLike;
-    return b;
-  };
-  const conds = await need<Bundle>("conditions", `/ws/fhir2/R4/Condition?patient=${uuid}`, "patient-summary", "/ws/fhir2/R4/Condition?patient=");
-  const vitalsB = await need<Bundle>("vitals", `/ws/fhir2/R4/Observation?subject:Patient=${uuid}&code=5085`, "patient-summary", "/ws/fhir2/R4/Observation?subject:Patient=");
-  const bioB = lastBody<Bundle>(s, `/ws/fhir2/R4/Observation?subject:Patient=${uuid}&code=5090`); if (bioB) sources.biometrics = "…code=5090,5089,1343,1342";
-  const allergB = await need<Bundle>("allergies", `/ws/fhir2/R4/AllergyIntolerance?patient=${uuid}`, "allergies", "/ws/fhir2/R4/AllergyIntolerance?patient=");
-  const patient = lastBody<{ name?: Array<{ text?: string }> }>(s, `/ws/fhir2/R4/Patient/${uuid}`);
-
-  const conditions = (conds?.entry ?? []).map(({ resource: r }) => ({
-    name: r.code?.text ?? r.code?.coding?.[0]?.display ?? "?", status: r.clinicalStatus?.coding?.[0]?.code, onset: r.onsetDateTime, recorded: r.recordedDate }));
-  const allergies = (allergB?.entry ?? []).map(({ resource: r }) => ({
-    substance: r.code?.text ?? r.code?.coding?.[0]?.display ?? "?", category: r.category, severity: r.reaction?.[0]?.severity ?? r.criticality,
-    reactions: (r.reaction ?? []).flatMap((x: any) => (x.manifestation ?? []).map((m: any) => m.text ?? m.coding?.[0]?.display)).filter(Boolean), status: r.clinicalStatus?.coding?.[0]?.code }));
-  // latest vitals set = all numeric observations sharing the most recent effectiveDateTime (bundle is _sort=-date)
-  const obs = [...(vitalsB?.entry ?? []), ...(bioB?.entry ?? [])].map((e) => e.resource).filter((r) => r.valueQuantity && r.effectiveDateTime);
-  const latest = obs.map((r) => r.effectiveDateTime as string).sort().at(-1);
-  const values: Record<string, { value: number; unit?: string }> = {};
-  for (const r of obs) if (r.effectiveDateTime === latest) values[r.code?.text ?? r.code?.coding?.[0]?.display ?? r.code?.coding?.[0]?.code] = { value: r.valueQuantity.value, unit: r.valueQuantity.unit };
-  return { uuid, name: patient?.name?.[0]?.text, conditions, allergies, vitals: { date: latest, values, observations: obs.length }, sources };
+/** Back to a known anchor from anywhere (a stray modal, a half-loaded section, a dead route):
+ *  navigate to the shell's home route and re-assert. If the session died, this lands on /login and
+ *  throws from assertShell — which is the honest answer, not a hang. WRITES: none. */
+export async function recoverToShell(s: Session): Promise<void> {
+  reached(await s.navigate(`${SPA}/home`, { budgetMs: 40000,
+    until: { any: [{ name: "shell", selector: 'css=[data-testid="searchPatientIcon"]', visible: true },
+                   { name: "login", selector: "#username", visible: true }], budgetMs: 30000 } }), "recoverToShell");
+  await assertShell(s);
 }

@@ -193,7 +193,7 @@ export function openStore(dir: string) {
      *  SELECT * FROM requests WHERE url LIKE ? AND method=? AND action_id=? AND status=? AND t_start BETWEEN ? AND ? ORDER BY t_start */
     requests(f: { urlLike?: string; method?: string; actionId?: string; status?: number; since?: number; until?: number; family?: string; run?: number } = {}): RequestRow[] {
       const w: string[] = []; const a: unknown[] = [];
-      if (f.urlLike) { w.push("url LIKE ?"); a.push(f.urlLike); }
+      if (f.urlLike) { w.push("url LIKE ?"); a.push(f.urlLike.includes("%") ? f.urlLike : `%${f.urlLike}%`); } // a bare fragment is a substring match (stranger #2 friction #5)
       if (f.method) { w.push("method=?"); a.push(f.method.toUpperCase()); }
       if (f.actionId) { w.push("action_id=?"); a.push(f.actionId); }
       if (f.status !== undefined) { w.push("status=?"); a.push(f.status); }
