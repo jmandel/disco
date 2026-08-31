@@ -24,20 +24,42 @@ export function framer(onLine: Frame) {
 }
 
 export interface RpcConn { id: number; send(obj: object): void; subscribed: boolean; close(): void }
+
+/** Byte-accurate outgoing queue for a Bun socket. `write()` takes what the kernel buffer will hold and
+ *  returns the byte count — ignoring it TRUNCATES anything larger (≈ tens of KB on a unix socket): the peer
+ *  never sees the line's newline and the call "hangs" until its timeout (a ~500KB evaluate result did
+ *  exactly that — DECISIONS #50). Flush the remainder on `drain`. */
+class Outbox {
+  private chunks: Uint8Array[] = [];
+  private off = 0;
+  private enc = new TextEncoder();
+  push(sock: { write(d: Uint8Array): number }, line: string) { this.chunks.push(this.enc.encode(line)); this.flush(sock); }
+  flush(sock: { write(d: Uint8Array): number }) {
+    while (this.chunks.length) {
+      const c = this.chunks[0];
+      const n = sock.write(this.off ? c.subarray(this.off) : c);
+      if (n < 0) return; // socket gone; close() will clean up
+      this.off += n;
+      if (this.off < c.length) return; // kernel buffer full — the rest goes out on drain
+      this.chunks.shift(); this.off = 0;
+    }
+  }
+}
 export type RpcHandler = (method: string, params: any, conn: RpcConn) => Promise<unknown> | unknown;
 
 /** Serve JSON-RPC on a unix socket. Returns a stop function. */
 export function serveRpc(sockPath: string, handler: RpcHandler, opts: { onClose?: (c: RpcConn) => void } = {}) {
   const conns = new Set<RpcConn>();
   let nextConn = 1;
-  const server = Bun.listen<{ conn: RpcConn; feed: (c: Uint8Array) => void }>({
+  const server = Bun.listen<{ conn: RpcConn; feed: (c: Uint8Array) => void; out: Outbox }>({
     unix: sockPath,
     socket: {
       open(sock) {
+        const out = new Outbox();
         const conn: RpcConn = {
           id: nextConn++,
           subscribed: false,
-          send(obj) { try { sock.write(JSON.stringify(obj) + "\n"); } catch {} },
+          send(obj) { try { out.push(sock, JSON.stringify(obj) + "\n"); } catch {} },
           close() { try { sock.end(); } catch {} },
         };
         conns.add(conn);
@@ -52,9 +74,10 @@ export function serveRpc(sockPath: string, handler: RpcHandler, opts: { onClose?
             if (msg.id !== undefined) conn.send({ jsonrpc: "2.0", id: msg.id, error: err });
           }
         });
-        sock.data = { conn, feed };
+        sock.data = { conn, feed, out };
       },
       data(sock, chunk) { sock.data.feed(chunk); },
+      drain(sock) { sock.data?.out.flush(sock); },
       close(sock) { const c = sock.data?.conn; if (c) { conns.delete(c); opts.onClose?.(c); } },
       error(sock, err) { console.error("rpc socket error", err); },
     },
@@ -75,6 +98,7 @@ export class RpcClient {
   closed = false;
   private constructor(public sockPath: string) {}
 
+  private out = new Outbox();
   static async connect(sockPath: string): Promise<RpcClient> {
     const c = new RpcClient(sockPath);
     const feed = framer((line) => c.onLine(line));
@@ -82,6 +106,7 @@ export class RpcClient {
       unix: sockPath,
       socket: {
         data(_s, chunk) { feed(chunk); },
+        drain(s) { c.out.flush(s); },
         close() { c.onClose(); },
         error(_s, err) { c.onClose(err); },
         open() {},
@@ -96,7 +121,7 @@ export class RpcClient {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`rpc ${method}: no response within ${timeoutMs}ms`)); }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.sock.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      this.out.push(this.sock, JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     });
   }
   onEvent(fn: (params: any) => void): () => void { this.eventHandlers.add(fn); return () => this.eventHandlers.delete(fn); }
