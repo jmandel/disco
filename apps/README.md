@@ -10,8 +10,10 @@ apps/<app>/
   lib.ts       ← the driving code, once flows are worth packaging (anchor in → anchor out, `until` on every transition).
   check.ts     ← the live check once lib.ts exists: `export const target = { url, scope }` (+ optional `ready`)
                  and `check(s)`; `bun scripts/run-check.ts <app>` runs it.
+  wire.md      ← where the facts live on the wire: endpoint family → what it carries, read/write, standing channels.
+  friction.md  ← where the tool or docs got in your way — feedback to disco, briefly and bluntly.
   store/       ← the recording (gitignored, run-tagged, machine-managed) — everything observed, re-queryable forever.
-  …anything that earns its place (screenshots/, wire.md, friction.md) — your call.
+  …plus anything else that helps (screenshots/ with cited shots, etc.).
 ```
 
 ## The habit: accumulate, then distill
@@ -20,9 +22,8 @@ apps/<app>/
    `disco note` already lands in NOTES.md, so the raw trail survives by default.
 2. **Cite evidence** (`act:N`) so claims can be re-checked; mark guesses as guesses.
 3. **Distill whenever something has earned it** — no phase, no ceremony: a note that became understanding
-   moves into README.md; a routine becomes a lib.ts function; a function that matters gets a check.ts step.
-4. **Split late.** `wire.md` (where the facts live) and `friction.md` (tool feedback) are the splits that
-   have repeatedly earned their keep; do not start there.
+   moves into README.md (or wire.md when it is a wire fact); a routine becomes a lib.ts function; a function
+   that matters gets a check.ts step; a tool gripe goes to friction.md.
 
 Truths about the **tool** go to `src/` + `DECISIONS.md`; truths about the **class** of app go to
 `GUIDANCE.md` and the usage docs. One observation can split across all three.

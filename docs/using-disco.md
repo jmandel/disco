@@ -27,7 +27,8 @@ alongside this. Every report excerpt below is real output of `bun demos/03-two-q
    assumes position and never trusts the verdict alone.
 4. **The output is a folder of files, not a transcript.** `disco note` accumulates raw observations in the
    committed `apps/<target>/NOTES.md`; you distill what earns it — as you go, no ceremony — into
-   `README.md`, `lib.ts`, `check.ts` (any subset is a legitimate state). The store is gitignored scratch:
+   `README.md`, `wire.md`, `lib.ts`, `check.ts`, `friction.md` (any subset is a legitimate state). The
+   store is gitignored scratch:
    **if it isn't in a committed file, it doesn't exist tomorrow.**
 
 ## The loop: five verbs
@@ -124,7 +125,7 @@ Model the app as **named anchors** (cheap predicates: a URL pattern + a landmark
 **transitions** between them (with their settlement profile + wire signature). Keep a **variability
 ledger**: what varied, with n-counts, and the experiment that would resolve each. `diffTrace(a, b)`
 compares two runs of "the same" step and shows the structural difference (e.g. the interstitial that only
-sometimes appears). This is what the app's README captures (or a `wire.md`/`ledger.md` split, once earned).
+sometimes appears). This is what the app's README (and `wire.md`, for the wire facts) captures.
 
 ### 5. Automate — write robust functions and a drift check
 
@@ -420,6 +421,6 @@ each (built / partial / deferred) lives in `DECISIONS.md` (the `OPEN` tags) and 
 ## Where outputs go
 
 Everything you learn lives under `apps/<target>/` (the shape and the accumulate→distill habit:
-`apps/README.md` — NOTES.md fills as you work; README/lib/check are what you distill). Tool-level lessons
+`apps/README.md` — NOTES.md fills as you work; README/wire/lib/check/friction are what you distill). Tool-level lessons
 become engine fixes + `DECISIONS.md`; class-of-app lessons become methodology in `GUIDANCE.md §7–8`.
 Every exploration sharpens the platform, not just its own pack.

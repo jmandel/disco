@@ -80,16 +80,18 @@ The shape is `apps/README.md`'s — **NOTES.md accumulates as you work** (`disco
 claim cites an act id) and you distill what earns it, as you go, into:
 
 - `README.md` — what this app is; how to drive it (anchors with cheap predicates, transitions with their
-  settle profile + wire signature, interstitials and recovery, keyboard recipes verbatim); where the facts
-  live on the wire (endpoint family → what it carries, read/write); what varies (n-counts, observed vs
-  inferred, the experiment that would resolve each); the checklist above with a verdict per item; open questions.
+  settle profile + wire signature, interstitials and recovery, keyboard recipes verbatim); what varies
+  (n-counts, observed vs inferred, the experiment that would resolve each); the checklist above with a
+  verdict per item; open questions.
+- `wire.md` — where the facts live: endpoint family → what it carries, read/write, read-POSTs, standing
+  channels; the handful of bodies worth citing by handle.
 - `lib.ts` — the flows as robust functions: anchor in → anchor out, postcondition on every transition,
   wire-first reads, interstitials optional both ways, idempotent where sensible, declared write footprint,
   no sleeps, one selector language.
 - `check.ts` — `export const target = { url, scope }` (+ optional `ready`) and `check(s)` with PASS/FAIL
   per step and durations; `bun scripts/run-check.ts` must pass.
-- Extra files only when they earn their place (`screenshots/` with cited shots; `wire.md`; `friction.md` —
-  put tool/doc friction somewhere, briefly and bluntly).
+- `friction.md` — where the tool or docs got in your way, briefly and bluntly.
+- `screenshots/` — a handful of cited shots.
 
 The store stays in `apps/{{PACK}}/store/` (gitignored, run-tagged); NOTES.md and README cite act ids so
 everything can be re-queried.
