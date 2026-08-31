@@ -35,7 +35,7 @@ disco session new mysite --attach 9222 --scope example.com
 ```
 
 From the moment it attaches, disco records every request/response (bodies included), WS/SSE frame,
-console line, dialog, navigation, and a screencast — to `sessions/mysite/store.sqlite` + `blobs/`.
+console line, dialog, navigation, and a screencast — to `apps/mysite/store/` (one run-tagged SQLite + `blobs/`).
 **Let the ambient classifiers warm up** before you lean on settlement — `disco idle 120000` for an EHR
 (minute-scale heartbeats need ≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never
 record a human's mail/bank tabs.
@@ -71,7 +71,7 @@ console.log(rows.length, rows[0].name);     // 10000  "Aardvark-Row-0"  — the 
 Ask retroactive questions the run never anticipated — FTS over every captured body/frame:
 
 ```bash
-disco sql "SELECT r.path FROM bodies b JOIN bodies_fts f ON f.rowid=b.rowid
+disco sql mysite "SELECT run, r.path FROM bodies b JOIN bodies_fts f ON f.rowid=b.rowid
            JOIN requests r ON r.body_hash=b.hash WHERE bodies_fts MATCH 'Zebra-Row-9741'"
 ```
 

@@ -72,14 +72,15 @@ describe("slice 6: launch-mode hardening", () => {
 
   test("daemon restart against the still-running browser: same session, same clock, still acting", async () => {
     const tBefore = env.daemon.now();
+    const runBefore = env.daemon.run;
     const seqBefore = env.daemon.store.lastSeq();
-    await env.daemon.stop();
+    await env.daemon.stop();                           // bare stop (not `session end`) leaves the run open
     await sleep(300);
-    const d2 = await Daemon.start({ dir: env.dir, name: "whatever", mode: "attach", port: env.browser.port, scope: `localhost:${env.gauntlet.port}` });
+    const d2 = await Daemon.start({ dir: env.dir, name: "whatever", product: "resume-test", mode: "attach", port: env.browser.port, scope: `localhost:${env.gauntlet.port}` });
     const sel2 = registerActions(d2);
     try {
       expect(d2.resumed).toBe(true);
-      expect(d2.manifest.name).not.toBe("whatever"); // prior manifest wins
+      expect(d2.run).toBe(runBefore);                 // resumed the SAME run (not a new one)
       expect(d2.now()).toBeGreaterThan(tBefore);      // anchor preserved → clock continues
       await sleep(2500);                              // re-learn ambient DOM churn on the live page
       const t = [...d2.targets.values()].find((x) => x.scoped && x.isPage && !x.detached && x.url === env.gauntlet.origin + "/");

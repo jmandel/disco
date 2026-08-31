@@ -63,6 +63,7 @@ export class Daemon {
   private observerSrc = observerSource(defaults.observerBatchMs);
   connected = false;
   resumed = false;
+  run = 1;
 
   static async start(opts: DaemonOptions): Promise<Daemon> {
     const d = new Daemon();
@@ -70,24 +71,22 @@ export class Daemon {
     d.logPath = join(opts.dir, "daemon.log");
     d.streamPath = join(opts.dir, "stream.jsonl");
     if (opts.log) d.extLog = opts.log;
-    const manifestPath = join(opts.dir, "manifest.json");
-    const prior = existsSync(manifestPath) ? (JSON.parse(readFileSync(manifestPath, "utf8")) as SessionManifest) : null;
-    const anchor = prior?.anchorEpochMs ?? Date.now();
-    d.resumed = !!prior;
-    d.manifest = { name: prior?.name ?? opts.name, dir: opts.dir, anchorEpochMs: anchor, startedWall: prior?.startedWall ?? new Date(anchor).toISOString(), mode: prior?.mode ?? opts.mode, product: opts.product ?? prior?.product, scope: opts.scope ?? prior?.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? prior?.dialogPolicy ?? "accept", contract: opts.contract ?? prior?.contract, pid: process.pid, launched: opts.launched ?? prior?.launched };
-    if (prior) delete d.manifest.endedWall;
     if (opts.scope) { const m = opts.scope.match(/^\/(.+)\/([a-z]*)$/); if (m) d.scopeRe = new RegExp(m[1], m[2]); else d.scopeSub = opts.scope; }
     d.scopeTargetId = opts.scopeTarget ?? null;
     // GUIDANCE §3.2: recording an unscoped desktop browser is never the default (review F2).
-    if ((opts.mode ?? "attach") === "attach" && !(prior?.scope) && !opts.scope && !opts.scopeTarget && !opts.allTargets && !opts.launched) throw new Error("attach mode requires --scope <url-part> or --pick <target> (or explicit --all-targets)");
+    if ((opts.mode ?? "attach") === "attach" && !opts.scope && !opts.scopeTarget && !opts.allTargets && !opts.launched) throw new Error("attach mode requires --scope <url-part> or --pick <target> (or explicit --all-targets)");
+    // The store is the product's whole history; begin a new run (or resume the last still-open one).
+    d.store = new Store(opts.dir);
+    const runInfo = d.store.beginOrResumeRun({ name: opts.name, mode: opts.mode, scope: opts.scope, contract: opts.contract, dialogPolicy: opts.dialogPolicy });
+    d.run = runInfo.run; d.resumed = runInfo.resumed;
+    d.manifest = { name: opts.name, dir: opts.dir, product: opts.product, run: runInfo.run, anchorEpochMs: runInfo.anchorEpochMs, startedWall: new Date(runInfo.anchorEpochMs).toISOString(), mode: opts.mode, scope: opts.scope, endpoint: { port: opts.port, wsUrl: opts.wsUrl }, dialogPolicy: opts.dialogPolicy ?? "accept", contract: opts.contract, pid: process.pid, launched: opts.launched };
     let wsUrl = opts.wsUrl;
     if (!wsUrl) {
       if (opts.port === undefined) throw new Error("attach mode needs --attach <port> (or wsUrl)");
       const disc = await discoverBrowser(opts.port, opts.host);
-      wsUrl = disc.wsUrl; d.manifest.browser = disc.browser;
+      wsUrl = disc.wsUrl; d.manifest.browser = disc.browser; d.store.setRunBrowser(disc.browser);
     }
     d.writeManifest();
-    d.store = new Store(opts.dir, d.manifest);
     d.attrib = new Attributor({ now: () => d.now(), windowFor: (tid, t) => d.windowFor(tid, t), onFamily: (f) => d.persistFamily(f), startT: 0, idleObservedMs: () => d.idleObservedMs() });
     d.cdp = await Cdp.connect(wsUrl);
     d.connected = true;
@@ -183,6 +182,7 @@ export class Daemon {
   /** Bound the write-path maps (review F12): insertion-ordered eviction. */
   capMap(m: Map<string, unknown>, cap = 8000) { while (m.size > cap) { const k = m.keys().next().value; if (k === undefined) break; m.delete(k); } }
   private route(e: CdpEvent) {
+    if (this.stopping || this.store.closed) return;
     if (e.method.startsWith("Target.")) { void this.onTargetEvent(e); return; }
     if (e.method.startsWith("Browser.")) { this.onBrowserEvent(e); return; }
     const t = e.sessionId ? this.bySession.get(e.sessionId) : undefined;
@@ -383,8 +383,8 @@ export class Daemon {
     if (ext) return ext(p, conn);
     switch (method) {
       case "ping": return { pong: true, t: this.now() };
-      case "session.info": return { manifest: this.manifest, connected: this.connected, targets: this.targetList(), counts: this.counts(), classifier: { immature: this.attrib.immature(), families: this.attrib.families.size, ambient: [...this.attrib.families.values()].filter((f) => f.ambient).length }, lastSeq: this.store.lastSeq() };
-      case "session.end": setTimeout(() => void this.stop(), 20); return { ok: true };
+      case "session.info": return { manifest: this.manifest, resumed: this.resumed, run: this.run, connected: this.connected, targets: this.targetList(), counts: this.counts(), classifier: { immature: this.attrib.immature(), families: this.attrib.families.size, ambient: [...this.attrib.families.values()].filter((f) => f.ambient).length }, lastSeq: this.store.lastSeq() };
+      case "session.end": this.store.endRun(); setTimeout(() => void this.stop(), 20); return { ok: true };
       case "pick.list": return (await this.cdp.send<{ targetInfos: TargetInfo[] }>("Target.getTargets")).targetInfos.filter((x) => x.type === "page").map((x, i) => ({ n: i + 1, targetId: x.targetId, url: x.url, title: x.title }));
       case "subscribe": conn.subscribed = true; return { ok: true, lastSeq: this.store.lastSeq() };
       case "targets": return this.targetList();

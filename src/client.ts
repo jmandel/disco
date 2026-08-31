@@ -13,18 +13,20 @@ const src = (f: PageFn): string => (typeof f === "string" ? f : f.toString());
 
 export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco"; expect?: (report: Report) => boolean }
 
+/** Resolve a selector to a product's STORE dir (apps/<product>/store). Accepts a product name, a path, or the current app. */
 export function resolveSessionDir(nameOrDir?: string): string {
-  const sessionsDir = resolve(process.env.DISCO_SESSIONS_DIR ?? join(process.cwd(), "sessions"));
-  const s = nameOrDir ?? process.env.DISCO_SESSION;
+  const appsDir = resolve(process.env.DISCO_APPS_DIR ?? join(process.cwd(), "apps"));
+  const hasStore = (d: string) => existsSync(join(d, "store.sqlite")) || existsSync(join(d, "manifest.json"));
+  const s = nameOrDir ?? process.env.DISCO_APP ?? process.env.DISCO_SESSION;
   if (s) {
-    if (existsSync(join(s, "manifest.json"))) return resolve(s);
-    const d = join(sessionsDir, s);
-    if (existsSync(join(d, "manifest.json"))) return d;
-    throw new Error(`no session "${s}" under ${sessionsDir}`);
+    if (hasStore(s)) return resolve(s);                                 // a path to a store dir
+    if (hasStore(join(s, "store"))) return resolve(join(s, "store"));   // a path to a product home
+    const d = join(appsDir, s, "store"); if (hasStore(d)) return d;     // a product name
+    throw new Error(`no app "${s}" under ${appsDir}`);
   }
-  const cur = join(sessionsDir, ".current");
-  if (existsSync(cur)) { const d = join(sessionsDir, readFileSync(cur, "utf8").trim()); if (existsSync(join(d, "manifest.json"))) return d; }
-  throw new Error(`no current session (run disco session new, or pass a name/dir, or set DISCO_SESSION)`);
+  const cur = join(appsDir, ".current");
+  if (existsSync(cur)) { const d = join(appsDir, readFileSync(cur, "utf8").trim(), "store"); if (hasStore(d)) return d; }
+  throw new Error(`no current app (run disco session new <product>, pass a product/path, or set DISCO_APP)`);
 }
 
 export class Session {
@@ -94,4 +96,4 @@ export class Session {
   close() { this.rpc.close(); this._store?.close(); }
 }
 export const connect = Session.connect;
-export { openStore } from "./store.ts";
+export { openStore, openApp } from "./store.ts";

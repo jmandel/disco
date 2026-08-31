@@ -5,17 +5,17 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 
-CREATE TABLE IF NOT EXISTS session (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  name TEXT NOT NULL,
-  anchor_epoch_ms REAL NOT NULL,     -- wall-clock ms at t=0
-  started_wall TEXT NOT NULL,        -- ISO
-  ended_wall TEXT,
-  mode TEXT NOT NULL,                -- attach | launch
-  scope TEXT,                        -- url substring/regex that gates attachment (attach mode)
-  browser TEXT,                      -- product/version from /json/version
-  contract TEXT,                     -- JSON: goals, stance, environment, artifacts (GUIDANCE §7.1)
-  dialog_policy TEXT NOT NULL DEFAULT 'accept'  -- accept | dismiss  (beforeunload always accepted)
+CREATE TABLE IF NOT EXISTS runs (
+  run INTEGER PRIMARY KEY,            -- exploration episode; every run-scoped row carries this
+  name TEXT,
+  started_wall TEXT NOT NULL,         -- ISO
+  ended_wall TEXT,                    -- NULL while the run is open (resumable); set by `session end`
+  anchor_epoch_ms REAL NOT NULL,      -- this run's t=0 in wall-clock ms (t columns are run-relative)
+  mode TEXT NOT NULL,                 -- attach | launch
+  scope TEXT,
+  browser TEXT,
+  contract TEXT,                      -- JSON: goals, stance, environment, artifacts (GUIDANCE §7.1)
+  dialog_policy TEXT NOT NULL DEFAULT 'accept'
 );
 
 CREATE TABLE IF NOT EXISTS targets (
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS frames (
 
 -- The unified event stream. `seq` is the store cursor used in reports (ev:a-b).
 CREATE TABLE IF NOT EXISTS events (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -57,6 +58,7 @@ CREATE INDEX IF NOT EXISTS events_kind ON events(kind, t);
 CREATE INDEX IF NOT EXISTS events_action ON events(action_id);
 
 CREATE TABLE IF NOT EXISTS requests (
+  run INTEGER NOT NULL DEFAULT 1,
   id TEXT PRIMARY KEY,               -- CDP requestId; redirects get `<id>:r<n>`
   target_id TEXT,
   frame_id TEXT,
@@ -108,6 +110,7 @@ CREATE TRIGGER IF NOT EXISTS bodies_ai AFTER INSERT ON bodies BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS websockets (
+  run INTEGER NOT NULL DEFAULT 1,
   id TEXT PRIMARY KEY,               -- CDP requestId of the handshake
   target_id TEXT,
   url TEXT NOT NULL,
@@ -116,6 +119,7 @@ CREATE TABLE IF NOT EXISTS websockets (
   action_id TEXT
 );
 CREATE TABLE IF NOT EXISTS ws_frames (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   ws_id TEXT NOT NULL,
   t REAL NOT NULL,
@@ -132,6 +136,7 @@ CREATE TRIGGER IF NOT EXISTS ws_frames_ai AFTER INSERT ON ws_frames BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS console (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -144,6 +149,7 @@ CREATE TABLE IF NOT EXISTS console (
 );
 
 CREATE TABLE IF NOT EXISTS dialogs (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -154,6 +160,7 @@ CREATE TABLE IF NOT EXISTS dialogs (
 );
 
 CREATE TABLE IF NOT EXISTS nav (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -164,6 +171,7 @@ CREATE TABLE IF NOT EXISTS nav (
 );
 
 CREATE TABLE IF NOT EXISTS downloads (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -175,6 +183,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 -- Screencast frames and on-demand screenshots that were persisted (changed pixels, rate-capped).
 CREATE TABLE IF NOT EXISTS shots (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -188,6 +197,7 @@ CREATE INDEX IF NOT EXISTS shots_t ON shots(t);
 
 -- In-page observer batches (DOM mutation summaries), one row per batch per frame.
 CREATE TABLE IF NOT EXISTS mutations (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,                   -- time of the last mutation in the batch
   target_id TEXT,
@@ -199,6 +209,7 @@ CREATE TABLE IF NOT EXISTS mutations (
 );
 
 CREATE TABLE IF NOT EXISTS actions (
+  run INTEGER NOT NULL DEFAULT 1,
   id TEXT PRIMARY KEY,               -- act:<n>
   n INTEGER NOT NULL,
   t_start REAL NOT NULL,             -- dispatch time (causality window open)
@@ -218,6 +229,7 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 
 CREATE TABLE IF NOT EXISTS sentinels (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   target_id TEXT,
@@ -243,6 +255,7 @@ CREATE TABLE IF NOT EXISTS families (
 
 -- The one table the agent writes (via `disco note` / session.note()). GUIDANCE §6.2.
 CREATE TABLE IF NOT EXISTS notes (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   kind TEXT NOT NULL,                -- state | transition | ledger | note
@@ -254,6 +267,7 @@ CREATE TABLE IF NOT EXISTS notes (
 
 -- Server-sent events: the body of an EventSource request never "finishes", but CDP reports each message.
 CREATE TABLE IF NOT EXISTS sse_events (
+  run INTEGER NOT NULL DEFAULT 1,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
   request_id TEXT NOT NULL,
@@ -268,3 +282,9 @@ CREATE INDEX IF NOT EXISTS ws_frames_ws ON ws_frames(ws_id);
 CREATE INDEX IF NOT EXISTS sse_events_req ON sse_events(request_id);
 CREATE INDEX IF NOT EXISTS mutations_action ON mutations(action_id);
 CREATE INDEX IF NOT EXISTS console_action ON console(action_id);
+
+-- run filters (per-product history is one DB; scope temporal/episodic queries by run)
+CREATE INDEX IF NOT EXISTS events_run ON events(run);
+CREATE INDEX IF NOT EXISTS requests_run ON requests(run);
+CREATE INDEX IF NOT EXISTS actions_run ON actions(run);
+CREATE INDEX IF NOT EXISTS sentinels_run ON sentinels(run);

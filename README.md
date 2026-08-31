@@ -16,20 +16,20 @@ Constitution: [GUIDANCE.md](GUIDANCE.md). Construction plan: [BRIEF.md](BRIEF.md
 bun install
 bun gauntlet &                                  # the hostile demo SPA on :4800
 chromium --remote-debugging-port=9222 &         # or any Chromium you can attach to
-bun cli/disco.ts session new s1 --attach 9222 --scope localhost:4800
+bun cli/disco.ts session new gauntlet --attach 9222 --scope localhost:4800   # -> apps/gauntlet/store/
 # open http://localhost:4800 in that browser; the daemon idle-observes ~20s to learn ambient traffic
 bun cli/disco.ts act click 'role=button[name="Load Chart"]'
 #   act:1  click …  →  settled:network  (settled 743ms; 3 req, 6 mut, 2 px)
 #   ⇄ GET /api/slow → 200, 29B, application/json (task)  body:0b41…
-bun cli/disco.ts sql "SELECT method, path, status, resp_size FROM requests ORDER BY t_start"
-bun cli/disco.ts session end
+bun cli/disco.ts sql gauntlet "SELECT run, method, path, status FROM requests ORDER BY run, t_start"
+bun cli/disco.ts session end gauntlet
 ```
 
-Or launch a managed browser: `disco session new s1 --launch --headless --url http://localhost:4800`.
+Or launch a managed browser: `disco session new gauntlet --launch --headless --url http://localhost:4800`.
 
 ## The three faces (descending power, ascending convenience)
 
-1. **The store.** `sessions/<name>/store.sqlite` (WAL) + `blobs/` (sha256-addressed). Open it with
+1. **The store.** `apps/<app>/store/store.sqlite` (WAL, one run-tagged history per app) + `blobs/` (sha256-addressed). Open it with
    `bun:sqlite`, the `sqlite3` CLI, or `disco sql` — schema in [schema.sql](schema.sql); read it, then
    write any SQL. Works with the daemon stopped. FTS5: `SELECT r.path FROM bodies b JOIN bodies_fts f
    ON f.rowid=b.rowid JOIN requests r ON r.body_hash=b.hash WHERE bodies_fts MATCH '"Zebra-Row-9741"'`.

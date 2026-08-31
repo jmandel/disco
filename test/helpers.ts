@@ -31,7 +31,7 @@ export async function startEnv(opts: { scope?: string; headless?: boolean; name?
   const gauntlet = await startGauntlet({ port: 0 });
   const browser = await launchChromium({ headless: opts.headless ?? true, userDataDir: join(base, "profile") });
   const dir = join(base, "session");
-  const daemon = await Daemon.start({ dir, name: opts.name ?? `test-${id}`, mode: "attach", port: browser.port, scope: opts.scope ?? `localhost:${gauntlet.port}`, dialogPolicy: opts.dialogPolicy });
+  const daemon = await Daemon.start({ dir, name: opts.name ?? `test-${id}`, product: opts.name ?? `test-${id}`, mode: "attach", port: browser.port, scope: opts.scope ?? `localhost:${gauntlet.port}`, dialogPolicy: opts.dialogPolicy });
   const env: Env = {
     gauntlet, browser, daemon, dir,
     async open(path) {

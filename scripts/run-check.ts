@@ -22,7 +22,7 @@ const base = join(import.meta.dir, "..", ".scratch", "checks", `${name}-${Date.n
 rmSync(base, { recursive: true, force: true }); mkdirSync(base, { recursive: true });
 
 const browser = await launchChromium({ headless: true, userDataDir: join(base, "profile") });
-const daemon = await Daemon.start({ dir: join(base, "session"), name: `check-${name}`, mode: "attach", port: browser.port, scope: cfg.scope });
+const daemon = await Daemon.start({ dir: join(base, "session"), name: `check-${name}`, product: name, mode: "attach", port: browser.port, scope: cfg.scope });
 let code = 1;
 try {
   await daemon.cdp.send("Target.createTarget", { url: cfg.url });

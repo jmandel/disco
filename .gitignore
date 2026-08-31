@@ -1,5 +1,5 @@
 node_modules/
-sessions/
+apps/*/store/
 .scratch/
 *.log
 gauntlet/dist/

@@ -28,7 +28,7 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - Stage (b): a SECOND cold agent, given only apps/ + README, executed "open a record and extract row names via the wire" FIRST TRY under both modal states with zero fixes (records 2 and 3; interstitial acknowledged then absent; 10,000 rows via the 496KB /api/rows body, task-attributed).
 
 ## Dogfood #1 — DONE (OpenEMR 8.3.0 demo, 2026-08-30)
-- Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; apps/openemr/dogfood-1.md + screenshots, session store sessions/openemr/. Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
+- Full physician login → patient finder → chart-open driven by act() against demo.openemr.io; apps/openemr/dogfood-1.md + screenshots, app store apps/openemr/store/ (run-tagged). Confirmed on a real EHR: nested-iframe frame-scoped acts, wire-available clinical facts (finder JSON + summary HTML fragments), a native-alert conditional interstitial (auto-handled + ledgered), correct occlusion diagnosis on a hidden tab, and the ambient classifier catching OpenEMR's real 60s heartbeat trio as periodic (cv≈0). Tuning applied: classifierWarmupMs 20s→90s, idle 30s, digestMaxUiLinesNav 12 (DECISIONS #29).
 
 ## Next — plan slices 1–4 all done; remaining is the "later" bucket (a direction call)
 - MCP / agent-tool exposure of the pack function libraries.
@@ -36,11 +36,16 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - PHI/retention posture when a non-demo target is used (until then: demo/BAA-covered only).
 - OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant.
 
+## Storage layout (2026-08-31)
+- **One home per app: `apps/<product>/`** — committed pack (nav-and-quirks/lib.ts/check.ts/ledger) + gitignored `store/` (the app's WHOLE history: one `store.sqlite` with every run-scoped row tagged by `run`, shared `blobs/`, `stream.jsonl`, `daemon.sock`). No top-level `sessions/`.
+- A **run** = one episode; `session new <app>` opens one, `session end` closes it, a daemon restart resumes the open run + its clock. One active run per app at a time (single SQLite writer). Ephemeral test/check runs live in `.scratch/`.
+- Query one app's whole history in one shot: `disco sql <app> "SELECT run, method, path FROM requests WHERE path LIKE '%X%'"` (or `openApp("<app>")` in TS). See DECISIONS #34, PLATFORM.md.
+
 ## How to run
-- `bun install`; gauntlet: `bun gauntlet` (or `bun run gauntlet/server.ts --port 4800`)
+- `bun install`; gauntlet app: `bun gauntlet`. Explore: `disco session new <app> --attach <port> --scope <host>`; query: `disco sql <app> "…"`; drift: `bun scripts/run-check.ts <app>`.
 - All tests: `bun test` (launches its own headless chromium; scratch in .scratch/)
 - Typecheck: `bunx tsc --noEmit -p .`
-- Manual attach: `chromium --remote-debugging-port=9222 --user-data-dir=~/hobby/.agent-scratch/disco/profile` then `bun cli/disco.ts session new s1 --attach 9222 --scope localhost:4800`
+- Manual attach: `chromium --remote-debugging-port=9222 --user-data-dir=~/hobby/.agent-scratch/disco/profile` then `bun cli/disco.ts session new gauntlet --attach 9222 --scope localhost:4800`
 - Re-vendor selector engine: `bun run scripts/vendor-injected.ts`
 
 ## Gotchas discovered (see DECISIONS #16–30)

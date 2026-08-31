@@ -18,16 +18,24 @@ for (let i = 0; i < argv.length; i++) {
 }
 const f = (k: string): string | undefined => (typeof flags[k] === "string" ? (flags[k] as string) : undefined);
 const has = (k: string) => flags[k] !== undefined;
-const sessionsDir = () => resolve(f("dir") ?? process.env.DISCO_SESSIONS_DIR ?? join(process.cwd(), "sessions"));
+const appsDir = () => resolve(f("dir") ?? process.env.DISCO_APPS_DIR ?? join(process.cwd(), "apps"));
+const storeDirFor = (product: string) => join(appsDir(), product, "store");
 const out = (o: unknown) => console.log(typeof o === "string" ? o : JSON.stringify(o, null, has("compact") ? 0 : 2));
 const die = (m: string, code = 1): never => { console.error(m); process.exit(code); };
+const hasStore = (d: string) => existsSync(join(d, "store.sqlite")) || existsSync(join(d, "manifest.json"));
 
-function sessionDir(nameOrDir?: string): string {
-  const s = nameOrDir ?? f("session") ?? process.env.DISCO_SESSION;
-  if (s) { if (existsSync(join(s, "manifest.json"))) return resolve(s); const d = join(sessionsDir(), s); if (existsSync(join(d, "manifest.json"))) return d; die(`no session "${s}" (looked in ${sessionsDir()})`); }
-  const cur = join(sessionsDir(), ".current");
-  if (existsSync(cur)) { const d = join(sessionsDir(), readFileSync(cur, "utf8").trim()); if (existsSync(join(d, "manifest.json"))) return d; }
-  return die(`no current session; run \`disco session new <name> --attach <port> --scope <url-part>\` or pass --session`);
+/** Resolve a selector to a product's STORE dir (apps/<product>/store). Accepts a product name, a path, or the current app. */
+function sessionDir(sel?: string): string {
+  const s = sel ?? f("app") ?? f("session") ?? process.env.DISCO_APP ?? process.env.DISCO_SESSION;
+  if (s) {
+    if (hasStore(s)) return resolve(s);                              // a path to a store dir
+    if (hasStore(join(s, "store"))) return resolve(join(s, "store")); // a path to a product home
+    const d = storeDirFor(s); if (hasStore(d)) return d;             // a product name
+    die(`no app "${s}" (looked in ${appsDir()})`);
+  }
+  const cur = join(appsDir(), ".current");
+  if (existsSync(cur)) { const d = storeDirFor(readFileSync(cur, "utf8").trim()); if (hasStore(d)) return d; }
+  return die(`no current app; run \`disco session new <product> --attach <port> --scope <url-part>\` or pass --app <product>`);
 }
 async function client(dir = sessionDir()): Promise<RpcClient> {
   const sock = join(dir, "daemon.sock");
@@ -38,12 +46,12 @@ async function withClient<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> { con
 
 const HELP = `disco — discovery daemon CLI
 
-session new <name> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--fg]
-session end [name]            stop the daemon (store stays)
-session ls | info             list sessions / show current session info
+session new <product> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--run name] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--fg]
+session end [product]         end current run; next 'session new' starts another
+session ls | info             list apps (runs per app) / current run info
 targets                       scoped targets + frames
 tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
-sql "<query>" [--json]        query the store directly (read-only; works with the daemon down)
+sql [<product>] <query> [--json]  query one app whole history (all runs, tagged by run); read-only
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
 families [--mark-read F] [--ambient F] [--not-ambient F]
 idle [ms]                     idle-observe to warm the ambient classifier
@@ -52,7 +60,7 @@ blob <hash> [--out file]      copy a blob out / print text
 eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
 cdp <Method> [json params] [--target id | --browser]
 act ... settle ... watch ...  (Slice 2)
-All session-selecting commands accept --session <name|dir> or DISCO_SESSION; sessions live in --dir / DISCO_SESSIONS_DIR / ./sessions.`;
+Select an app via --app <product> (or --session / DISCO_APP / the current app). One home per app: apps/<product>/ (committed pack) + apps/<product>/store/ (gitignored history: one run-tagged SQLite + blobs + stream.jsonl).`;
 
 const cmd = pos[0];
 switch (cmd) {
@@ -61,11 +69,12 @@ switch (cmd) {
   case "session": {
     const sub = pos[1];
     if (sub === "new") {
-      const name = pos[2] ?? die("session new <name>");
-      const dir = join(sessionsDir(), name);
-      if (existsSync(join(dir, "manifest.json"))) die(`session "${name}" already exists at ${dir}`);
+      const product = pos[2] ?? die("session new <product>");
+      const dir = storeDirFor(product);
+      if (existsSync(join(dir, "daemon.sock"))) die(`an active run already exists for "${product}" (one run per app at a time) — \`disco session end ${product}\` first, or reconnect`);
       mkdirSync(dir, { recursive: true });
-      const daemonArgs = ["--dir", dir, "--name", name];
+      const runName = f("run") ?? new Date().toISOString().replace(/[:.]/g, "-").slice(0, 16);
+      const daemonArgs = ["--dir", dir, "--name", runName, "--product", product];
       let launchedPid: number | undefined;
       if (has("launch")) {
         const l = await launchChromium({ headless: has("headless"), userDataDir: join(dir, "profile"), url: f("url") });
@@ -99,7 +108,7 @@ switch (cmd) {
       if (f("state") && !has("launch")) console.error("--state only applies with --launch");
       if (has("fg")) {
         const p = Bun.spawn(["bun", daemonPath, ...daemonArgs, "--fg"], { stdout: "inherit", stderr: "inherit", stdin: "ignore" });
-        writeFileSync(join(sessionsDir(), ".current"), name);
+        writeFileSync(join(appsDir(), ".current"), product);
         await p.exited; break;
       }
       const setsid = Bun.which("setsid");
@@ -109,11 +118,11 @@ switch (cmd) {
       const sock = join(dir, "daemon.sock");
       const t0 = Date.now();
       while (!existsSync(sock)) { if (Date.now() - t0 > 15000) die(`daemon did not start; see ${join(dir, "daemon.out")}`); await new Promise((r) => setTimeout(r, 100)); }
-      writeFileSync(join(sessionsDir(), ".current"), name);
+      writeFileSync(join(appsDir(), ".current"), product);
       const c = await RpcClient.connect(sock);
       if (f("state") && has("launch")) { await c.call("state.restore", { state: JSON.parse(readFileSync(f("state")!, "utf8")) }); console.error("storage state restored"); }
       const info = await c.call("session.info");
-      console.error(`session "${name}" started (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
+      console.error(`app "${product}" — run ${info.manifest.run} ${info.resumed ? "(resumed)" : "(new)"} (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
       for (const t of info.targets) console.error(`  ${t.targetId.slice(0, 8)} ${t.type} ${t.url}`);
       if (!has("no-idle")) {
         const ms = Number(f("idle-ms") ?? defaults.idleObserveMs);
@@ -123,17 +132,24 @@ switch (cmd) {
         for (const fam of r.families) console.error(`  ${fam.ambient ? "ambient " : "        "} ${fam.family} ×${fam.count}${fam.reason ? " " + fam.reason : ""}`);
       }
       c.close();
-      out({ name, dir, pid: launchedPid, sock });
+      out({ product, run: info.manifest.run, dir, pid: launchedPid, sock });
     } else if (sub === "end") {
       const dir = sessionDir(pos[2]);
       const c = await client(dir); await c.call("session.end"); c.close();
       const t0 = Date.now(); while (existsSync(join(dir, "daemon.sock")) && Date.now() - t0 < 10000) await new Promise((r) => setTimeout(r, 100));
-      console.error(`session ended: ${dir}`);
+      console.error(`run ended: ${dir}`);
     } else if (sub === "ls") {
-      const root = sessionsDir();
+      const root = appsDir();
       if (!existsSync(root)) { out([]); break; }
       const cur = existsSync(join(root, ".current")) ? readFileSync(join(root, ".current"), "utf8").trim() : null;
-      for (const n of readdirSync(root)) { if (!existsSync(join(root, n, "manifest.json"))) continue; const m = readManifest(join(root, n)); console.log(`${n === cur ? "*" : " "} ${n.padEnd(24)} ${m.mode.padEnd(7)} ${existsSync(join(root, n, "daemon.sock")) ? "running" : "stopped"} ${m.startedWall} scope=${m.scope ?? "all"}`); }
+      for (const product of readdirSync(root)) {
+        const dir = storeDirFor(product);
+        if (!existsSync(join(dir, "store.sqlite"))) continue;
+        const st = openStore(dir); const runs = st.runs(); st.close();
+        const running = existsSync(join(dir, "daemon.sock"));
+        const last = runs[0];
+        console.log(`${product === cur ? "*" : " "} ${product.padEnd(20)} ${String(runs.length).padStart(3)} run(s)  ${running ? "running" : "stopped"}  last: ${last ? last.started_wall + (last.ended_wall ? "" : " (open)") : "-"}`);
+      }
     } else if (sub === "info") {
       out(await withClient((c) => c.call("session.info")));
     } else die("session new|end|ls|info");
@@ -166,8 +182,9 @@ switch (cmd) {
   }
 
   case "sql": {
-    const q = pos[1] ?? die('sql "<query>"');
-    const s = openStore(sessionDir());
+    // "disco sql <query>" (current app) or "disco sql <product> <query>"
+    const q = (pos[2] ?? pos[1]) ?? die("sql [<product>] <query>");
+    const s = openStore(pos[2] ? sessionDir(pos[1]) : sessionDir());
     let rows: any[] = [];
     try { rows = s.sql(q); } catch (e) { s.close(); die("sql error: " + (e as Error).message + "  (schema: schema.sql, or: disco sql \"SELECT name FROM sqlite_master WHERE type=" + String.fromCharCode(39) + "table" + String.fromCharCode(39) + "\")"); }
     if (has("json")) out(rows);
