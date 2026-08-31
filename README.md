@@ -63,7 +63,7 @@ s.close();
    s.click|rightclick|dblclick|middleclick|hover(target, opts)   s.type(target, text, opts) appends   s.fill(target, text, opts) replaces ("" clears)
    s.press(key, opts)   s.scroll({ target?, deltaY? }, opts)   s.select(target, value, opts)   s.navigate(url, opts)   s.drag(target, to | {dx,dy}, opts)
    opts = { frame?, targetId?, budgetMs?, quietMs?, noEffectMs?, maxBudgetMs?, evaluateAfter?, evaluateAfterArg?, world?, until?, expect? }
-   s.watch(pred, { budgetMs?, frame? }) → { matched, elapsedMs, … }      s.awaitSettlement({ action?, budgetMs?, frame? }) → Report
+   s.watch(pred, { budgetMs?, frame? }) → { matched, elapsedMs, … }      s.awaitSettlement / s.settle({ action?, budgetMs?, frame? }) → Report
    s.evaluate(fn, { args?: any[], frame?, targetId?, world? }) → value     ← args is an ARRAY of positional parameters: fn(a, b) ← args: [a, b]
    s.note(text, { kind?, name?, action?, data? })   s.targets()   s.info()   s.screenshot()   s.families()   s.idle(ms?)   s.focusTarget(id)
    s.rules()   s.ignore(urlPart)   s.attend(urlPart)   s.mute(name, { selector?, text?, url? })   s.unrule(id)     ← per-app overrides, persist across runs

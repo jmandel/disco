@@ -27,7 +27,7 @@ sentinels shots sse_events targets websockets ws_frames
   select(target: string, value: string, o: ActOptions = {})
   navigate(url: string, o: ActOptions = {})
   drag(target: string, to: string | { dx: number; dy: number }, o: ActOptions = {})
-  awaitSettlement(o: { action?: string; budgetMs?: number; frame?: string } = {}): Promise<Report>
+  awaitSettlement(o: { action?, budgetMs?, frame? }) → Report            settle(o) — alias (the CLI verb is `disco settle`)
   watch(pred: Omit<WatchPred, "fn"> & { fn?: PageFn }, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult>
   note(text: string, o: { kind?: "state" | "transition" | "ledger" | "note"; name?: string; action?: string; data?: unknown } = {})
   targets()
@@ -55,20 +55,25 @@ Layer 1 (`lib/`): `nav.ts` — `until(s, pred, {budgetMs, frame, msg})`, `reache
 ```
 disco — discovery daemon CLI
 
-session new <product> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--run name] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--fg]
+session new <product> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--run name] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--ignore <url-part>]… [--fg]
+                              (open the app in the browser FIRST: the 30s idle observation learns its ambient traffic; skipped when nothing is scoped)
 session end [product]         end current run; next 'session new' starts another
 session ls | info             list apps (runs per app) / current run info
-targets                       scoped targets + frames
+targets                       scoped targets + frames (primary = where act/watch/eval/screenshot go without --target)
+focus <id-prefix|url-part>    make another scoped page the primary target
 tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
-sql [<product>] <query> [--json]  query one app whole history (all runs, tagged by run); read-only
+schema [table]                the store's tables + columns (what sql can select)
+sql [<product>] <query> [--json|--wide]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; cells cut at 60 chars (--wide: 200; --json: all)
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
-families [--mark-read F] [--ambient F] [--not-ambient F]
-idle [ms]                     idle-observe to warm the ambient classifier
+families [--mark-read F] [--ambient F|url-part] [--not-ambient F|url-part] [--forget]   learned families + evidence; a url-part becomes a persistent rule
+rules [--remove id] [--json]  per-app overrides: attribution rules + sentinel mutes (persist across runs)
+sentinels [--mute name [--selector s] [--text t] [--url u]] [--unmute id]   mute noisy sentinels (recorded, not reported)
+idle [ms] [--json]            idle-observe to warm the ambient classifier; prints the ambient digest (--json: full families)
 screenshot [--out file.jpg]   capture now; prints the blob hash
-blob <hash> [--out file]      copy a blob out / print text
+blob|body <hash|prefix> [--out file]  copy a blob out / print text (any hash argument accepts a prefix, e.g. the 12-char handles in reports)
 eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
 cdp <Method> [json params] [--target id | --browser]
-act <kind> [target] [--frame f] [--budget ms] [--eval "fn"] [--until sel|--until-fn "fn"|--until-url part] [--until-budget ms] [--json]
+act <kind> [target] [--frame f] [--target id-prefix|url-part] [--budget ms] [--eval "fn"] [--until sel [--until-visible] | --until-fn "fn" | --until-url part [--until-landed]] [--until-budget ms] [--until-tail ms] [--json]
                               kind: click|rightclick|dblclick|middleclick|hover|type(--text)|fill(--text, replaces)|press(key)|scroll|select(--value)|navigate(url)|drag(--to|--to-dx/--to-dy)
 settle [--action act:N] [--budget ms]   re-arm / extend settlement without acting
 watch <selector> [--visible] | --url-like part [--landed] | --fn "fn" [--fn-arg json] [--budget ms]   evidence-driven wait; diagnosis on expiry

@@ -30,3 +30,12 @@ Observed vs inferred is explicit. `n` is how many times I saw it in run 1 (acts 
 | 16 | `targets.late = 1` even in `--launch --url` mode, and `GET /` is missing from run 1's requests | n=1 | **Inferred:** the daemon attaches after the launch navigation has begun, so the top-level document is an unobserved prefix even in launch mode (the docs say launch mode avoids this) | re-launch with `--no-idle` and compare; or `s.navigate` once after attach (which *did* capture `GET /`, act:31/act:45) |
 | 17 | The child window at `/child.html` | n=1 | **Unobserved:** never focused or driven | `s.focusTarget(<id>)`, census its DOM/wire, check cookie + WS sharing |
 | 18 | Cold-load hydration | n≈15 fills/types | **Unobserved** — no swallowed keystroke seen, but every one of those was on a warm page | `navigate` then `fill` in the same breath, repeatedly |
+
+## Addenda from stranger #4 (Fable, 2026-08-31 — friction-stranger4.md; same app, same prompt, 22/22)
+
+| # | What | n | Evidence |
+|---|---|---|---|
+| A1 | `POST /ctl` changes apply LIVE over the WebSocket (a `{type:"ctl",state}` frame), no reload; `POST /ctl/reset` restores defaults the same way | observed throughout its run | its acts 12–46 |
+| A2 | **Layout shift can swallow a click**: a `#gql-query` click reached nothing (0 requests) because the SSE log above it grew between resolve and dispatch; its `graphql()` retries once | 1/2 | its act:27 vs act:35 |
+| A3 | "Stay signed in" RE-ARMS the idle timer; only `ctl {timeoutMs:0}` disarms it, and an already-open dialog survives that | n=2 | its act:58–61 |
+| A4 | `push:"poll"` delivers nothing unless `notify:true` (the long-poll loop is client-gated); with it, 66 ms | n=2 | its ledger row 5 |
