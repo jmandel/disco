@@ -205,8 +205,10 @@ inactivity", and `button#stay` "Stay signed in" (removes it, resets the timer).
 
 ### 13. No-op (`#s-13`)
 `button#noop` "Do nothing" — no handler, no visual change, and deliberately excluded from
-the WS action wiring (see 6).
-**G§4.2, §2.1** — fast `no-effect` verdict.
+the WS action wiring (see 6). `button#noop-disabled` "Disabled" is `disabled` and, via the
+stylesheet's `button:disabled { pointer-events: none }`, hit-tests to its parent — the disabled-control
+trap: `elementFromPoint` returns an ancestor, not the button.
+**G§4.2, §2.1, §8** — fast `no-effect` verdict; the disabled control is a `not-interactable` diagnosis, not `occluded`.
 
 ### 14. Delete — write endpoint (`#s-14`)
 `button#delete` "Delete item" → `DELETE /api/item/1` → `{deleted:1}` → `#delete-result`

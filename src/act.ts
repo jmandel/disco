@@ -153,7 +153,11 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
           const hit = await sel.hitCheck(frame, p.target);
           if (!hit.ok) {
             if (hit.hit && attempt === 0 && /detach|gone/i.test(hit.hit)) throw new RpcError(-32013, "detached");
-            return fail(await diagnose(d, frame, root, "occluded", { occludedBy: hit.hit }), resolved);
+            // not-interactable: the element itself can't take the click (don't retry-clear an "occluder");
+            // not-hittable: a strict ancestor is on the point but the element is fine (odd; name it honestly);
+            // occluded: a genuinely different element is on top.
+            const reason = hit.notInteractable ? "not-interactable" : hit.ancestor ? "not-hittable" : "occluded";
+            return fail(await diagnose(d, frame, root, reason, { occludedBy: reason === "occluded" ? hit.hit : undefined, over: reason !== "occluded" ? hit.hit : undefined, interact: hit.interact }), resolved);
           }
           point = hit.point!;
           didScroll = !!hit.scrolled;

@@ -102,7 +102,8 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
 
 function printDiagnosis(dg: any) {
   if (!dg) return;
-  console.log(`  ✗ ${dg.reason}${dg.error ? ": " + dg.error : ""}${dg.occludedBy ? " — occluded by " + dg.occludedBy : ""}`);
+  const why = dg.interact ? Object.entries(dg.interact).filter(([k, v]) => (k === "disabled" || k === "ariaDisabled") ? v : (k === "pointerEvents" && v === "none") || (k === "visibility" && v === "hidden") || ((k === "w" || k === "h") && v === 0)).map(([k, v]) => `${k}=${v}`).join(", ") : "";
+  console.log(`  ✗ ${dg.reason}${dg.error ? ": " + dg.error : ""}${dg.occludedBy ? " — occluded by " + dg.occludedBy : ""}${dg.reason === "not-interactable" ? `  — the element can't take the click (${why || "not interactable"})${dg.over ? `; the point resolves to ${dg.over}` : ""}` : dg.reason === "not-hittable" && dg.over ? ` — the point resolves to an ancestor ${dg.over}, not the element` : ""}`);
   if (dg.candidates?.length) console.log(`    near matches: ${dg.candidates.slice(0, 6).join(" | ")}`);
   if (dg.census?.dialogs?.length) console.log(`    open dialogs: ${dg.census.dialogs.map((x: any) => x.title || x.sel).join("; ")}`);
   if (dg.pendingRequests?.length) console.log(`    pending: ${dg.pendingRequests.join("; ")}`);

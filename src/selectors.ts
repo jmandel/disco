@@ -94,8 +94,8 @@ export class Selectors {
   }
 
   /** Where would a click at the element's center actually land? "ok" or a description of the occluder. */
-  async hitCheck(frame: FrameInfo, selector: string): Promise<{ ok: boolean; point?: { x: number; y: number }; hit?: string; scrolled?: boolean }> {
-    const r = await this.call<{ ok: boolean; x?: number; y?: number; hit?: string; err?: string; scrolled?: boolean }>(frame,
+  async hitCheck(frame: FrameInfo, selector: string): Promise<{ ok: boolean; point?: { x: number; y: number }; hit?: string; scrolled?: boolean; ancestor?: boolean; notInteractable?: boolean; interact?: Record<string, unknown> }> {
+    const r = await this.call<{ ok: boolean; x?: number; y?: number; hit?: string; err?: string; scrolled?: boolean; ancestor?: boolean; notInteractable?: boolean; interact?: Record<string, unknown> }>(frame,
       `function (sel) {
         const el = this.querySelectorAll(this.parseSelector(sel), document)[0];
         if (!el) return { ok: false, err: "gone" };
@@ -111,11 +111,20 @@ export class Selectors {
         const h = document.elementFromPoint(x, y);
         const lab = h && h.closest ? h.closest("label") : null;
         if (lab && (lab.control === el || (el.labels && Array.from(el.labels).includes(lab)) || lab.contains(el))) return { ok: true, x, y, scrolled, viaLabel: true };
-        return { ok: false, x, y, scrolled, hit: res && res.hitTargetDescription ? res.hitTargetDescription : String(res) };
+        // Not hit: is the element ITSELF unable to receive the click (disabled / aria-disabled / pointer-events:none /
+        // zero-size / hidden), or is a genuinely different element on top? Chromium doesn't hit-test a
+        // pointer-events:none control, so elementFromPoint returns the element's own ANCESTOR — reporting that as
+        // "occluded by <your parent>" is a confidently wrong cue for actIfPresent-then-retry, which can never clear
+        // a disabled control (gauntlet §13 #noop-disabled). Carry the facts that explain it (GUIDANCE §2.2, DECISIONS #48).
+        const cs = getComputedStyle(el);
+        const interact = { disabled: !!el.disabled || el.getAttribute("disabled") !== null, ariaDisabled: el.getAttribute("aria-disabled") === "true", pointerEvents: cs.pointerEvents, visibility: cs.visibility, display: cs.display, w: Math.round(r.width), h: Math.round(r.height) };
+        const notInteractable = interact.disabled || interact.ariaDisabled || cs.pointerEvents === "none" || r.width < 1 || r.height < 1 || cs.visibility === "hidden";
+        const ancestor = !!(h && h !== el && h.contains(el));
+        return { ok: false, x, y, scrolled, hit: res && res.hitTargetDescription ? res.hitTargetDescription : String(res), ancestor, notInteractable, interact };
       }`, [selector]);
     const v = r.value!;
     if (v.err === "gone") throw new RpcError(-32013, "element detached during hit check");
-    return { ok: v.ok, point: v.x !== undefined ? { x: v.x, y: v.y! } : undefined, hit: v.hit, scrolled: v.scrolled };
+    return { ok: v.ok, point: v.x !== undefined ? { x: v.x, y: v.y! } : undefined, hit: v.hit, scrolled: v.scrolled, ancestor: v.ancestor, notInteractable: v.notInteractable, interact: v.interact };
   }
 
   /** Element state probe (visible/enabled/editable) via injected elementState. */

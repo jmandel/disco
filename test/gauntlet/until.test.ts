@@ -85,6 +85,21 @@ describe("kinds and predicates", () => {
     await s.fill("#search", "");    expect(await value()).toBe("");
   }, 15000);
 
+  test("a disabled control is a `not-interactable` diagnosis with the facts, not `occluded by <its own parent>`", async () => {
+    const r = await s.click("#noop-disabled");
+    expect(r.verdict).toBe("diagnosis");
+    expect(r.diagnosis!.reason).toBe("not-interactable");                 // NOT "occluded"
+    expect(r.diagnosis!.interact!.disabled).toBe(true);
+    expect(r.diagnosis!.interact!.pointerEvents).toBe("none");            // the fact that explains it (GUIDANCE §2.2)
+    expect(r.diagnosis!.occludedBy).toBeUndefined();                     // never names the element's own ancestor as an occluder
+    // contrast: a genuinely different element on top is still `occluded`
+    await s.evaluate(() => { const o = document.createElement("div"); o.id = "ovl-test"; Object.assign(o.style, { position: "fixed", inset: "0", zIndex: "9999" }); document.body.appendChild(o); });
+    const occ = await s.click("#load-chart");
+    expect(occ.diagnosis!.reason).toBe("occluded");
+    expect(occ.diagnosis!.occludedBy).toContain("ovl-test");
+    await s.evaluate(() => document.getElementById("ovl-test")?.remove());
+  }, 15000);
+
   test("Cookie / Set-Cookie headers are captured (ExtraInfo events merged into the request rows)", async () => {
     try {
       await s.navigate(env.gauntlet.origin + "/login.html", { until: { selector: "#login", visible: true } });

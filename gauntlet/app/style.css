@@ -62,3 +62,5 @@ iframe { width: 45%; height: 160px; border: 1px solid #999; vertical-align: top;
 #sort-list { list-style: none; margin: 8px 0; padding: 0; width: 140px; }
 #sort-list li { border: 1px solid #999; background: #f8f8f8; margin: 2px 0; padding: 3px 10px; cursor: grab; user-select: none; }
 #sort-list li.dragging { opacity: .5; }
+/* disabled controls usually get pointer-events:none, so elementFromPoint returns the ANCESTOR (§13, disabled-control diagnosis) */
+button:disabled { pointer-events: none; opacity: .5; }

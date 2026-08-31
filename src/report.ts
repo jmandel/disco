@@ -31,7 +31,7 @@ export interface Report {
   cursor: { from: number; to: number };
   diagnosis?: Diagnosis;
 }
-export interface Diagnosis { reason: "not-found" | "occluded" | "detached" | "budget-expired" | "frame-not-found" | "error"; error?: string; candidates?: string[]; occludedBy?: string; census?: unknown; pendingRequests?: string[]; domActive?: boolean; shot?: string | null }
+export interface Diagnosis { reason: "not-found" | "occluded" | "not-interactable" | "not-hittable" | "detached" | "budget-expired" | "frame-not-found" | "error"; error?: string; candidates?: string[]; occludedBy?: string; over?: string /* the ancestor/element the point resolved to, when not a true occlusion */; interact?: Record<string, unknown> /* disabled/aria-disabled/pointer-events/visibility/size — why the element can't take the click */; census?: unknown; pendingRequests?: string[]; domActive?: boolean; shot?: string | null }
 
 export interface BuildInput {
   actionId: string; kind: string; spec: Record<string, unknown>;

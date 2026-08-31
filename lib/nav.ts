@@ -71,6 +71,7 @@ export const describePred = (p: Pred): string => p.any ? `any(${p.any.map(descri
 /** One line of a diagnosis for error messages: reason, near-matches, what was pending. */
 export function diagnosisLine(dg?: Diagnosis): string {
   if (!dg) return "";
-  const bits = [dg.reason, dg.error, dg.occludedBy && `occluded by ${dg.occludedBy}`, dg.candidates?.length ? `near: ${dg.candidates.slice(0, 4).join(" | ")}` : "", dg.pendingRequests?.length ? `pending: ${dg.pendingRequests.slice(0, 3).join("; ")}` : "", dg.domActive && "dom still mutating"].filter(Boolean);
+  const interact = dg.interact ? Object.entries(dg.interact).filter(([k, v]) => (k === "disabled" || k === "ariaDisabled") ? v : (k === "pointerEvents" && v === "none") || (k === "visibility" && v === "hidden")).map(([k, v]) => `${k}=${v}`).join(", ") : "";
+  const bits = [dg.reason, dg.error, dg.occludedBy && `occluded by ${dg.occludedBy}`, dg.reason === "not-interactable" && (interact || "element can't take the click"), dg.reason === "not-hittable" && dg.over && `point resolves to ancestor ${dg.over}`, dg.candidates?.length ? `near: ${dg.candidates.slice(0, 4).join(" | ")}` : "", dg.pendingRequests?.length ? `pending: ${dg.pendingRequests.slice(0, 3).join("; ")}` : "", dg.domActive && "dom still mutating"].filter(Boolean);
   return ` — ${bits.join("; ")}`;
 }
