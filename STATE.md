@@ -48,6 +48,8 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - Stranger #3 (Opus) characterized the gauntlet as an unknown app from `prompts/characterize-app.md` (the general prompt):
   15m37s, 25/25, all 26 sections mapped, the `/ctl` control plane found unaided — pack adopted; fold-back: launch mode
   observes the document load (act:1), `scroll({target})`, `connect()` resolution, two doc items (DECISIONS #46).
+- Stranger #4 (Fable) on the same gauntlet job: 14m48s, 22/22, comparable pack; fold-back: launch navigate retry + CLI test,
+  Cookie/Set-Cookie captured via ExtraInfo, input/change events count as DOM activity (DECISIONS #47).
 - OPEN: query-key-aware family identity (only if rules prove insufficient).
 
 ## In progress — platform build-out (PLATFORM.md plan)

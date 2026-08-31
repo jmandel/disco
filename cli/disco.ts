@@ -135,7 +135,13 @@ switch (cmd) {
       let info = await c.call("session.info");
       if (has("launch") && f("url")) {
         // launched on about:blank; navigate now that the daemon is attached, so the document load is observed as act:1
-        const nav = await c.call("act", { kind: "navigate", url: f("url"), budgetMs: 8000, maxBudgetMs: 12000, until: { fn: "() => document.readyState === \"complete\"", budgetMs: 20000, tailMs: 1500 } }, 90000).catch((e: Error) => { console.error(`navigate failed: ${e.message}`); return null; });
+        // the blank tab's frame tree lands a beat after attach: retry "main frame not known yet" for up to 5s
+        let nav: any = null;
+        for (let i = 0; i < 25 && !nav; i++) {
+          nav = await c.call("act", { kind: "navigate", url: f("url"), budgetMs: 8000, maxBudgetMs: 12000, until: { fn: "() => document.readyState === \"complete\"", budgetMs: 20000, tailMs: 1500 } }, 90000)
+            .catch(async (e: Error) => { if (/main frame not known/.test(e.message) && i < 24) { await new Promise((r) => setTimeout(r, 200)); return null; } console.error(`navigate failed: ${e.message}`); return false; });
+          if (nav === false) { nav = null; break; }
+        }
         if (nav) console.error(`${nav.action}  navigate ${f("url")}  →  ${nav.verdict}${nav.settle ? ` (settled ${nav.settle.ms}ms; ${nav.settle.counts?.requests ?? 0} req)` : ""}`);
         info = await c.call("session.info");
       }

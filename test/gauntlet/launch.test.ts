@@ -19,3 +19,28 @@ describe("launch", () => {
     } finally { await b.kill(); }
   }, 30000);
 });
+
+describe("session new --launch --url", () => {
+  test("the document load is observed as act:1 (about:blank first, then navigate after attach)", async () => {
+    const { startGauntlet } = await import("../../gauntlet/server.ts");
+    const g = await startGauntlet({ port: 0 });
+    const appsDir = join(SCRATCH, "test", `launchurl-${Date.now().toString(36)}`);
+    mkdirSync(appsDir, { recursive: true });
+    const env = { ...process.env, DISCO_APPS_DIR: appsDir };
+    const cli = join(import.meta.dir, "..", "..", "cli", "disco.ts");
+    try {
+      const p = Bun.spawn(["bun", cli, "session", "new", "lu", "--launch", "--headless", "--url", g.origin + "/", "--scope", `localhost:${g.port}`, "--no-idle"], { env, stdout: "pipe", stderr: "pipe" });
+      const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]); await p.exited;
+      expect(err).toContain("act:1  navigate");
+      expect(err).not.toContain("navigate failed");
+      const q = Bun.spawnSync(["bun", cli, "sql", "lu", "SELECT path, attribution, action_id FROM requests WHERE path='/'", "--json"], { env });
+      const rows = JSON.parse(q.stdout.toString());
+      expect(rows.length).toBe(1);
+      expect(rows[0].action_id).toBe("act:1");
+      expect(out.length + err.length).toBeGreaterThan(0);
+    } finally {
+      Bun.spawnSync(["bun", cli, "session", "end", "lu"], { env });
+      await g.stop();
+    }
+  }, 60000);
+});

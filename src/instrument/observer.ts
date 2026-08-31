@@ -113,6 +113,11 @@ function observerMain(bindingName: string, batchMs: number) {
     }
     if (!timer) timer = setTimeout(flush, batchMs);
   });
+  // A typed value is a DOM state change the MutationObserver cannot see (a property, not an attribute): count
+  // input/change events as activity, or a fill whose repaint falls under the visual tile threshold reads
+  // `no-effect` beside a UI delta that shows the value landed (stranger #4 friction #3).
+  const onInput = (ev: Event) => { lastT = nowEpoch(); pending++; text++; if (roots.size < 8 && ev.target instanceof Element) roots.add(cheapSel(ev.target)); if (!timer) timer = setTimeout(flush, batchMs); };
+  document.addEventListener("input", onInput, true); document.addEventListener("change", onInput, true);
   const start = () => { mo.observe(document.documentElement || document, { subtree: true, childList: true, attributes: true, characterData: true }); flush(); };
   if (document.documentElement) start(); else document.addEventListener("DOMContentLoaded", start, { once: true });
 

@@ -13,6 +13,10 @@ export function handleNetwork(d: Daemon, t: TargetState, e: CdpEvent): void {
   const p = e.params;
   switch (e.method) {
     case "Network.requestWillBeSent": return onRequest(d, t, p as RequestWillBeSent);
+    // The plain events omit Cookie / Set-Cookie; the *ExtraInfo events carry the raw headers (stranger #4 friction #2).
+    // They may arrive before or after their request row exists — merge either way.
+    case "Network.requestWillBeSentExtraInfo": return mergeHeaders(d, String(p.requestId), "req_headers", p.headers ?? {});
+    case "Network.responseReceivedExtraInfo": return mergeHeaders(d, String(p.requestId), "resp_headers", p.headers ?? {});
     case "Network.responseReceived": return onResponse(d, t, p as ResponseReceived);
     case "Network.loadingFinished": { void onFinished(d, t, p as LoadingFinished); return; }
     case "Network.loadingFailed": return onFailed(d, t, p as LoadingFailed);
@@ -92,7 +96,7 @@ function onRequest(d: Daemon, t: TargetState, p: RequestWillBeSent) {
   d.store.insert("requests", {
     id, target_id: t.targetId, frame_id: p.frameId ?? null, t_start: tStart, method: p.request.method, url: p.request.url, host: a.host, path: a.path, family: a.family,
     resource_type: p.type ?? null, initiator_type: p.initiator?.type ?? null, initiator: initiator ? JSON.stringify(initiator) : null,
-    req_headers: JSON.stringify(p.request.headers ?? {}), req_body: p.request.postData ? p.request.postData.slice(0, 100_000) : null,
+    req_headers: JSON.stringify({ ...(p.request.headers ?? {}), ...(takeParkedHeaders(p.requestId)?.req ?? {}) }), req_body: p.request.postData ? p.request.postData.slice(0, 100_000) : null,
     body_state: "pending", redirect_from: redirectFrom, action_id: actionId, attribution, write_kind: a.writeKind,
   });
   const inf: InflightRequest = { id, targetId: t.targetId, frameId: p.frameId ?? null, url: p.request.url, family: a.family, tStart, actionId, attribution, resourceType: p.type, method: p.request.method, writeKind: a.writeKind };
@@ -109,7 +113,12 @@ function onResponse(d: Daemon, t: TargetState, p: ResponseReceived) {
   if (!inf) return; // unknown id (e.g. a data: URL we never recorded)
   const streaming = p.type === "EventSource" || /event-stream/i.test(r.mimeType ?? "");
   if (inf) { inf.mime = r.mimeType; inf.status = r.status; inf.streaming = streaming; }
-  d.store.update("requests", { t_response: at, status: r.status, status_text: r.statusText, mime: r.mimeType, resp_headers: JSON.stringify(r.headers ?? {}), from_cache: r.fromDiskCache ? 1 : 0, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
+  // resp_headers: the plain event's headers UNDER whatever the *ExtraInfo event already merged (raw headers incl. set-cookie)
+  const prevRow = d.store.get<{ h: string | null }>("SELECT resp_headers h FROM requests WHERE id=?", id);
+  let prevH: Record<string, string> = {}; try { prevH = JSON.parse(prevRow?.h ?? "{}"); } catch {}
+  const parked = takeParkedHeaders(p.requestId)?.resp ?? {};
+  const respH: Record<string, string> = {}; for (const [k, v] of Object.entries(r.headers ?? {})) respH[k.toLowerCase()] = String(v); for (const src of [prevH, parked]) for (const [k, v] of Object.entries(src)) respH[k.toLowerCase()] = String(v);
+  d.store.update("requests", { t_response: at, status: r.status, status_text: r.statusText, mime: r.mimeType, resp_headers: JSON.stringify(respH), from_cache: r.fromDiskCache ? 1 : 0, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
   if (streaming && inf) {
     // Streaming requests never "finish"; for settlement purposes they are done once headers arrive.
     d.inflight.delete(id);
@@ -205,3 +214,16 @@ function onWsFrame(d: Daemon, t: TargetState, p: WebSocketFrame, dir: "in" | "ou
 
 export function short(u: string | undefined, n = 120): string { if (!u) return ""; return u.length > n ? u.slice(0, n - 1) + "…" : u; }
 export { isTextual };
+
+/** Merge raw headers from a *ExtraInfo event into the request row's header JSON (keys lower-cased). If the row
+ *  doesn't exist yet (ExtraInfo preceded requestWillBeSent), park them and let onRequest pick them up. */
+const parkedHeaders = new Map<string, { req?: Record<string, string>; resp?: Record<string, string> }>();
+function mergeHeaders(d: Daemon, requestId: string, col: "req_headers" | "resp_headers", extra: Record<string, string>) {
+  const id = d.reqAlias.get(requestId) ?? requestId;
+  const row = d.store.get<{ h: string | null }>(`SELECT ${col} h FROM requests WHERE id=?`, id);
+  if (!row) { const p = parkedHeaders.get(requestId) ?? {}; p[col === "req_headers" ? "req" : "resp"] = extra; parkedHeaders.set(requestId, p); if (parkedHeaders.size > 500) parkedHeaders.delete(parkedHeaders.keys().next().value!); return; }
+  let cur: Record<string, string> = {}; try { cur = JSON.parse(row.h ?? "{}"); } catch {}
+  const merged: Record<string, string> = {}; for (const [k, v] of Object.entries(cur)) merged[k.toLowerCase()] = v; for (const [k, v] of Object.entries(extra)) merged[k.toLowerCase()] = String(v);
+  d.store.update("requests", { [col]: JSON.stringify(merged) }, "id=?", [id]);
+}
+export function takeParkedHeaders(requestId: string) { const p = parkedHeaders.get(requestId); parkedHeaders.delete(requestId); return p; }

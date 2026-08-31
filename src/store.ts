@@ -151,7 +151,7 @@ export function isTextual(mime: string | null | undefined): boolean {
 // Readers (client-side). Open the store directly — no daemon needed. Each helper documents its
 // desugaring so agents graduate to raw SQL/TS when the canned form falls short (GUIDANCE §6.2).
 // ---------------------------------------------------------------------------------------------
-export interface RequestRow { run: number; id: string; t_start: number; t_end: number | null; method: string; url: string; host: string; path: string; family: string; status: number | null; mime: string | null; resp_size: number | null; body_hash: string | null; body_state: string | null; action_id: string | null; attribution: string | null; write_kind: string | null; resource_type: string | null; target_id: string; frame_id: string | null }
+export interface RequestRow { run: number; id: string; t_start: number; t_end: number | null; method: string; url: string; host: string; path: string; family: string; status: number | null; mime: string | null; resp_size: number | null; body_hash: string | null; body_state: string | null; action_id: string | null; attribution: string | null; write_kind: string | null; resource_type: string | null; target_id: string; frame_id: string | null; req_headers: string | null; resp_headers: string | null; req_body: string | null }
 
 export function readManifest(dir: string): SessionManifest { return JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")); }
 

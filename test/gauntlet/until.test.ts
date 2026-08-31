@@ -85,6 +85,28 @@ describe("kinds and predicates", () => {
     await s.fill("#search", "");    expect(await value()).toBe("");
   }, 15000);
 
+  test("Cookie / Set-Cookie headers are captured (ExtraInfo events merged into the request rows)", async () => {
+    try {
+      await s.navigate(env.gauntlet.origin + "/login.html", { until: { selector: "#login", visible: true } });
+      await s.fill("#user", "disco"); await s.fill("#pass", "secret");
+      const r = await s.click("#login", { until: { urlLike: "/api/login", landed: true } });
+      await s.watch({ fn: () => location.pathname.includes("secure") }, { budgetMs: 5000 });
+      const login = s.store.requests({ urlLike: "/api/login", actionId: r.action }).at(-1)!;
+      expect(String(JSON.parse(login.resp_headers ?? "{}")["set-cookie"] ?? "")).toContain("gauntlet_auth=");
+      const secure = s.store.requests({ urlLike: "/secure.html" }).at(-1)!;
+      expect(String(JSON.parse(secure.req_headers ?? "{}")["cookie"] ?? "")).toContain("gauntlet_auth=");
+    } finally {
+      await s.navigate(env.gauntlet.origin + "/", { until: { selector: "#load-chart", visible: true } });
+      await sleep(500);
+    }
+  }, 20000);
+
+  test("fill/type in a frame that repaints below the visual threshold is still not `no-effect` (input events count as DOM activity)", async () => {
+    const r = await s.fill("#xf-name", "Linus", { frame: "xframe.html" });
+    expect(r.verdict).not.toBe("no-effect");
+    expect(r.settle!.counts.mutations).toBeGreaterThan(0);
+  }, 15000);
+
   test("scroll({ target }) wheels over the target: the container scrolls, not the page", async () => {
     await s.click("#load-rows", { until: { urlLike: "/api/rows", landed: true } });
     const before = await s.evaluate<{ el: number; win: number }>(() => ({ el: document.getElementById("rows")!.scrollTop, win: window.scrollY }));
