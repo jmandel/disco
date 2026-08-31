@@ -24,7 +24,7 @@ export interface Report {
   ui?: { added: string[]; removed: string[]; addedMore: number; removedMore: number; changedBoxes: Array<{ x: number; y: number; w: number; h: number }>; ambientChurn?: number };
   wire?: { attributed: WireItem[]; more: number; ambientInWindow: number; otherActivity: string[]; ws: number; sse: number; wsPreview?: string[]; ssePreview?: string[] };
   console?: string[];
-  env: { url: string; urlChanged?: string; navigated?: string; focus?: string | null; dialogs?: string[]; sentinels?: Array<{ name: string; title?: string; shot?: string | null; seq: number }>; writeFlag?: string[]; newTargets?: string[]; closedTargets?: string[]; classifierImmature?: boolean; castBlind?: boolean };
+  env: { url: string; urlChanged?: string; navigated?: string; focus?: string | null; dialogs?: string[]; sentinels?: Array<{ name: string; title?: string; shot?: string | null; seq: number }>; writeFlag?: string[]; newTargets?: string[]; closedTargets?: string[]; classifierImmature?: boolean; classifierIdleMs?: number; castBlind?: boolean };
   evaluateAfter?: unknown;
   shots: { pre?: string; post?: string };
   aria: { pre?: string; post?: string };
@@ -121,7 +121,7 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
     r.env.sentinels = sent.map((s) => ({ seq: s.seq, name: s.name, title: safeTitle(s.detail), shot: h16(s.shot) ?? null }));
     for (const s of sent) d.store.run("UPDATE sentinels SET reported=1 WHERE seq=?", s.seq);
   }
-  if (d.attrib.immature()) r.env.classifierImmature = true;
+  if (d.attrib.immature()) { r.env.classifierImmature = true; r.env.classifierIdleMs = Math.round(d.idleObservedMs()); }
   if (i.root.cast && !i.root.castVisible) r.env.castBlind = true;
   if (i.evaluateAfter !== undefined) r.evaluateAfter = i.evaluateAfter;
   r.cursor.to = d.store.lastSeq();

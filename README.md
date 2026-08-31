@@ -15,15 +15,21 @@ Constitution: [GUIDANCE.md](GUIDANCE.md). Construction plan: [BRIEF.md](BRIEF.md
 ```bash
 bun install
 bun gauntlet &                                  # the hostile demo SPA on :4800
-chromium --remote-debugging-port=9222 &         # or any Chromium you can attach to
+chromium --remote-debugging-port=9222 http://localhost:4800 &   # any Chromium you can attach to — SHOWING the app
 bun cli/disco.ts session new gauntlet --attach 9222 --scope localhost:4800   # -> apps/gauntlet/store/
-# open http://localhost:4800 in that browser; the daemon idle-observes ~20s to learn ambient traffic
+#   idle-observes the open page for 30s to learn its ambient traffic (skipped if nothing is scoped yet; --no-idle to skip)
 bun cli/disco.ts act click 'role=button[name="Load Chart"]' --until-fn "() => document.querySelector('#chart-status')?.textContent === 'idle'"
-#   act:1  click role=button[name="Load Chart"]  →  settled:network  (settled 112ms, reported 424ms; 3 req, 1 mut, 1 px)
-#     timing: page 545ms (settled 112, reported 424, until 130) + overhead 38ms (resolve 9, pre 15, post 11, build 3) = 583ms
-#     ✓ until: matched in 130ms  true
-#     ⇄ GET /api/slow → 200, 29B, 104ms, application/json (task)  body:373f9a1b85b0
-bun cli/disco.ts sql gauntlet "SELECT run, method, path, status FROM requests ORDER BY run, t_start"
+#   act:1  click role=button[name="Load Chart"]  →  settled:visual  (settled 872ms, reported 1172ms; 3 req, 2 mut, 5 px)
+#     timing: page 1172ms (settled 872, reported 1172, until 433) + overhead 115ms (resolve 85, pre 16, post 11, build 3) = 1287ms
+#     ✓ until: matched in 433ms  true                       ← the state you asked for arrived at 433ms (slowMs 400 + render)…
+#     + - text: "status: idle Chart loaded (3 responses)"
+#     ⇄ GET /api/slow → 200, 29B, 405ms, application/json (task)  body:e0d103b5c251
+#     ⇄ GET /api/chart/a → 200, 35B, 6ms, application/json (task)  body:e565556a7a19
+#     ⇄ GET /api/chart/b → 200, 35B, 6ms, application/json (task)  body:89cf1590e155
+#     (ambient classifier immature: 30s of 90s idle observed — `disco idle 60000` with the page open finishes it)
+#   (…while the page kept repainting until 872ms — a first action in a fresh session, before the visual
+#    ignore-mask has learned the page's perpetual spinner. The verdict is evidence; `until` is the gate.)
+bun cli/disco.ts sql gauntlet "SELECT run, method, path, status FROM requests WHERE run=(SELECT max(run) FROM runs) ORDER BY t_start"
 bun cli/disco.ts session end gauntlet
 ```
 
@@ -32,8 +38,9 @@ Or launch a managed browser: `disco session new gauntlet --launch --headless --u
 ## The three faces (descending power, ascending convenience)
 
 1. **The store.** `apps/<app>/store/store.sqlite` (WAL, one run-tagged history per app) + `blobs/` (sha256-addressed). Open it with
-   `bun:sqlite`, the `sqlite3` CLI, or `disco sql` — schema in [schema.sql](schema.sql); read it, then
-   write any SQL. Works with the daemon stopped. FTS5: `SELECT r.path FROM bodies b JOIN bodies_fts f
+   `bun:sqlite`, the `sqlite3` CLI, or `disco sql <app> "…"` — schema in [schema.sql](schema.sql); read it, then
+   write any SQL. Works with the daemon stopped. Every row carries `run`, and `t` restarts per run: filter
+   `WHERE run=(SELECT max(run) FROM runs)` for "this run". Any hash argument (`blob`, `body(…)`) accepts a prefix. FTS5: `SELECT r.path FROM bodies b JOIN bodies_fts f
    ON f.rowid=b.rowid JOIN requests r ON r.body_hash=b.hash WHERE bodies_fts MATCH '"Zebra-Row-9741"'`.
 2. **The library** (`src/client.ts`), for Bun scripts:
 
@@ -103,14 +110,16 @@ has them buffered), evicted bodies (`evicted`), late-attached targets (`targets.
 before `observed_from` is an unobserved prefix, including **WebSockets opened pre-attach**, which CDP
 cannot enumerate retroactively; reload the tab if you need their frames). Requests that begin within
 ~1.5s after a window closes on the same root are tagged `attribution=trailing` — causally downstream
-(delayed validations) but not part of settlement.
+(delayed validations) but not part of settlement. In attach mode the navigation that *creates* a tab is an
+unobserved prefix (the daemon attaches after it has begun): the document request and the first assets can
+be missing from `requests` — use `--launch --url`, or reload the tab.
 
 ## Report & watch shapes (the fields scripts should rely on)
 
 `report.wire.attributed[i]` = `{ line, m, p, s, ms, body, id, family, a }` — use the structured
 fields (`m`ethod, `p`ath, `s`tatus, `ms`, `body` = 16-char blob prefix), not the display `line`.
 `report.settle = { ms, reportedMs, timeline, counts, pending? }`; `report.cursor = { from, to }`;
-`report.until = { matched, elapsedMs, preview?|request?, diagnosis? }` when `until` was passed;
+`report.until = { matched, elapsedMs (from dispatch), preview?|request?, diagnosis? }` when `until` was passed;
 `report.timing = { resolveMs, absorbMs, preMs, settleMs, reportedMs, untilMs?, waitMs, postMs, buildMs, overheadMs, totalMs }`
 (`waitMs` + `absorbMs` = page time; `overheadMs` = daemon work).
 `watch(pred, {budgetMs, frame})` → `{ matched, elapsedMs, preview?, request?, diagnosis? }`; predicates (also

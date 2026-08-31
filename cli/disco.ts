@@ -47,19 +47,21 @@ async function withClient<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> { con
 const HELP = `disco — discovery daemon CLI
 
 session new <product> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--run name] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--fg]
+                              (open the app in the browser FIRST: the 30s idle observation learns its ambient traffic; skipped when nothing is scoped)
 session end [product]         end current run; next 'session new' starts another
 session ls | info             list apps (runs per app) / current run info
-targets                       scoped targets + frames
+targets                       scoped targets + frames (primary = where act/watch/eval/screenshot go without --target)
+focus <id-prefix|url-part>    make another scoped page the primary target
 tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
-sql [<product>] <query> [--json]  query one app whole history (all runs, tagged by run); read-only
+sql [<product>] <query> [--json]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; table cells cut at 60 chars, --json for full values
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
 families [--mark-read F] [--ambient F] [--not-ambient F]
 idle [ms]                     idle-observe to warm the ambient classifier
 screenshot [--out file.jpg]   capture now; prints the blob hash
-blob <hash> [--out file]      copy a blob out / print text
+blob <hash|prefix> [--out file]  copy a blob out / print text (any hash argument accepts a prefix, e.g. the 12-char handles in reports)
 eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
 cdp <Method> [json params] [--target id | --browser]
-act <kind> [target] [--frame f] [--budget ms] [--eval "fn"] [--until sel|--until-fn "fn"|--until-url part] [--until-budget ms] [--json]
+act <kind> [target] [--frame f] [--target id-prefix|url-part] [--budget ms] [--eval "fn"] [--until sel [--until-visible] | --until-fn "fn" | --until-url part [--until-landed]] [--until-budget ms] [--until-tail ms] [--json]
                               kind: click|rightclick|dblclick|middleclick|hover|type(--text)|fill(--text, replaces)|press(key)|scroll|select(--value)|navigate(url)|drag(--to|--to-dx/--to-dy)
 settle [--action act:N] [--budget ms]   re-arm / extend settlement without acting
 watch <selector> [--visible] | --url-like part [--landed] | --fn "fn" [--fn-arg json] [--budget ms]   evidence-driven wait; diagnosis on expiry
@@ -127,7 +129,9 @@ switch (cmd) {
       const info = await c.call("session.info");
       console.error(`app "${product}" — run ${info.manifest.run} ${info.resumed ? "(resumed)" : "(new)"} (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
       for (const t of info.targets) console.error(`  ${t.targetId.slice(0, 8)} ${t.type} ${t.url}`);
-      if (!has("no-idle")) {
+      if (!has("no-idle") && info.targets.length === 0) {
+        console.error(`0 scoped targets — skipping idle observation (nothing to learn from yet). Open the app in that browser, then \`disco idle ${defaults.idleObserveMs}\` to learn its ambient traffic.`);
+      } else if (!has("no-idle")) {
         const ms = Number(f("idle-ms") ?? defaults.idleObserveMs);
         console.error(`idle-observing ${ms}ms to learn ambient traffic (--no-idle to skip)…`);
         const r = await c.call("idle", { ms }, ms + 10000);
@@ -175,6 +179,20 @@ switch (cmd) {
 
   case "targets": out(await withClient((c) => c.call("targets"))); break;
 
+  case "focus": {
+    // make a scoped page the PRIMARY target — where act/watch/eval/screenshot go when no --target is given.
+    // (The primary is the first scoped page attached, or the last one focused; a popup that opens later can
+    // become the only page if the first is closed. `disco targets` shows `primary`.)
+    const spec = pos[1] ?? die("focus <target-id-prefix | url-part>");
+    await withClient(async (c) => {
+      const ts: any[] = await c.call("targets");
+      const t = ts.find((x) => x.targetId.startsWith(spec) || String(x.url).includes(spec)) ?? die(`focus: no scoped target matches ${JSON.stringify(spec)}`);
+      await c.call("focus", { targetId: t.targetId });
+      console.error(`primary: ${t.targetId.slice(0, 8)} ${t.url}`);
+    });
+    break;
+  }
+
   case "tail": {
     const c = await client();
     c.onEvent((ev) => console.log(JSON.stringify(ev)));
@@ -194,10 +212,12 @@ switch (cmd) {
     else if (!rows.length) console.log("(no rows)");
     else {
       const cols = Object.keys(rows[0]);
-      const w = cols.map((c) => Math.min(60, Math.max(c.length, ...rows.map((r: any) => String(r[c] ?? "").length))));
+      const MAX = 60; let cut = false;
+      const cell = (v: unknown) => { const s = String(v ?? "").replace(/\n/g, " "); if (s.length <= MAX) return s; cut = true; return s.slice(0, MAX - 1) + "…"; };
+      const w = cols.map((c) => Math.min(MAX, Math.max(c.length, ...rows.map((r: any) => String(r[c] ?? "").length))));
       console.log(cols.map((c, i) => c.padEnd(w[i])).join("  "));
-      for (const r of rows) console.log(cols.map((c, i) => String(r[c] ?? "").replace(/\n/g, " ").slice(0, 60).padEnd(w[i])).join("  "));
-      console.log(`(${rows.length} rows)`);
+      for (const r of rows) console.log(cols.map((c, i) => cell(r[c]).padEnd(w[i])).join("  "));
+      console.log(`(${rows.length} rows${cut ? `; cells cut at ${MAX} chars — --json for full values; hashes accept any prefix` : ""})`);
     }
     s.close();
     break;

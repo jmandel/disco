@@ -40,9 +40,13 @@ disco session new mysite --attach 9222 --scope example.com
 
 From the moment it attaches, disco records every request/response (bodies included), WS/SSE frame,
 console line, dialog, navigation, and a screencast — to `apps/mysite/store/` (one run-tagged SQLite + `blobs/`).
-**Let the ambient classifiers warm up** before you lean on settlement — `disco idle 120000` for an EHR
-(minute-scale heartbeats need ≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never
-record a human's mail/bank tabs.
+**Have the app open before `session new`** (attach mode): the 30-second idle observation learns the page's
+ambient traffic, and an empty browser teaches it nothing (it is skipped when nothing is scoped). **Let the
+classifiers warm up** before you lean on settlement — reports say how far along it is
+(`ambient classifier immature: 41s of 90s`); `disco idle 120000` for an EHR (minute-scale heartbeats need
+≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never record a human's mail/bank tabs.
+Multi-tab: `disco targets` shows which page is `primary` (where `act` goes); `--target <id-prefix|url-part>`
+or `disco focus` picks another — a popup can become the only page if the first tab is closed.
 
 ### 2. Explore — act, and read what happened
 
@@ -83,6 +87,10 @@ Ask retroactive questions the run never anticipated — FTS over every captured 
 disco sql mysite "SELECT run, r.path FROM bodies b JOIN bodies_fts f ON f.rowid=b.rowid
            JOIN requests r ON r.body_hash=b.hash WHERE bodies_fts MATCH 'Zebra-Row-9741'"
 ```
+
+(`disco sql <app> "…"` is the canonical spelling; `--app <app>` and the current app are equivalent. The
+store holds every run of the app and `t` restarts per run — select `run`, or filter
+`WHERE run=(SELECT max(run) FROM runs)`.)
 
 Canned helpers desugar to exactly this (`store.appearances(text)`, `store.requests({urlLike})`,
 `store.timeline(t0,t1)`, `store.diffTrace(a,b)`) — see `src/store.ts`. Record interpretations as you go

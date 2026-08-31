@@ -14,13 +14,22 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
     const c = await ctx.client();
     try { return await c.call(method, params, timeout); } finally { c.close(); }
   };
+  /** --target <id-prefix | url-part>: pick a scoped page target (multi-tab sessions) without knowing the full id. */
+  const targetId = async (): Promise<string | undefined> => {
+    if (f("target-id")) return f("target-id");
+    const spec = f("target"); if (!spec) return undefined;
+    const ts: any[] = await call("targets", {});
+    const t = ts.find((x) => x.targetId.startsWith(spec) || String(x.url).includes(spec));
+    if (!t) ctx.die(`--target ${spec}: no scoped target matches (disco targets lists them)`);
+    return t.targetId;
+  };
 
   if (cmd === "act") {
     const kind = pos[0];
-    if (!kind || !KINDS.has(kind)) ctx.die(`act <${[...KINDS].join("|")}> [target] [--text t] [--key k] [--url u] [--to sel|--to-dx N --to-dy N] [--value v] [--frame f] [--budget ms] [--eval "fn"] [--until sel | --until-fn "fn" | --until-url part] [--until-budget ms] [--json]`);
+    if (!kind || !KINDS.has(kind)) ctx.die(`act <${[...KINDS].join("|")}> [target] [--text t] [--key k] [--url u] [--to sel|--to-dx N --to-dy N] [--value v] [--frame f] [--target id-prefix|url-part] [--budget ms] [--eval "fn"] [--until sel [--until-visible] | --until-fn "fn" | --until-url part [--until-landed]] [--until-budget ms] [--until-tail ms] [--json]`);
     const p: any = {
       kind, target: pos[1], text: f("text"), key: f("key") ?? (kind === "press" ? pos[1] : undefined), url: f("url") ?? (kind === "navigate" ? pos[1] : undefined), value: f("value"),
-      to: f("to"), frame: f("frame"), targetId: f("target-id"), budgetMs: num("budget"), quietMs: num("quiet"), noEffectMs: num("no-effect"), maxBudgetMs: num("max-budget"),
+      to: f("to"), frame: f("frame"), targetId: await targetId(), budgetMs: num("budget"), quietMs: num("quiet"), noEffectMs: num("no-effect"), maxBudgetMs: num("max-budget"),
       evaluateAfter: f("eval"), world: f("world"), deltaY: num("delta-y"),
     };
     if (kind === "press") p.target = undefined;
@@ -32,12 +41,12 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
     return;
   }
   if (cmd === "settle") {
-    const report = await call("settle", { action: f("action"), budgetMs: num("budget"), frame: f("frame") });
+    const report = await call("settle", { action: f("action"), budgetMs: num("budget"), frame: f("frame"), targetId: await targetId() });
     printReport(report, flags, ctx);
     return;
   }
   if (cmd === "watch") {
-    const p: any = { selector: pos[0], visible: !!flags.visible, urlLike: f("url-like"), landed: !!flags.landed, fn: f("fn"), fnArg: f("fn-arg") !== undefined ? JSON.parse(f("fn-arg")!) : undefined, budgetMs: num("budget"), frame: f("frame") };
+    const p: any = { selector: pos[0], visible: !!flags.visible, urlLike: f("url-like"), landed: !!flags.landed, fn: f("fn"), fnArg: f("fn-arg") !== undefined ? JSON.parse(f("fn-arg")!) : undefined, budgetMs: num("budget"), frame: f("frame"), targetId: await targetId() };
     if (!p.selector && !p.urlLike && !p.fn) ctx.die('watch <selector> | --url-like part | --fn "()=>…" [--budget ms]');
     const r = await call("watch", p);
     if (flags.json) return ctx.out(r);
@@ -61,7 +70,7 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
     if (r.until.matched) console.log(`  ✓ until: matched in ${r.until.elapsedMs}ms${r.until.preview ? "  " + r.until.preview : ""}${r.until.request ? "  req " + r.until.request : ""}`);
     else { console.log(`  ✗ until: NOT matched in ${r.until.elapsedMs}ms — diagnosis:`); printDiagnosis(r.until.diagnosis); }
   }
-  if (r.diagnosis) printDiagnosis(r.diagnosis);
+  if (r.diagnosis) { printDiagnosis(r.diagnosis); if (r.env?.url) console.log(`    in: ${r.env.url}   (multi-tab? \`disco targets\`, then --target <id-prefix|url-part> or \`disco focus\`)`); }
   if (r.ui && (r.ui.added.length || r.ui.removed.length)) {
     for (const l of r.ui.added.slice(0, 10)) console.log(`  + ${l}`);
     if (r.ui.addedMore) console.log(`  + …${r.ui.addedMore} more`);
@@ -82,7 +91,7 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
   if (r.env?.urlChanged) console.log(`  → url: ${r.env.urlChanged}`);
   if (r.env?.newTargets?.length) console.log(`  → new target(s): ${r.env.newTargets.join("; ")}`);
   if (r.env?.writeFlag) console.log(`  ✎ writes: ${r.env.writeFlag.join("; ")}`);
-  if (r.env?.classifierImmature) console.log(`  (ambient classifier immature — consider \`disco idle\`)`);
+  if (r.env?.classifierImmature) console.log(`  (ambient classifier immature: ${Math.round((r.env.classifierIdleMs ?? 0) / 1000)}s of ${Math.round(defaults.classifierWarmupMs / 1000)}s idle observed — \`disco idle ${Math.max(1000, defaults.classifierWarmupMs - (r.env.classifierIdleMs ?? 0))}\` with the page open finishes it)`);
   if (r.env?.castBlind) console.log(`  (tab not visible: screencast blind)`);
   if (r.evaluateAfter !== undefined) console.log(`  eval: ${JSON.stringify(r.evaluateAfter)?.slice(0, 300)}`);
   if (s?.pending) console.log(`  still moving: ${[...s.pending.channels, ...s.pending.requests.map((x: string) => "req " + x)].join(", ") || "(nothing identified)"}`);
