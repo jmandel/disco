@@ -113,9 +113,17 @@ Two capture limits are structural and are recorded rather than hidden: response 
 ```
 report = await session.act(
   { kind: "click", target: role("button", { name: "Open Chart" }), frame: "main" },
-  { settle: { budgetMs: 3000 }, evaluateAfter?: (arg) => …, expect?: … }
+  { settle: { budgetMs: 3000 }, evaluateAfter?: (arg) => …, expect?: …, until?: { selector | fn | urlLike, budgetMs } }
 )
 ```
+
+`until` is the **postcondition** (§9): the report's verdict says what the page *did* (settlement, §4.2); `until`
+says whether the state the caller needs *arrived*, and the return is gated on both, bounded. The two stay
+independent — a matched `until` under a `still-active` verdict is a pass on a noisy page; an unmatched one
+under `settled:dom` means the page settled in the *wrong* state — and the causality window stays open while
+the predicate is awaited, so a late follow-up request attributes to the action. Discovery omits `until` and
+reads the report to learn what the postcondition should be; automation always passes one. `expect` never
+waits.
 
 Internally: (1) resolve the target *now* — if resolution fails, return immediately with the fuzzy-match diagnosis (§2.2), never wait for an element to exist as a side effect of acting on it; (2) snapshot pre-state (screenshot, URL, cheap DOM digest, scroll positions, focused element, open-dialog census); (3) mark a **causality window** and dispatch the input; (4) run settlement detection (§4.2); (5) snapshot post-state; (6) compute deltas; (7) run the agent's `evaluateAfter` function in-page if provided (main world, self-contained, called with `evaluateAfterArg` — closures do not transfer); (8) persist everything; (9) return the digest. Input is dispatched on the top-level page target with coordinates translated through the frame chain (cross-origin iframes are separate targets; their elements are resolved in their own target but clicked via the root), after scrolling into view and hit-testing that the point actually lands on the element — occlusion is reported, never clicked through.
 
@@ -162,7 +170,7 @@ Re-arm settlement detection without an action — for "I know a refresh is comin
 
 ### 5.2 `watch(predicate, opts)` — evidence-driven waits
 
-When a predicate wait is unavoidable, it's implemented as event-driven (mutation observer + network events trigger re-evaluation; no polling loops in the hot path), budgeted short by default, and — per §2.2 — resolves on expiry with the full diagnosis rather than throwing a bare error. The predicate can be a selector, a text/role query, a URL pattern, a "response matching X lands" condition, or an arbitrary in-page function.
+When a predicate wait is unavoidable, it's implemented as event-driven (mutation observer + network events trigger re-evaluation; no polling loops in the hot path), budgeted short by default, and — per §2.2 — resolves on expiry with the full diagnosis rather than throwing a bare error. The predicate can be a selector (optionally *visible*), a text/role query, a URL pattern (optionally *landed* — response and body captured), or an arbitrary in-page function (with an argument). The same predicate is what `act()` takes as `until` (§4.1); `watch()` is its standalone form, and a frame that does not exist yet is waited for, not thrown on.
 
 ### 5.3 Sentinels — standing watchers for the unexpected
 
@@ -259,7 +267,7 @@ Each instance actually encountered goes in the artifacts with its evidence handl
 
 Discovery's outputs should make the following the *path of least resistance* for whoever (agent or human) writes automation next:
 
-- Scripts are built from **verified transitions**: assert the named precondition state (cheap predicate from §7.3), act, settle, assert the postcondition — never assume position.
+- Scripts are built from **verified transitions**: assert the named precondition state (cheap predicate from §7.3), act **with the postcondition on the act itself** (`until`, §4.1), read the verdict as the diagnostic when the postcondition fails — never assume position, never trust the verdict alone.
 - Every interstitial in the ledger is handled as **optional**: "if dialog X present, dismiss via Y; proceed" — including the ones never observed but predicted.
 - **No sleeps.** Waits are settlement- or evidence-based with short budgets and diagnostic failures, same as discovery.
 - Failures return **observation dumps** (the report + store cursor), so a failed automation run is itself a discovery datum, not a shrug.

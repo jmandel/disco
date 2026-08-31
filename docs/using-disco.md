@@ -3,10 +3,12 @@
 How to wield disco to **instrument, explore, discover, characterize, and automate** a web application you
 did not build. This is the *usage* guide (design philosophy + how to use it well, with examples). For the
 constitution and the discovery methodology see `GUIDANCE.md`; for what the project *is* and where it's
-going, `PLATFORM.md`; for the hard-won engine gotchas, `DECISIONS.md` #16–31.
+going, `PLATFORM.md`; for the hard-won engine gotchas, `DECISIONS.md` #16–39.
 
-The worked examples are the two product packs: `apps/gauntlet/lib.ts` (a synthetic hostile app) and
-`apps/openemr/lib.ts` (OpenEMR 8.3.0). Read them alongside this.
+The worked examples are the three product packs: `apps/gauntlet/lib.ts` (a synthetic hostile app),
+`apps/openemr/lib.ts` (OpenEMR 8.3.0) and `apps/saucedemo/lib.ts` (a React SPA with no API). Read them
+alongside this. Every report excerpt below is real output of `bun demos/03-two-questions.ts`, which
+`bun test` executes — the examples cannot rot.
 
 ## The mental model (four ideas)
 
@@ -15,12 +17,14 @@ The worked examples are the two product packs: `apps/gauntlet/lib.ts` (a synthet
    (`no-effect` / `settled:network|dom|visual` / `still-active` / `dialog` / `navigated` / `diagnosis`),
    the UI delta, the attributed network, sentinels, timing. A missing selector returns a *diagnosis*
    (near-matches, dialog census, pending requests, a screenshot) in one turn — never a bare timeout.
+   The verdict is **evidence of what the page did — never a readiness gate** (see "The two questions").
 2. **The screen and the wire are one evidence stream.** The DOM shows what the app chose to render; the
    network shows what the backend actually said. Prefer reading facts off captured responses when both
    carry them — the full patient list is JSON on the wire even though the DOM only renders 10 rows.
 3. **Navigate to anchors; be defensive by construction.** Robust automation asserts a known *anchor
-   state*, acts, settles, asserts the next anchor — and treats every interstitial as optional (present
-   *or* absent). It never assumes position.
+   state*, acts **with the postcondition on the act** (`until`), reads the verdict as the diagnostic when
+   the postcondition fails — and treats every interstitial as optional (present *or* absent). It never
+   assumes position and never trusts the verdict alone.
 4. **The output is a pack, not a transcript.** What you learn is distilled into `apps/<target>/`:
    navigation notes, a function library, a ledger of what varies, evidence. The next session builds on it.
 
@@ -44,9 +48,14 @@ record a human's mail/bank tabs.
 
 ```bash
 disco act click 'role=button[name="Load Chart"]'      # Playwright selectors everywhere
-disco act type '#search' --text ada
-disco act rightclick '#row-7'      # click/rightclick/dblclick/hover/type/press/scroll/select/drag/navigate
+disco act type '#search' --text ada                   # type appends; fill replaces ("" clears)
+disco act rightclick '#row-7'      # click/rightclick/dblclick/middleclick/hover/type/fill/press/scroll/select/drag/navigate
+disco act click '#save' --until-url /api/save/status --until-landed   # act + postcondition (below)
 ```
+
+`s.click(sel, opts)`, `s.type`, `s.fill`, `s.press`, … and `disco act <kind>` are all one-line sugar over
+**one** primitive, `s.act({ kind, … })` — one resolve, one settlement race, one report shape, one set of
+options (`budgetMs`, `frame`, `evaluateAfter`, `until`, …). Anything said about `act()` applies to every verb.
 
 The report prints the verdict, the settle timeline, the UI delta, and the attributed wire lines with body
 handles. In the library it's the same, returned as a value:
@@ -92,39 +101,182 @@ sometimes appears). This is what `apps/<target>/nav-and-quirks.md` + `ledger.md`
 Distill the transitions into a **function library** in the pack — plain importable TS, one job each. See
 the recipe below. Then a `check.ts` runs them against the live app to catch drift (`bun scripts/run-check.ts <target>`).
 
+## The two questions: `act()` vs `until` — the contract
+
+Every step of driving a UI — discovery or production — asks two different questions, and disco has a
+different primitive for each. Confusing them is the one way this goes wrong.
+
+| Question | Primitive | What it promises | What it does **not** promise |
+|---|---|---|---|
+| **Q1. What did the app do when I did X?** | `act()` → `Report` | one input, one causality window, everything that happened in it (screen + wire + sentinels + console), and *when the page went quiet* — or that it didn't | that any particular state now exists |
+| **Q2. Am I in the state I need to proceed?** | `until` on the act (preferred), `watch()`, `lib/nav` `until()` / `reached()`, a wire read | an evidence-driven wait for a *named* condition; on expiry a diagnosis, never a bare timeout | anything about what happened along the way |
+
+Discovery is Q1-heavy: act, read the report, *learn what the postcondition should be*. Automation is
+Q2-heavy: you know the postcondition, so you act **with it** — and you keep Q1's report because it is the
+diagnostic when Q2 fails. **The verdict is never the gate.** Settlement means "the page has most likely
+finished reacting"; it closes when the attributed network, the DOM and the pixels have all been quiet for
+Q=300ms. Any gap longer than Q in the causal chain — a timer, a debounce, a second-hop fetch the app fires
+later, a frozen main thread — closes settlement *before* the screen shows the result. That is not a bug to
+tune away (raising Q slows every action); it is why the second question exists.
+
+### 1. Settled ≠ ready — the same click, without and with `until`
+
+Load Chart with a 900ms client-side gap between the last response and the render (gauntlet scenario 27):
+
+```
+act:1  click #load-chart  →  settled:network  (settled 166ms, reported 467ms; 3 req, 1 mut, 1 px)
+  timing: page 467ms (settled 166, reported 467) + overhead 38ms (resolve 9, pre 15, post 11, build 3) = 505ms
+  + - text: "status: loading…"
+  - - text: "status: idle"
+  ⇄ GET /api/slow → 200, 29B, 152ms, application/json (task)  body:df6b82ad7582
+  ⇄ GET /api/chart/a → 200, 35B, 34ms, application/json (task)  body:e565556a7a19
+  ⇄ GET /api/chart/b → 200, 35B, 34ms, application/json (task)  body:89cf1590e155
+  eval: "loading…"
+```
+
+Everything the verdict says is true — three attributed requests, quiet at 166ms — and the screen still
+says "loading…". A script that trusted the verdict would read the wrong state. Same click, with the
+postcondition on it:
+
+```ts
+const r = await s.click("#load-chart", {
+  until: { fn: () => document.querySelector("#chart-status")?.textContent === "idle" },
+  evaluateAfter: () => document.querySelector("#chart-status")?.textContent,
+});
+```
+```
+act:2  click #load-chart  →  settled:network  (settled 112ms, reported 424ms; 3 req, 1 mut, 1 px)
+  timing: page 1345ms (settled 112, reported 424, until 1013) + overhead 63ms (resolve 6, pre 11, post 45, build 1) = 1408ms
+  ✓ until: matched in 1013ms  true
+  ⇄ GET /api/slow → 200, 29B, 104ms, application/json (task)  body:373f9a1b85b0
+  …
+  eval: "idle"
+```
+
+Both signals, one report: settlement at 112ms (what the page did), postcondition at 1013ms (when the
+state you need arrived), post-state captured *after* both. The causality window stayed open the whole
+time, so anything the page did in between is attributed to this action. Discovery omits `until` and
+learns from the first report that `#chart-status === "idle"` *is* the postcondition; automation passes it.
+
+### 2. Optimistic UI — the wire is the truth
+
+`#save` flips the screen to "Saved ✓" synchronously, POSTs, gets a `202 {pending:true}`, and only 500ms
+later asks `GET /api/save/status` whether it really saved. Settlement closes at ~135ms — long before the
+request that matters. `until` the status response is back keeps the window open and lands it *attributed*:
+
+```ts
+const r = await s.click("#save", { until: { urlLike: "/api/save/status", landed: true } });
+```
+```
+act:3  click #save  →  settled:network  (settled 135ms, reported 435ms; 1 req, 1 mut, 2 px)
+  ✓ until: matched in 1837ms  req 297185.21
+  + - text: "state: Saved ✓"
+  ⇄ POST /api/save → 202, 56B, 2ms, application/json (task) ✎write  body:acfec170c2c0
+  ⇄ GET /api/save/status → 200 [unread], ?, application/json
+  ⚑ sentinel toast: "Saved"
+  ✎ writes: POST /api/save
+  eval: "Saved ✓"
+```
+
+Read the status from `r.wire.attributed`, not from the toast. (`[unread]`: the page never reads that body,
+so it is known-uncapturable after a 1.2s grace — which is when `landed` matched. Capture limits are
+recorded, never hidden.)
+
+### 3. The sometimes-modal — a diagnosis names the blocker
+
+Open record 1, and ~400ms *after* settlement an "Allergy Review Required" dialog appears (only for some
+records — the variability ledger's job). The next click lands on it:
+
+```
+act:5  click  →  diagnosis
+  ✗ occluded — occluded by <div role="dialog" class="overlay" id="record-modal" aria-modal="true" …>…</div>
+    open dialogs: Allergy Review Required
+    shot: d281c0af6c5a
+```
+
+One turn, no timeout, and the report says *what* is in the way. The defensive step is
+`actIfPresent(s, "#modal-ack")` (present *or* absent, both first-class), then retry once —
+`apps/gauntlet/lib.ts::openRecord` is the composable form.
+
+### 4. Reading the verdict when the postcondition fails
+
+```
+act:7  click #noop  →  no-effect  (settled 0ms, reported 499ms; 0 req, 0 mut, 0 px)
+  timing: page 803ms (settled 0, reported 499, until 800) + overhead 21ms (resolve 5, pre 8, post 7, build 1) + scroll-absorb 265ms = 1088ms
+  ✗ until: NOT matched in 800ms — diagnosis:
+  ✗ budget-expired
+    near matches: <button id="load-chart">Load Chart</button> | <button data-id="1" id="record-1" class="record">Open Record 1</button> | …
+```
+
+This is why automation keeps Q1's report instead of a bare selector-poll: the verdict tells you *why* the
+postcondition didn't arrive, and what to do about it.
+
+| `until` | verdict | Meaning | Script should |
+|---|---|---|---|
+| matched @0.4s | `settled:network` @1.9s | screen ready before the wire finished → **optimistic UI** | trust the wire, not the screen |
+| matched | `still-active` (pixels) | done; the page is noisy (spinner) | proceed — it's a pass; note "never settles on pixels" |
+| not matched | `settled:dom` @0.3s | the page settled in the **wrong** state (validation error, still on login) | read `ui.added` / the diagnosis; don't retry blindly |
+| not matched | `still-active`, `pending` has requests | just slow | raise `until.budgetMs` / `awaitSettlement` |
+| not matched | `no-effect` | click swallowed (overlay, disabled, wrong element) | check the diagnosis, dismiss the interstitial, retry once |
+| — | `diagnosis: occluded by …` | something is in the way | `actIfPresent` it away, retry once |
+
+Mechanics worth knowing: the predicate is watched from dispatch; if it matches *first*, the remaining
+quiet-wait is capped to a short tail (`tailMs`, default 1s — never the 20s hung-request budget); if
+settlement finishes first, the window stays open while the predicate is awaited (`budgetMs`, default 5s).
+`until.frame` names a postcondition in another frame (a finder click whose effect is a new chart frame).
+`expect` **never waits** — it only flags a surprising report for the ledger. `settled:late` is what a
+`still-active` action becomes when the background settler sees it quiet later.
+
+### Where the milliseconds go
+
+Every report carries `timing`: page time (`settleMs` / `reportedMs` / `untilMs`, and `absorbMs` — the
+repaint after a scroll-into-view) versus daemon overhead (`resolveMs` + `preMs` + `postMs` + `buildMs`,
+typically 20–60ms). Responsiveness is a tested contract, not a hope: a no-op reports at ≈500ms with under
+400ms of overhead, `watch()` notices a DOM change within ~Q, an already-true `until` costs at most the
+quiet tail. `bun scripts/timing-report.ts <app>` prints the distribution for an app's recorded runs.
+
+Run all of the above yourself: `bun demos/03-two-questions.ts`.
+
 ## Writing a robust function (the recipe)
 
-Every good pack function does four things — assert the precondition anchor, act, reach the next anchor,
-handle optional steps both ways. `openPatient` from the OpenEMR pack, annotated:
+Every good pack function does four things — assert the precondition anchor, act **with its
+postcondition**, read the facts off the wire, handle optional steps both ways. `openPatient` from the
+OpenEMR pack, annotated:
 
 ```ts
 export async function openPatient(s, target) {
   // (1) anchor + reach the row: for a name, search the finder (works past page 1) so the row is visible
   let pid = typeof target === "string" ? (await findPatient(s, target)).pid : (await openFinder(s), target);
-  // (2) act
-  const r = await s.click(`#pid_${pid}`, { frame: "dynamic_finder.php", budgetMs: 15000 });
-  if (r.verdict === "diagnosis") throw new Error(`openPatient(${pid}): could not click the row`);  // fail loud
+  // (2) act WITH the postcondition — which here lives in a different frame: the chart frame the click creates.
+  //     reached() throws with verdict + diagnosis if the row wasn't actionable or the chart never came.
+  reached(await s.click(`#pid_${pid}`, { frame: "dynamic_finder.php", budgetMs: 15000,
+    until: { selector: "#medical_problem_ps_expand", frame: "demographics.php", budgetMs: 20000 } }), `openPatient(${pid})`);
   // (3) the "due clinical reminders" alert may or may not fire — auto-accepted by policy, so proceed either way
-  // (4) reach + assert the next anchor
-  await waitForFrame(s, "demographics.php", 15000);
+  // (4) assert the anchor by name (cheap now: the predicate already holds)
   await assertChart(s, pid);
   return pid;
 }
 ```
 
-Principles it embodies (all from real fixes — see DECISIONS #31):
-- **Anchors, not positions.** `assertMainShell` / `assertChart` verify where you are and throw a clear
-  message otherwise. `login` is idempotent (skips work if already in the shell).
-- **Optional steps both ways.** `actIfPresent(s, sel)` (in `lib/nav.ts`) dismisses an interstitial if it
-  appears within a short budget and does nothing if it doesn't — the absent path is first-class.
-- **Wire-first.** `findPatient`/`extractSummary` read the finder JSON and summary fragments, not brittle
-  layout. `lib/wire.ts::extractFromWire` is the generic move.
-- **Wait for evidence, not sleeps.** `waitForFrame` polls for the child frame; `extractSummary` waits for
-  the async summary fragment to populate before reading.
+Principles it embodies (all from real fixes — see DECISIONS #31, #35, #38):
+- **The postcondition is on the act.** `until` keeps the causality window open until the state arrives; the
+  verdict stays what it was — the diagnostic. `reached(report)` is the one-line gate.
+- **Anchors, not positions.** `assertMainShell` / `assertChart` are `until` calls that verify where you are
+  and throw a clear message (with the diagnosis) otherwise. `login` is idempotent (skips work if already in
+  the shell) and, on saucedemo, waits for *either* the inventory *or* the app's error banner — the
+  `performance_glitch_user` click settles `no-effect` and is safe only because of that.
+- **Optional steps both ways.** `actIfPresent(s, sel)` dismisses an interstitial if it appears (visibly)
+  within a short budget and does nothing if it doesn't — the absent path is first-class.
+- **Wire-first.** `findPatient` / `extractSummary` read the finder JSON and summary fragments, not brittle
+  layout; `until: { urlLike, landed: true }` is how a step waits for *its* response. `extractFromWire` is
+  the generic move.
+- **Evidence, never sleeps.** There is no `sleep(` anywhere in `apps/` or `lib/`. `fill` replaces a field's
+  value with real key events (no `evaluate()` hacks); `waitForFrame` is `until` with a `frame:`.
+- **One selector language.** Playwright's, everywhere: `click`, `until`, `assertVisible`, `actIfPresent`.
 
-Generic moves live in `lib/` (product-agnostic: `extractFromWire`, `wireHas`, `assertVisible`,
-`actIfPresent`, `waitForFrame`); product-specific functions live in the pack and lean on them. A move
-graduates from a pack to `lib/` when a second product would copy it.
+Generic moves live in `lib/` (product-agnostic: `until`, `reached`, `assertVisible`, `actIfPresent`,
+`waitForFrame`, `extractFromWire`, `wireHas`); product-specific functions live in the pack and lean on
+them. A move graduates from a pack to `lib/` when a second product would copy it.
 
 ## Effective-use tips & rough edges
 
@@ -134,6 +286,12 @@ graduates from a pack to `lib/` when a second product would copy it.
   and reduce it in your own script. Don't pull whole HARs into context.
 - **Verdict labels are best-effort** — ambient content rendering in the settle tail can retag
   `network`→`dom` (DECISIONS #30). Assert timing + attribution for non-interference, not the label.
+- **The verdict is never the gate** — pass `until` (or call `until()`/`reached()`); `expect` never waits.
+- **`type` appends, `fill` replaces** — form fields want `fill`; debounced search boxes that count
+  keystrokes want `type`.
+- **A missing frame is not an error** — `watch`/`until` wait for it (`frame:` re-resolves per check);
+  from `act()` it's a `frame-not-found` diagnosis with a frame census.
+- **Watch `timing.overheadMs`** — if it grows, the daemon got slower, not the page.
 - **`disco sql` is read-only** — it can't mutate the store; notes are written only through the daemon.
 - **Warm the classifiers** (`disco idle`) before trusting settlement on a heartbeat-heavy app.
 - Full gotcha list: `STATE.md` "Gotchas" + `DECISIONS.md` #16–31.

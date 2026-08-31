@@ -9,7 +9,7 @@ and the usage guides). One observation can split across all three (see the promo
 
 ## Ways of knowing a pack can hold (take any subset)
 
-1. **Raw debug sessions** — the captured store(s) + blobs. *Empirical, retroactively re-queryable* — you can ask new questions of an old run. (Normally in `sessions/`; archive a run into the pack when it's worth keeping.)
+1. **Raw debug sessions** — the captured store(s) + blobs. *Empirical, retroactively re-queryable* — you can ask new questions of an old run. (In `apps/<target>/store/`, run-tagged; every run of the app lands in the same history.)
 2. **Ledger / notes** — observed-vs-inferred, variability with n-counts, open questions + the probe that resolves each. *Interpreted, with confidence and honest unknowns.* (`nav-and-quirks.md` narrative + `ledger.md`.)
 3. **Navigation notes** — how to drive it, the rough edges, how to recover, and the **known anchor points** workflows start from. *Explanatory — for a human or agent to read in.*
 4. **A function library** — plain TypeScript: job-specific, robust functions that navigate to anchor states and perform specific steps (`login`, `openPatient(pid)`, `goToProblemList`, …). Composable, decomposed/refined over time. **The growing asset** — and the future basis for MCP/agent tools and for automated test loops that run over them. The engineering goes into *robustness*, not file format; they're just `.ts` files.
@@ -29,7 +29,7 @@ the expected direction.)
 
 ## The promotion path (raw → durable)
 
-1. **store** (`sessions/<name>/`) — empirical ground truth; nothing is "known" that isn't recorded here.
+1. **store** (`apps/<target>/store/`) — empirical ground truth; nothing is "known" that isn't recorded here.
 2. **notes/ledger** (`disco note`) — interpretations, cited to act ids, with confidence.
 3. **in-session learned models** (ambient classifier, DOM-churn roots, visual ignore mask) — learned *during* the run, then thrown away. Their *conclusions* (e.g. "these 3 endpoints are the heartbeat") are durable product facts → promote them into the pack (as functions/notes) so the next session confirms instead of re-learning.
 4. **the pack** (this dir) — the distilled, portable product knowledge that survives the run.

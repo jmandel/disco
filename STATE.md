@@ -15,6 +15,24 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - Slice 4: sentinels (post-settlement modal w/ shot, toast frame timing, session-expiry, new-target + instrumented child, between-action 5xx) + RPC stream — 7/7.
 - Slice 2: act()/settlement/report/watch/awaitSettlement, vendored Playwright selectors, input dispatch (click/right/dbl/middle/hover/type/press/scroll/select/navigate/drag), OOPIF coordinate translation, self-feedback suppression, scroll-absorb, ambient DOM roots, unread-body demotion — `bun test test/gauntlet/slice2.test.ts` 14/14; unit tests (settle, attribute) green.
 
+## Readiness + responsiveness pass — P1/P2 DONE, P3 docs in progress (2026-08-30; DECISIONS #35–39)
+- P1 engine: `act({until})` — the postcondition contract, daemon-side (window stays open while waiting; predicate-first caps
+  settle to a short tail; settle-first watches on, then a seeded tail) → `report.until`; `awaitSettlement` owns the window over
+  the background settler; one `signalFromEvent`; `pointToRoot` before `t0`; no inverted diagnosis cursors; `settled:late` typed;
+  streaming UTF-8 RPC framer; gauntlet scenario 27 (`renderDelayMs` = the deterministic settled≠ready gap).
+- P2 Layer 1 + packs: `lib/nav.ts` = `until` / `reached` / `assertVisible` (Playwright syntax, budgeted) / `actIfPresent` /
+  `waitForFrame` — one selector language, zero sleeps in `apps/` + `lib/`; predicates `visible` / `landed` / `fnArg`; missing
+  frames are diagnoses (act) or waited for (watch); `fill` kind + `KINDS` table; tree-scoped report queries; tunables in
+  `defaults.ts`; `run-check` reads `target` from each pack (`apps/gauntlet/check.ts` added); packs refactored (saucedemo login
+  waits for inventory OR error — the glitch user's `no-effect` click is safe by construction; OpenEMR's 5 loops → `until`).
+- Responsiveness: `report.timing` (page vs daemon overhead), `scripts/timing-report.ts <app>`, per-step durations in check
+  loops, tests pin no-op ≈500ms + <400ms overhead, event-driven watch (~Q), until-already-true cost, tail cap vs hung request.
+- Baseline before the pass (P0): suite 89/89, run-check saucedemo 5/5; **the glitch user's login click settled `no-effect` at
+  500ms and the old pack passed only because the frozen main thread stalled its next evaluate** (scratch notes, DECISIONS #35).
+- Remaining: P3 docs (using-disco "two questions" section with real digests from `demos/03-two-questions.ts`, executed by a
+  test; demo 02 rewrite), then P4 fresh-eyes validation (3 non-fork agents: rebuild saucedemo from docs alone; a 4th pack —
+  OpenMRS O3 demo; cold-run the quickstart) and P5 fold-back.
+
 ## In progress — platform build-out (PLATFORM.md plan)
 - Slice 1 ✅ ways-of-knowing palette named in `apps/README.md` (descriptive, not a schema).
 - Slice 2a ✅ function-library pattern on the gauntlet: `lib/wire.ts` + `lib/nav.ts` (generic reusable moves), `apps/gauntlet/lib.ts` (reference per-product library), `test/gauntlet/lib.test.ts`. Suite 87/87.
@@ -36,23 +54,26 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - PHI/retention posture when a non-demo target is used (until then: demo/BAA-covered only).
 - OPEN (revisit with more dogfood data): POST-that-reads write-flag heuristic; settle-time distributions; content-based attribution fallback (NOT needed for OpenEMR); screencast cost on a real desktop; HTML5 native DnD; diff-highlighted shot variant.
 
-## Storage layout (2026-08-31)
+## Storage layout (2026-08-30)
 - **One home per app: `apps/<product>/`** — committed pack (nav-and-quirks/lib.ts/check.ts/ledger) + gitignored `store/` (the app's WHOLE history: one `store.sqlite` with every run-scoped row tagged by `run`, shared `blobs/`, `stream.jsonl`, `daemon.sock`). No top-level `sessions/`.
 - A **run** = one episode; `session new <app>` opens one, `session end` closes it, a daemon restart resumes the open run + its clock. One active run per app at a time (single SQLite writer). Ephemeral test/check runs live in `.scratch/`.
 - Query one app's whole history in one shot: `disco sql <app> "SELECT run, method, path FROM requests WHERE path LIKE '%X%'"` (or `openApp("<app>")` in TS). See DECISIONS #34, PLATFORM.md.
 
 ## How to run
 - `bun install`; gauntlet app: `bun gauntlet`. Explore: `disco session new <app> --attach <port> --scope <host>`; query: `disco sql <app> "…"`; drift: `bun scripts/run-check.ts <app>`.
-- All tests: `bun test` (launches its own headless chromium; scratch in .scratch/)
+- All tests: `bun test` — 108 tests / 13 files (~150s; launches its own headless chromium; scratch in .scratch/). Live drift: `bun scripts/run-check.ts <saucedemo|openemr|gauntlet>` (gauntlet needs `bun gauntlet` running). Timing distribution of a recorded app: `bun scripts/timing-report.ts <app>`. The worked examples, live: `bun demos/03-two-questions.ts`.
 - Typecheck: `bunx tsc --noEmit -p .`
 - Manual attach: `chromium --remote-debugging-port=9222 --user-data-dir=~/hobby/.agent-scratch/disco/profile` then `bun cli/disco.ts session new gauntlet --attach 9222 --scope localhost:4800`
 - Re-vendor selector engine: `bun run scripts/vendor-injected.ts`
 
-## Gotchas discovered (see DECISIONS #16–30)
+## Gotchas discovered (see DECISIONS #16–39)
+- **Settled ≠ ready.** The verdict says the page went quiet, not that the state you need exists (a >Q gap — timer, debounce, unattributed second hop — closes settlement early; a frozen main thread settles `no-effect`). Automation passes `until`; the verdict is the diagnostic when the postcondition fails (DECISIONS #35). `expect` never waits.
+- `until`'s `urlLike` only counts requests that STARTED after dispatch; `watch()`'s counts started-or-landed since watching (`landed` = response + body captured).
+- Every report has `timing`: if `overheadMs` grows, the daemon got slower, not the page.
 - Budget = time since last attributed network evidence (suspended while in flight, maxBudgetMs cap).
 - Ambient DOM roots + visual ignore mask + ambient families all need idle observation — `disco idle` / session-new default; EHR heartbeats are ~60s so warm up ≥2 min.
 - Unread fetch bodies never emit loadingFinished → "unread" demotion after 1.2s grace.
 - scrollIntoView repaints the whole viewport → absorbed before the causality window opens.
 - Small-target self-repaint (pressed/focus) suppressed from the visual channel.
 - Verdict labels are best-effort: ambient content rendering in the settle tail can retag network→dom without changing timing (DECISIONS #30) — assert timing+attribution, not the label, in non-interference tests.
-- Function libraries live in the pack (`apps/<target>/lib.ts`), generic moves in `lib/`; live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline.
+- Function libraries live in the pack (`apps/<target>/lib.ts`), generic moves in `lib/` (`until`, `reached`, `assertVisible`, `actIfPresent`, `waitForFrame` — Playwright selector syntax everywhere, no sleeps); live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline, and each exports `target = {url, scope}` for `run-check`.
