@@ -3,3 +3,4 @@ apps/*/store/
 .scratch/
 *.log
 gauntlet/dist/
+apps/.current
