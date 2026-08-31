@@ -69,7 +69,7 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
     r.settle = { ms: Math.round(i.settle.tSettled - i.t0), reportedMs: Math.round(i.settle.tReported - i.t0), timeline: i.settle.timeline, counts: i.settle.counts, pending };
   }
   // kinds without a resolved element still say what they acted on (navigate → the url, press → the key)
-  if (!i.resolved && (i.spec.url || i.spec.key)) r.target = { selector: String(i.spec.url ?? i.spec.key), frame: "main" };
+  if (!i.resolved && (i.spec.url || i.spec.key || i.spec.target)) r.target = { selector: String(i.spec.url ?? i.spec.key ?? i.spec.target), frame: "main" };
 
   // ---- UI delta (semantic, from aria snapshots) ----
   if (i.preAriaText !== undefined && i.postAriaText !== undefined) {

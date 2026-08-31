@@ -56,7 +56,7 @@ tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
 sql [<product>] <query> [--json]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; table cells cut at 60 chars, --json for full values
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
 families [--mark-read F] [--ambient F] [--not-ambient F]
-idle [ms]                     idle-observe to warm the ambient classifier
+idle [ms] [--json]            idle-observe to warm the ambient classifier; prints the ambient digest (--json: full families)
 screenshot [--out file.jpg]   capture now; prints the blob hash
 blob <hash|prefix> [--out file]  copy a blob out / print text (any hash argument accepts a prefix, e.g. the 12-char handles in reports)
 eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
@@ -241,7 +241,16 @@ switch (cmd) {
     break;
   }
 
-  case "idle": { const ms = Number(pos[1] ?? defaults.idleObserveMs); out(await withClient((c) => c.call("idle", { ms }, ms + 10000))); break; }
+  case "idle": {
+    const ms = Number(pos[1] ?? defaults.idleObserveMs);
+    const r = await withClient((c) => c.call("idle", { ms }, ms + 10000));
+    if (has("json")) { out(r); break; }
+    const fams: any[] = r.families ?? [];
+    console.log(`idle-observed ${ms}ms: ${fams.length} families, ${fams.filter((x) => x.ambient).length} ambient${r.immature ? "  (classifier still immature — keep going, or act and read the reports' progress line)" : ""}`);
+    for (const fam of fams.filter((x) => x.ambient)) console.log(`  ambient  ${fam.family} ×${fam.count}${fam.reason ? " (" + fam.reason + ")" : ""}`);
+    if (fams.some((x) => !x.ambient)) console.log(`  (${fams.filter((x) => !x.ambient).length} non-ambient families — \`disco families\` lists them with evidence; --json for the full table)`);
+    break;
+  }
 
   case "screenshot": {
     const r = await withClient((c) => c.call("screenshot", { targetId: f("target") }));

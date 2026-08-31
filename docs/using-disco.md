@@ -44,7 +44,10 @@ console line, dialog, navigation, and a screencast — to `apps/mysite/store/` (
 ambient traffic, and an empty browser teaches it nothing (it is skipped when nothing is scoped). **Let the
 classifiers warm up** before you lean on settlement — reports say how far along it is
 (`ambient classifier immature: 41s of 90s`); `disco idle 120000` for an EHR (minute-scale heartbeats need
-≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never record a human's mail/bank tabs.
+≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never record a human's mail/bank tabs;
+in launch mode it is optional (the browser is yours — a scope still keeps popups to other hosts out of the
+store). `session new` writes `apps/.current`, which is what "the current app" means for every command
+without `--app`.
 Multi-tab: `disco targets` shows which page is `primary` (where `act` goes); `--target <id-prefix|url-part>`
 or `disco focus` picks another — a popup can become the only page if the first tab is closed.
 **Bot-scored hosts:** a public demo behind Cloudflare (Turnstile "Just a moment…") will not let headless

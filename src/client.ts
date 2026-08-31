@@ -88,6 +88,8 @@ export class Session {
   }
   /** Run a self-contained function in a frame. world "main" sees the page's globals; "disco" is our isolated world. */
   async evaluate<T = unknown>(fn: PageFn, o: { frame?: string; targetId?: string; args?: unknown[]; world?: "main" | "disco" } = {}): Promise<T> {
+    if (o === null || typeof o !== "object" || Array.isArray(o)) throw new Error(`evaluate(fn, options): the second argument is an options object — pass data as { args: [${JSON.stringify(o)}] } (positional: fn(a, b) ← args: [a, b])`);
+    if (o.args !== undefined && !Array.isArray(o.args)) throw new Error("evaluate: `args` must be an ARRAY of positional arguments — fn(a, b) ← args: [a, b]");
     const r = await this.rpc.call("evaluate", { fn: src(fn), frame: o.frame, targetId: o.targetId, args: o.args ?? [], world: o.world ?? "main" });
     return r.value as T;
   }

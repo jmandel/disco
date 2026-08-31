@@ -2,7 +2,7 @@
 // need to be?" (docs/using-disco.md "The two questions"). Self-contained: starts its own gauntlet + headless
 // Chromium + daemon, runs the worked examples, prints the real report digests, tears down. Executed by
 // test/gauntlet/demos.test.ts so the doc's examples cannot rot.   bun demos/03-two-questions.ts
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
 import { startGauntlet } from "../gauntlet/server.ts";
 import { launchChromium } from "../src/launch.ts";
@@ -71,6 +71,6 @@ try {
   console.log(JSON.stringify(e.timing));
   s.close();
 } catch (err) { ok = false; console.error("demo threw:", (err as Error).message); }
-finally { await daemon.stop().catch(() => {}); await browser.kill(); await gauntlet.stop(); rmSync(base, { recursive: true, force: true }); }
+finally { await daemon.stop().catch(() => {}); await browser.kill(); await gauntlet.stop(); rmSync(base, { recursive: true, force: true }); try { rmdirSync(join(base, "..")); } catch {} /* parent only if empty */ }
 console.log(`\ndemo 3: ${ok ? "OK" : "FAILED"}`);
 process.exit(ok ? 0 : 1);
