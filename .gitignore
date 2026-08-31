@@ -4,3 +4,4 @@ apps/*/store/
 *.log
 gauntlet/dist/
 apps/.current
+.claude/worktrees/
