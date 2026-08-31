@@ -165,6 +165,12 @@ e.g. `SELECT id, verdict, json_extract(report,'$.until.elapsedMs') FROM actions 
 
 ## Timing model (GUIDANCE §4.2 + DECISIONS #16)
 
+The numbers a script author meets (all in `defaults.ts`): Q = `quietMs` 300 · `noEffectMs` 500 · `budgetMs`
+3000 (quiet-wait cap; suspended while attributed requests fly) · `maxBudgetMs` 20000 · `watchBudgetMs` 1500 ·
+`untilBudgetMs` 5000 · `untilTailMs` 1000 · `trailingAttributionMs` 1500 · classifier warm-up 90s of observed
+idle · ambient = ≥3 occurrences, gap cv ≤ 0.3 (bursts within 100ms collapsed) or a long-poll held ≥1s and
+re-issued within 250ms.
+
 Settlement = quiescence race (network scoped to attributed-non-ambient requests / DOM minus ambient
 churn roots / pixels minus the learned ignore mask and the target's own repaint) with Q=300ms, a fast
 `no-effect` tier at 500ms, and a budget that measures **time since the last attributed network

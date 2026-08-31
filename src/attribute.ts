@@ -110,8 +110,13 @@ export class Attributor {
   private classify(f: FamilyState) {
     if (f.ambientReason === "manual") return;
     if (f.count < defaults.ambientMinCount || f.outsideWindow < 1) return;
+    // Cadence is measured between BURSTS: SWR-style pages refetch a family 2–3× within a few ms on every
+    // cycle, which made a clean 60s heartbeat look like gaps [0, 60001, 2, 120066, 33] (cv ≈ 1.5, never
+    // ambient — P4-B friction #5). Starts within burstCollapseMs of the previous one are one occurrence.
+    const bursts: number[] = [];
+    for (const s of f.starts) if (!bursts.length || s - bursts[bursts.length - 1] > defaults.burstCollapseMs) bursts.push(s);
     const gaps: number[] = [];
-    for (let i = 1; i < f.starts.length; i++) gaps.push(f.starts[i] - f.starts[i - 1]);
+    for (let i = 1; i < bursts.length; i++) gaps.push(bursts[i] - bursts[i - 1]);
     let periodic = false, cv = NaN;
     if (gaps.length >= 2) {
       const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
@@ -119,11 +124,17 @@ export class Attributor {
       cv = mean > 0 ? sd / mean : NaN;
       periodic = mean >= 500 && cv < defaults.ambientMaxCv; // sub-500ms "cadence" is a burst, not a heartbeat
     }
-    // chained: each start follows the previous end within chainedPollGapMs
+    // chained = a LONG-POLL: each start follows the previous end within chainedPollGapMs AND the previous
+    // request was held by the server (≥ longPollMinHoldMs). A read endpoint re-fetched back-to-back on every
+    // route change (O3's GET /session ×3) has the gap shape but not the hold, and tagging it ambient hid the
+    // one request that decides whether login worked (P4-B friction #4).
     let chained = 0;
+    const off = f.starts.length - f.ends.length;
     for (let i = 1; i < f.starts.length; i++) {
-      const prevEnd = f.ends[i - 1 - (f.starts.length - f.ends.length)];
-      if (prevEnd !== undefined && f.starts[i] - prevEnd >= -1 && f.starts[i] - prevEnd <= defaults.chainedPollGapMs) chained++;
+      const prevEnd = f.ends[i - 1 - off], prevStart = f.starts[i - 1];
+      if (prevEnd === undefined) continue;
+      const held = prevEnd - prevStart >= defaults.longPollMinHoldMs;
+      if (held && f.starts[i] - prevEnd >= -1 && f.starts[i] - prevEnd <= defaults.chainedPollGapMs) chained++;
     }
     const isChained = chained >= defaults.ambientMinCount - 1;
     const was = f.ambient;

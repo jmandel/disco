@@ -21,8 +21,10 @@ export const defaults = {
   taskTierSlackMs: 30,     // requests starting within this of the input task end still count as "task"
   ambientMinCount: 3,      // family occurrences needed before it can be classified ambient
   ambientMaxCv: 0.3,       // coefficient of variation of inter-arrival gaps for "regular cadence"
-  chainedPollGapMs: 250,
-  trailingAttributionMs: 1500, // requests this soon after a window closes (same root, no new window) tag "trailing"   // next poll starting within this of previous end => chained (long-poll)
+  chainedPollGapMs: 250,   // next poll starting within this of the previous END => chained (long-poll) …
+  longPollMinHoldMs: 1000, //   … provided the previous request was HELD at least this long (a burst refetch is not a long-poll)
+  burstCollapseMs: 100,    // starts within this of each other are one occurrence for cadence (SWR refetch bursts)
+  trailingAttributionMs: 1500, // requests this soon after a window closes (same root, no new window) tag "trailing"
   classifierWarmupMs: 90000, // idle observation before reports stop saying "classifier: immature" (EHRs use ~60s heartbeats; need ≥3 cycles — dogfood #1)
   idleObserveMs: 30000,    // `disco session new` idle observation (skippable); for minute-scale EHR heartbeats run `disco idle 120000` once (dogfood #1)
   // --- capture (GUIDANCE §3.4) ---

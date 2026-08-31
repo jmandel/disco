@@ -106,6 +106,11 @@ export class Selectors {
         const x = r.x + r.width / 2, y = r.y + r.height / 2;
         const res = this.expectHitTarget({ x, y }, el);
         if (res === "done") return { ok: true, x, y, scrolled };
+        // A radio/checkbox drawn by its <label> (Carbon, MUI): the "occluder" is the label's own appearance span,
+        // and clicking it IS how the control is toggled (P4-B friction #9).
+        const h = document.elementFromPoint(x, y);
+        const lab = h && h.closest ? h.closest("label") : null;
+        if (lab && (lab.control === el || (el.labels && Array.from(el.labels).includes(lab)) || lab.contains(el))) return { ok: true, x, y, scrolled, viaLabel: true };
         return { ok: false, x, y, scrolled, hit: res && res.hitTargetDescription ? res.hitTargetDescription : String(res) };
       }`, [selector]);
     const v = r.value!;
@@ -130,7 +135,8 @@ export function ariaDiff(pre: string, post: string, cap = 24): { added: string[]
   };
   const a = count(pre), b = count(post);
   const added: string[] = [], removed: string[] = [];
-  for (const [l, n] of b) { const d = n - (a.get(l) ?? 0); for (let i = 0; i < d; i++) added.push(l); }
-  for (const [l, n] of a) { const d = n - (b.get(l) ?? 0); for (let i = 0; i < d; i++) removed.push(l); }
+  // identical lines collapse (a navigation adds 40 avatar `img`s — one line "img ×40", not forty)
+  for (const [l, n] of b) { const d = n - (a.get(l) ?? 0); if (d > 2) added.push(`${l} ×${d}`); else for (let i = 0; i < d; i++) added.push(l); }
+  for (const [l, n] of a) { const d = n - (b.get(l) ?? 0); if (d > 2) removed.push(`${l} ×${d}`); else for (let i = 0; i < d; i++) removed.push(l); }
   return { added: added.slice(0, cap), removed: removed.slice(0, cap), addedMore: Math.max(0, added.length - cap), removedMore: Math.max(0, removed.length - cap) };
 }

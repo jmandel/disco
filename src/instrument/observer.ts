@@ -25,6 +25,8 @@ function observerMain(bindingName: string, batchMs: number) {
   const DIALOG_SEL = '[role="dialog"],[role="alertdialog"],dialog[open],[aria-modal="true"]';
   const TOAST_SEL = '[role="status"],[role="alert"],[aria-live="polite"],[aria-live="assertive"]';
   const TOASTY = /toast|snackbar|notif|growl|flash|banner/i;
+  const NOT_TOAST = /^(row|gridcell|cell|columnheader|rowheader|listitem|option|treeitem|tab|menuitem)$/i; // table rows in Carbon/MUI matched the heuristic 50 times per run (P4-B friction #8)
+  const notToast = (el: Element) => NOT_TOAST.test(el.getAttribute("role") || "") || !!el.closest("tr,table,[role=row],[role=grid],[role=table],[role=listbox],[role=menu],[role=tablist]");
   const EXPIRY = /session\s*(will\s*)?(expir|time[d\s-]*out|end)|inactiv|log\s*in\s*again|signed?\s*out|re-?authenticat/i;
   function cheapSel(el: Element): string {
     if (el.id) return "#" + CSS.escape(el.id);
@@ -76,10 +78,10 @@ function observerMain(bindingName: string, batchMs: number) {
     for (const el of document.body?.children ?? []) {
       if (seen.has(el) || !visible(el)) continue;
       if (isOverlay(el)) { seen.add(el); dialogs.push(item(el, EXPIRY.test(textOf(el)) ? "expiry" : "dialog")); continue; }
-      if (isToasty(el)) { seen.add(el); toasts.push(item(el, "toast")); }
+      if (isToasty(el)) { seen.add(el); if (!notToast(el)) toasts.push(item(el, "toast")); }
     }
-    for (const el of document.querySelectorAll(TOAST_SEL)) if (visible(el) && !seen.has(el) && areaFrac(el) < 0.3) { seen.add(el); toasts.push(item(el, "toast")); }
-    for (const el of document.querySelectorAll('[class*="toast" i],[class*="snackbar" i],[id*="toast" i],[class*="notification" i]')) if (visible(el) && !seen.has(el) && isToasty(el) && areaFrac(el) < 0.3) { seen.add(el); toasts.push(item(el, "toast")); }
+    for (const el of document.querySelectorAll(TOAST_SEL)) if (visible(el) && !seen.has(el) && areaFrac(el) < 0.3) { seen.add(el); if (!notToast(el)) toasts.push(item(el, "toast")); }
+    for (const el of document.querySelectorAll('[class*="toast" i],[class*="snackbar" i],[id*="toast" i],[class*="notification" i]')) if (visible(el) && !seen.has(el) && isToasty(el) && areaFrac(el) < 0.3) { seen.add(el); if (!notToast(el)) toasts.push(item(el, "toast")); }
     return { dialogs, toasts };
   }
 

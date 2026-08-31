@@ -81,9 +81,10 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
   }
   if (r.wire?.attributed?.length) {
     for (const w of r.wire.attributed) console.log(`  ⇄ ${w.line}${w.body ? "  body:" + w.body.slice(0, 12) : ""}`);
-    if (r.wire.more) console.log(`  ⇄ +${r.wire.more} more (cursor ev:${r.cursor.from}-${r.cursor.to})`);
+    if (r.wire.more) console.log(`  ⇄ +${r.wire.more} more${r.wire.staticHidden ? ` (${r.wire.staticHidden} static assets)` : ""} (cursor ev:${r.cursor.from}-${r.cursor.to})`);
   }
   if (r.wire?.ambientInWindow) console.log(`  ~ ${r.wire.ambientInWindow} ambient request(s) during window`);
+  if (r.wire?.ambientWithAction?.length) console.log(`  ~ fired WITH the action but classified ambient: ${r.wire.ambientWithAction.join("; ")}  (if that is the effect: disco families --not-ambient <family>)`);
   if (r.wire?.otherActivity?.length) console.log(`  ? other activity: ${r.wire.otherActivity.join("; ")}`);
   if (r.wire?.ws) console.log(`  ⇄ ${r.wire.ws} WS frame(s) in window`);
   if (r.wire?.sse) console.log(`  ⇄ ${r.wire.sse} SSE message(s) in window`);

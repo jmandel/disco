@@ -1,7 +1,7 @@
 # Variability ledger — gauntlet @ localhost:4820 (session `dryrun`, 2026-08-30)
 
 What varied, what is suspected to vary, and what would resolve it (GUIDANCE §7.5). Evidence = act ids
-and rows in `sessions/dryrun/store.sqlite`; re-inspect with `disco sql` / `openStore` rather than re-trusting.
+and rows in `apps/gauntlet/store/store.sqlite (run "dryrun")`; re-inspect with `disco sql` / `openStore` rather than re-trusting.
 Suspicions marked *prior* come from the enterprise-SPA prior (§2.4/§8), not observation.
 
 | # | step | observed (n) | varied / surprise | hypothesis | resolving experiment |

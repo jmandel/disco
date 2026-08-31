@@ -29,9 +29,18 @@ Milestone tag: **`v0.1.0-platform-base`**.
   loops, tests pin no-op ≈500ms + <400ms overhead, event-driven watch (~Q), until-already-true cost, tail cap vs hung request.
 - Baseline before the pass (P0): suite 89/89, run-check saucedemo 5/5; **the glitch user's login click settled `no-effect` at
   500ms and the old pack passed only because the frozen main thread stalled its next evaluate** (scratch notes, DECISIONS #35).
-- Remaining: P3 docs (using-disco "two questions" section with real digests from `demos/03-two-questions.ts`, executed by a
-  test; demo 02 rewrite), then P4 fresh-eyes validation (3 non-fork agents: rebuild saucedemo from docs alone; a 4th pack —
-  OpenMRS O3 demo; cold-run the quickstart) and P5 fold-back.
+- P3 docs DONE: using-disco "The two questions" with real digests from `demos/03-two-questions.ts` (executed by a test),
+  demo 02 rewritten, README/SURFACE/GUIDANCE/STATE synced.
+- P4 fresh-eyes DONE (3 non-fork agents in gutted worktrees, docs-only reading): C cold-ran the quickstart + demos (8m49s,
+  12 friction items, an 18-line script from the docs worked first try — `demos/04-rows-from-docs-alone.ts`); A rebuilt
+  `apps/saucedemo` (14 min, 15/15 live incl. glitch user — pack adopted); B built `apps/openmrs` for OpenMRS O3 (20 min,
+  6/6 live — pack adopted; `prompts/characterize-ehr.md` distilled from it). Logs: `demos/friction-coldrun.md`,
+  `apps/saucedemo/friction-rebuild.md`, `apps/openmrs/friction.md`.
+- P5 fold-back DONE (DECISIONS #40–42): docs order + `--target`/`focus` + run-filtered queries (C); Session surface on one
+  screen, no-pipe launch, data: URLs, sentinel dedupe, evaluate args (A); burst-collapsed cadence + long-poll-shaped
+  `chained`, API-first digest ranking, named ambient/pending requests, label hit-test, toast exclusions, `run-check ready` (B).
+- OPEN from the runs: `until: { any: […] }`; a `run` column on `families` (and query-key-aware families); a free-identifier
+  lint for page functions; a per-pack sentinel mute list.
 
 ## In progress — platform build-out (PLATFORM.md plan)
 - Slice 1 ✅ ways-of-knowing palette named in `apps/README.md` (descriptive, not a schema).
@@ -76,4 +85,4 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - scrollIntoView repaints the whole viewport → absorbed before the causality window opens.
 - Small-target self-repaint (pressed/focus) suppressed from the visual channel.
 - Verdict labels are best-effort: ambient content rendering in the settle tail can retag network→dom without changing timing (DECISIONS #30) — assert timing+attribution, not the label, in non-interference tests.
-- Function libraries live in the pack (`apps/<target>/lib.ts`), generic moves in `lib/` (`until`, `reached`, `assertVisible`, `actIfPresent`, `waitForFrame` — Playwright selector syntax everywhere, no sleeps); live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline, and each exports `target = {url, scope}` for `run-check`.
+- Function libraries live in the pack (`apps/<target>/lib.ts`), generic moves in `lib/` (`until`, `reached`, `firstOf`, `assertVisible`, `actIfPresent`, `waitForFrame` — Playwright selector syntax everywhere, no sleeps); live checks are `check.ts` (not `*.test.ts`) so `bun test` stays offline, and each exports `target = {url, scope}` for `run-check`.

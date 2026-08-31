@@ -28,7 +28,9 @@ let code = 1;
 try {
   await daemon.cdp.send("Target.createTarget", { url: cfg.url });
   const s = await Session.connect(join(base, "session"));
-  await until(s, { selector: "body", visible: true }, { budgetMs: 20000, msg: `run-check: ${cfg.url} did not load` }); // the scoped page attached + rendered
+  // the scoped page attached + rendered; an SPA is "an empty div with 50 scripts pending" until its shell exists,
+  // so a pack may export `ready` (a predicate for its first anchor) — otherwise `body` visible is all we know.
+  await until(s, mod.ready ?? { selector: "body", visible: true }, { budgetMs: 30000, msg: `run-check: ${cfg.url} did not reach ${mod.ready ? "the pack's ready state" : "a visible body"}` });
   const passed = await mod.check(s);
   s.close();
   code = passed ? 0 : 1;

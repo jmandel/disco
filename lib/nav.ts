@@ -12,7 +12,10 @@ export interface UntilOpts { budgetMs?: number; frame?: string; msg?: string }
 
 /** Wait for evidence of a state with a short budget; throw with the diagnosis on expiry. THE postcondition
  *  move: a pack function ends every step with one — or passes the same predicate as `until` to the act
- *  itself, which additionally keeps the causality window open while waiting (preferred; DECISIONS #35). */
+ *  itself, which additionally keeps the causality window open while waiting (preferred; DECISIONS #35).
+ *  Trap: `urlLike` here only matches requests that STARTED or RESPONDED after this call — a response that already
+ *  landed before you called `until()` will not match. "Act, then confirm the wire" belongs on the act as `until`,
+ *  or read the store (`extractFromWire`) instead of waiting. */
 export async function until(s: Session, pred: Pred, opts: UntilOpts = {}): Promise<UntilResult> {
   const r = await s.watch(pred, { budgetMs: opts.budgetMs ?? 5000, frame: opts.frame });
   if (!r.matched) throw new Error(`${opts.msg ?? `until: ${describePred(pred)} not reached`} (${r.elapsedMs}ms)${diagnosisLine(r.diagnosis)}`);

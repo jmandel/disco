@@ -22,7 +22,7 @@ export interface Report {
   target?: { selector?: string; preview?: string; generated?: string | null; frame: string; count?: number; detachedRetried?: boolean };
   settle?: { ms: number; reportedMs: number; timeline: Array<{ t: number; what: string }>; counts: SettleResult["counts"]; pending?: SettleResult["pending"] };
   ui?: { added: string[]; removed: string[]; addedMore: number; removedMore: number; changedBoxes: Array<{ x: number; y: number; w: number; h: number }>; ambientChurn?: number };
-  wire?: { attributed: WireItem[]; more: number; ambientInWindow: number; otherActivity: string[]; ws: number; sse: number; wsPreview?: string[]; ssePreview?: string[] };
+  wire?: { attributed: WireItem[]; more: number; staticHidden?: number; ambientInWindow: number; ambientWithAction?: string[]; otherActivity: string[]; ws: number; sse: number; wsPreview?: string[]; ssePreview?: string[] };
   console?: string[];
   env: { url: string; urlChanged?: string; navigated?: string; focus?: string | null; dialogs?: string[]; sentinels?: Array<{ name: string; title?: string; shot?: string | null; seq: number }>; writeFlag?: string[]; newTargets?: string[]; closedTargets?: string[]; classifierImmature?: boolean; classifierIdleMs?: number; castBlind?: boolean };
   evaluateAfter?: unknown;
@@ -63,7 +63,13 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
   if (i.resolved) r.target = { selector: i.resolved.selector, preview: i.resolved.preview, generated: i.resolved.generated, frame: i.frame.frameId === t?.mainFrameId && !t?.parentTargetId ? "main" : i.frame.frameId, count: i.resolved.count, detachedRetried: i.resolved.detachedRetried || undefined };
   if (i.diagnosis) r.diagnosis = i.diagnosis;
   if (i.until) r.until = i.until;
-  if (i.settle) r.settle = { ms: Math.round(i.settle.tSettled - i.t0), reportedMs: Math.round(i.settle.tReported - i.t0), timeline: i.settle.timeline, counts: i.settle.counts, pending: i.settle.pending };
+  if (i.settle) {
+    // still-active names what is still moving: request IDS become "METHOD path" (nothing in the CLI resolved an id)
+    const pending = i.settle.pending ? { ...i.settle.pending, requests: i.settle.pending.requests.map((id) => { const x = d.inflight.get(id); return x ? `${x.method} ${x.url.slice(0, 100)}` : id; }) } : undefined;
+    r.settle = { ms: Math.round(i.settle.tSettled - i.t0), reportedMs: Math.round(i.settle.tReported - i.t0), timeline: i.settle.timeline, counts: i.settle.counts, pending };
+  }
+  // kinds without a resolved element still say what they acted on (navigate → the url, press → the key)
+  if (!i.resolved && (i.spec.url || i.spec.key)) r.target = { selector: String(i.spec.url ?? i.spec.key), frame: "main" };
 
   // ---- UI delta (semantic, from aria snapshots) ----
   if (i.preAriaText !== undefined && i.postAriaText !== undefined) {
@@ -80,7 +86,11 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
   const rows = d.store.all<any>("SELECT id, method, url, path, family, status, mime, resp_size, body_hash, body_state, attribution, write_kind, t_start, t_end FROM requests WHERE action_id=? ORDER BY t_start", i.actionId);
   const attributed = rows.filter((x) => x.attribution && x.attribution !== "ambient" && x.attribution !== "none");
   const ambient = rows.length - attributed.length;
-  const score = (x: any) => (x.status && (x.status < 200 || x.status >= 400) ? 3000 : 0) + (x.write_kind !== "read" ? 2000 : 0) + Math.min(999, Math.round((x.resp_size ?? 0) / 1000));
+  // Ranking: failures and writes first, then the API surface (XHR/Fetch/Document/WS/SSE), and static assets
+  // (scripts, styles, images, fonts) last — a chart open on an SPA loads 100 JS chunks that used to bury every
+  // REST/FHIR call in "+104 more" (P4-B friction #7).
+  const STATIC = new Set(["Script", "Stylesheet", "Image", "Font", "Media", "Manifest", "TextTrack", "Other"]);
+  const score = (x: any) => (x.status && (x.status < 200 || x.status >= 400) ? 3000 : 0) + (x.write_kind !== "read" ? 2000 : 0) + (STATIC.has(x.resource_type) ? -5000 : 1000) + Math.min(999, Math.round((x.resp_size ?? 0) / 1000));
   attributed.sort((a, b) => score(b) - score(a));
   const shown = attributed.slice(0, defaults.digestMaxRequests).sort((a, b) => a.t_start - b.t_start);
   const wire: WireItem[] = shown.map((x) => ({
@@ -95,7 +105,11 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
   const other = d.store.all<any>(`SELECT method, path, attribution FROM requests WHERE t_start BETWEEN ? AND ? AND (action_id IS NULL OR action_id != ?) AND ${inTree} ORDER BY t_start LIMIT 4`, i.t0, i.tEnd, i.actionId, ...tree);
   const ws = d.store.get<{ n: number }>("SELECT COUNT(*) n FROM ws_frames WHERE t BETWEEN ? AND ?", i.t0, i.tEnd)?.n ?? 0;
   const sse = d.store.get<{ n: number }>("SELECT COUNT(*) n FROM sse_events WHERE t BETWEEN ? AND ?", i.t0, i.tEnd)?.n ?? 0;
-  r.wire = { attributed: wire, more: Math.max(0, attributed.length - wire.length), ambientInWindow: ambient, otherActivity: other.map((o) => `${o.method} ${o.path} (${o.attribution ?? "outside-window"})`), ws, sse };
+  r.wire = { attributed: wire, more: Math.max(0, attributed.length - wire.length), staticHidden: attributed.slice(defaults.digestMaxRequests).filter((x) => STATIC.has(x.resource_type)).length, ambientInWindow: ambient, otherActivity: other.map((o) => `${o.method} ${o.path} (${o.attribution ?? "outside-window"})`), ws, sse };
+  // Ambient-classified requests that fired WITH the action (inside its task slack) are named, not counted: if
+  // one of them is the action's real effect, the classifier is wrong for this app — `families --not-ambient`.
+  const early = rows.filter((x) => x.attribution === "ambient" && x.t_start - i.t0 <= defaults.taskTierSlackMs + 100).slice(0, 3).map((x) => `${x.method} ${x.path ?? x.url}`);
+  if (early.length) r.wire.ambientWithAction = early;
   if (ws > 0) r.wire.wsPreview = d.store.all<any>("SELECT dir, substr(payload,1,80) p FROM ws_frames WHERE t BETWEEN ? AND ? ORDER BY t LIMIT 2", i.t0, i.tEnd).map((x) => `${x.dir === "in" ? "←" : "→"} ${x.p}`);
   if (sse > 0) r.wire.ssePreview = d.store.all<any>("SELECT substr(data,1,80) p FROM sse_events WHERE t BETWEEN ? AND ? ORDER BY t LIMIT 2", i.t0, i.tEnd).map((x) => "← " + x.p);
   const writes = attributed.filter((x) => x.write_kind !== "read").map((x) => `${x.method} ${x.path}`);

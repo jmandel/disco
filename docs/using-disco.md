@@ -47,6 +47,10 @@ classifiers warm up** before you lean on settlement — reports say how far alon
 ≥3 cycles; DECISIONS #29). Scope is mandatory in attach mode so you never record a human's mail/bank tabs.
 Multi-tab: `disco targets` shows which page is `primary` (where `act` goes); `--target <id-prefix|url-part>`
 or `disco focus` picks another — a popup can become the only page if the first tab is closed.
+**Bot-scored hosts:** a public demo behind Cloudflare (Turnstile "Just a moment…") will not let headless
+Chromium in — the targets census shows the `challenges.cloudflare.com` iframe and the screenshot shows the
+checkbox. Attach to a real browser you have passed the challenge in, or use a host without it (the
+OpenMRS pack fell back from `o3.` to `dev3.openmrs.org`).
 
 ### 2. Explore — act, and read what happened
 
@@ -328,6 +332,17 @@ and lean on them. A move graduates from a pack to `lib/` when a second product w
   of attribution *and* the settlement race. `--scope` picks tabs, not hosts.
 - **`evaluate` args are positional** (`{ args: [a, b] }` → `fn(a, b)`); `evaluateAfterArg` / `fnArg` are
   single values. `--eval` output prints in full right under the verdict; `--json` for the whole report.
+- **Page functions capture nothing.** A module constant used inside `until.fn` / `evaluate` is a
+  `ReferenceError` in the page and `tsc` will not tell you — pass it as `fnArg` / `args`. Re-read every
+  in-page function for free identifiers before shipping a pack.
+- **The classifier can be wrong for your app** — a read endpoint re-fetched in bursts on every route change
+  can look chained; a bursty SWR heartbeat can look irregular. Reports name ambient-tagged requests that fired
+  *with* the action; `disco families --not-ambient <family>` / `--ambient <family>` are the overrides (a
+  family is the path shape without the query string, so a manual mark is coarse).
+- **Combining postconditions:** one `until` is one predicate; AND/OR is an in-page `fn`
+  (`() => a() || b()`), and `firstOf` tells you which arm held afterwards. A wire-AND-DOM condition is
+  `until: { urlLike, landed: true }` on the act, then `assertVisible` for the DOM half. To wait for the *page*
+  URL, `until: { fn: () => location.href.includes("/chart") }` (`urlLike` matches *request* URLs).
 - **`disco sql` is read-only** — it can't mutate the store; notes are written only through the daemon.
 - **Warm the classifiers** (`disco idle`) before trusting settlement on a heartbeat-heavy app.
 - Full gotcha list: `STATE.md` "Gotchas" + `DECISIONS.md` #16–31.

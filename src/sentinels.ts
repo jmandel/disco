@@ -10,12 +10,15 @@ const recent = new Map<string, number>(); // dedupe key → last fired (session 
 export async function fireSentinel(d: Daemon, t: TargetState | null, name: SentinelName, detail: Record<string, unknown>, opts: { frameId?: string | null; t?: number; shot?: boolean } = {}): Promise<number> {
   const at = opts.t ?? d.now();
   // Identical firings within a short window collapse to one (a telemetry endpoint 401-ing six times on a page
-  // load produced six sentinels with the same shot — P4-A friction #7). Dialogs/toasts carry no url/status
-  // and dedupe on their title/text instead.
-  const key = `${name}|${detail.url ?? detail.message ?? detail.title ?? detail.text ?? ""}|${detail.status ?? detail.error ?? detail.level ?? ""}`;
-  const last = recent.get(key);
-  if (last !== undefined && at - last < defaults.sentinelDedupeMs) return -1;
-  recent.set(key, at);
+  // load produced six sentinels with the same shot — P4-A friction #7).
+  // Only `error` sentinels dedupe: dialogs/toasts are already announced once per element by the in-page census,
+  // and two identical toasts 3s apart ARE two events ("Saved" twice).
+  if (name === "error") {
+    const key = `${detail.url ?? detail.message ?? ""}|${detail.status ?? detail.error ?? detail.level ?? ""}`;
+    const last = recent.get(key);
+    if (last !== undefined && at - last < defaults.sentinelDedupeMs) return -1;
+    recent.set(key, at);
+  }
   const actionId = t ? d.windowFor(t.targetId, at)?.actionId ?? null : null;
   let shot: string | null = null;
   if (opts.shot !== false && t) {
