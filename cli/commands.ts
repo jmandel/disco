@@ -15,7 +15,7 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
 
   if (cmd === "act") {
     const kind = pos[0];
-    if (!kind || !KINDS.has(kind)) ctx.die(`act <${[...KINDS].join("|")}> [target] [--text t] [--key k] [--url u] [--to sel|--to-dx N --to-dy N] [--value v] [--frame f] [--budget ms] [--eval "fn"] [--json]`);
+    if (!kind || !KINDS.has(kind)) ctx.die(`act <${[...KINDS].join("|")}> [target] [--text t] [--key k] [--url u] [--to sel|--to-dx N --to-dy N] [--value v] [--frame f] [--budget ms] [--eval "fn"] [--until sel | --until-fn "fn" | --until-url part] [--until-budget ms] [--json]`);
     const p: any = {
       kind, target: pos[1], text: f("text"), key: f("key") ?? (kind === "press" ? pos[1] : undefined), url: f("url") ?? (kind === "navigate" ? pos[1] : undefined), value: f("value"),
       to: f("to"), frame: f("frame"), targetId: f("target-id"), budgetMs: num("budget"), quietMs: num("quiet"), noEffectMs: num("no-effect"), maxBudgetMs: num("max-budget"),
@@ -24,6 +24,7 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
     if (kind === "press") p.target = undefined;
     if (kind === "navigate") p.target = undefined;
     if (f("to-dx") || f("to-dy")) p.toOffset = { dx: num("to-dx") ?? 0, dy: num("to-dy") ?? 0 };
+    if (f("until") || f("until-fn") || f("until-url")) p.until = { selector: f("until"), fn: f("until-fn"), urlLike: f("until-url"), budgetMs: num("until-budget"), tailMs: num("until-tail") };
     const report = await call("act", p, (p.maxBudgetMs ?? 30000) + 60000);
     printReport(report, flags, ctx);
     return;
@@ -34,7 +35,7 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
     return;
   }
   if (cmd === "watch") {
-    const p: any = { selector: pos[0], urlLike: f("url-like"), fn: f("fn"), budgetMs: num("budget"), frame: f("frame") };
+    const p: any = { selector: pos[0], urlLike: f("url-like"), fn: f("fn"), fnArg: f("fn-arg") !== undefined ? JSON.parse(f("fn-arg")!) : undefined, budgetMs: num("budget"), frame: f("frame") };
     if (!p.selector && !p.urlLike && !p.fn) ctx.die('watch <selector> | --url-like part | --fn "()=>…" [--budget ms]');
     const r = await call("watch", p);
     if (flags.json) return ctx.out(r);
@@ -53,6 +54,10 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
   const s = r.settle;
   console.log(`${r.action}  ${r.kind}${r.target?.selector ? " " + r.target.selector : ""}  →  ${r.verdict}${s ? `  (settled ${s.ms}ms, reported ${s.reportedMs}ms${s.counts ? `; ${s.counts.requests} req, ${s.counts.mutations} mut, ${s.counts.visuals} px` : ""})` : ""}`);
   if (r.target?.detachedRetried) console.log(`  note: element detached mid-dispatch; re-resolved once (re-render race)`);
+  if (r.until) {
+    if (r.until.matched) console.log(`  ✓ until: matched in ${r.until.elapsedMs}ms${r.until.preview ? "  " + r.until.preview : ""}${r.until.request ? "  req " + r.until.request : ""}`);
+    else { console.log(`  ✗ until: NOT matched in ${r.until.elapsedMs}ms — diagnosis:`); printDiagnosis(r.until.diagnosis); }
+  }
   if (r.diagnosis) printDiagnosis(r.diagnosis);
   if (r.ui && (r.ui.added.length || r.ui.removed.length)) {
     for (const l of r.ui.added.slice(0, 10)) console.log(`  + ${l}`);

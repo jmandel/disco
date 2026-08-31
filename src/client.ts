@@ -6,12 +6,17 @@ import { join, resolve } from "node:path";
 import { RpcClient } from "./rpc.ts";
 import { openStore, type StoreReader } from "./store.ts";
 import type { Report } from "./report.ts";
-import type { ActParams } from "./act.ts";
+import type { ActParams, UntilSpec } from "./act.ts";
+import { defaults } from "../defaults.ts";
 
 export type PageFn = ((...args: any[]) => unknown) | string;
 const src = (f: PageFn): string => (typeof f === "string" ? f : f.toString());
 
-export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco"; expect?: (report: Report) => boolean }
+/** `until` (GUIDANCE §9): the postcondition act() must reach before returning — a selector, an in-page
+ *  predicate (stringified; pass data via `fnArg`), or a request URL fragment. The verdict still reports
+ *  what the page did; `report.until` says whether the state arrived. Automation should always pass one. */
+export interface UntilOptions extends Omit<UntilSpec, "fn"> { fn?: PageFn }
+export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco"; until?: UntilOptions; expect?: (report: Report) => boolean }
 
 /** Resolve a selector to a product's STORE dir (apps/<product>/store). Accepts a product name, a path, or the current app. */
 export function resolveSessionDir(nameOrDir?: string): string {
@@ -47,11 +52,13 @@ export class Session {
   /** `expect` (GUIDANCE §4.1) runs CLIENT-side over the returned report (no daemon-side functions,
    *  BRIEF §1.4): a false expectation does not change waiting — it marks the report surprising and
    *  drops a ledger note, feeding the variability ledger (§7.5). */
-  async act(p: Omit<ActParams, "evaluateAfter"> & { evaluateAfter?: PageFn; expect?: (report: Report) => boolean }): Promise<Report & { surprise?: boolean }> {
+  async act(p: Omit<ActParams, "evaluateAfter" | "until"> & { evaluateAfter?: PageFn; until?: UntilOptions; expect?: (report: Report) => boolean }): Promise<Report & { surprise?: boolean }> {
     const { expect: expectation, ...rest } = p;
     const q: any = { ...rest };
     if (q.evaluateAfter) q.evaluateAfter = src(q.evaluateAfter);
-    const report: Report & { surprise?: boolean } = await this.rpc.call("act", q, (p.maxBudgetMs ?? 30000) + 30000);
+    if (q.until?.fn) q.until = { ...q.until, fn: src(q.until.fn) };
+    const timeout = (p.maxBudgetMs ?? defaults.maxBudgetMs) + (p.until ? (p.until.budgetMs ?? defaults.untilBudgetMs) + (p.until.tailMs ?? defaults.untilTailMs) : 0) + 30000;
+    const report: Report & { surprise?: boolean } = await this.rpc.call("act", q, timeout);
     if (expectation) {
       let ok = false; try { ok = !!expectation(report); } catch { ok = false; }
       if (!ok) {
@@ -74,7 +81,7 @@ export class Session {
     return this.act({ kind: "drag", target, ...(typeof to === "string" ? { to } : { toOffset: to }), ...o });
   }
   awaitSettlement(o: { action?: string; budgetMs?: number; frame?: string } = {}): Promise<Report> { return this.rpc.call("settle", o, (o.budgetMs ?? 30000) + 30000); }
-  watch(pred: { selector?: string; fn?: PageFn; urlLike?: string }, o: { budgetMs?: number; frame?: string } = {}) {
+  watch(pred: { selector?: string; fn?: PageFn; fnArg?: unknown; urlLike?: string }, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult> {
     return this.rpc.call("watch", { ...pred, fn: pred.fn ? src(pred.fn) : undefined, ...o }, (o.budgetMs ?? 30000) + 30000);
   }
   /** Run a self-contained function in a frame. world "main" sees the page's globals; "disco" is our isolated world. */

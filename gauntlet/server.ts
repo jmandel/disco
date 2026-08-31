@@ -25,6 +25,9 @@ import { join } from "node:path";
 export type State = {
   /** latency for /api/slow when the page's Load Chart fires (ms) */
   slowMs: number;
+  /** Load Chart: delay between the last response landing and the chart rendering (ms) — a >Q gap in
+   *  the causal chain, so settlement closes before the screen shows the result (scenario 27) */
+  renderDelayMs: number;
   /** show the "Allergy Review Required" dialog after opening a record */
   modal: boolean;
   /** delay between record render and dialog append (ms) */
@@ -54,6 +57,7 @@ export type State = {
 
 export const DEFAULTS: Readonly<State> = Object.freeze({
   slowMs: 400,
+  renderDelayMs: 0,
   modal: false,
   modalDelayMs: 0,
   toastMs: 2000,

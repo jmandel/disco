@@ -26,7 +26,7 @@ export interface TargetState {
   cast: CastState | null; castVisible: boolean; detached: boolean;
 }
 export interface DaemonEvent { kind: string; t: number; targetId?: string; frameId?: string; actionId?: string | null; ref?: string | number | null; summary?: unknown; seq?: number }
-export interface ActionWindow extends WindowInfo { taskSpans: Array<{ t0: number; t2: number }>; rootTargetId: string }
+export interface ActionWindow extends WindowInfo { taskSpans: Array<{ t0: number; t2: number }>; rootTargetId: string; bg?: () => void /* cancels the background settler that owns this still-active window */ }
 export interface DaemonOptions {
   dir: string; name: string; product?: string; mode: "attach" | "launch"; port?: number; host?: string; wsUrl?: string; scope?: string; scopeTarget?: string; allTargets?: boolean;
   dialogPolicy?: "accept" | "dismiss"; contract?: unknown; launched?: SessionManifest["launched"]; log?: (line: string) => void;

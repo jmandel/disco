@@ -7,11 +7,13 @@ export interface RpcNotification { jsonrpc: "2.0"; method: string; params?: any 
 export class RpcError extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
 
 type Frame = (line: string) => void;
-/** Accumulates bytes and yields complete newline-delimited lines. */
-function framer(onLine: Frame) {
+/** Accumulates bytes and yields complete newline-delimited lines. The decoder is streaming: a multi-byte
+ *  UTF-8 sequence split across socket chunks must not become U+FFFD (exported for the unit test). */
+export function framer(onLine: Frame) {
   let buf = "";
+  const decoder = new TextDecoder();
   return (chunk: Uint8Array | string) => {
-    buf += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+    buf += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
     let i: number;
     while ((i = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, i).trim();

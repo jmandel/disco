@@ -13,7 +13,8 @@ export type SettleSignal =
   | { kind: "new-target"; t: number; targetId?: string }
   | { kind: "download"; t: number };
 
-export type Verdict = "no-effect" | "settled:network" | "settled:dom" | "settled:visual" | "still-active" | "navigated" | "dialog" | "new-target" | "download";
+export type Verdict = "no-effect" | "settled:network" | "settled:dom" | "settled:visual" | "still-active" | "navigated" | "dialog" | "new-target" | "download"
+  | "settled:late"; // written by the background settler when a still-active action eventually quiets (act.ts backgroundSettle)
 
 export interface SettleResult {
   verdict: Verdict;
@@ -60,6 +61,9 @@ export class Settler {
   /** Seed already-in-flight attributed requests (awaitSettlement after still-active). */
   seed(ids: string[]) { for (const id of ids) this.inflight.add(id); if (ids.length) { this.lastNet = this.clock.now(); this.counts.requests += ids.length; } this.schedule(); }
   extend(budgetMs: number) { this.budgetMs = this.clock.now() - this.t0 + budgetMs; this.maxBudgetMs = Math.max(this.maxBudgetMs, this.budgetMs); this.schedule(); }
+  /** Resolve within `tailMs` from now whatever is in flight (a postcondition already holds: the caller only
+   *  wants a short quiet tail, never the full hung-request budget). Only ever LOWERS the deadlines. */
+  cap(tailMs: number) { const at = this.clock.now() - this.t0 + tailMs; this.budgetMs = Math.min(this.budgetMs, at); this.maxBudgetMs = Math.min(this.maxBudgetMs, at); this.schedule(); }
 
   feed(s: SettleSignal) {
     if (this.done) return;

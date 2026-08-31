@@ -7,6 +7,12 @@ export const defaults = {
   budgetMs: 3000,          // caps waiting for quiet; suspended while attributed requests are in flight
   maxBudgetMs: 20000,      // absolute cap even with requests in flight (hung request => "still-active")
   watchBudgetMs: 1500,     // default budget for watch()
+  watchMinGapMs: 40,       // watch(): min gap between predicate re-checks (event bursts coalesce)
+  watchIntervalMs: 250,    // watch(): safety-net re-check interval (canvas-only changes emit no events)
+  untilBudgetMs: 5000,     // act({until}): how long the postcondition may take, measured from dispatch
+  untilTailMs: 1000,       // act({until}): once the postcondition holds, wait at most this long for quiet
+  scrollAbsorbMaxMs: 800,  // scrollIntoView repaint absorbed before the window opens (DECISIONS: gotchas)
+  scrollAbsorbQuietMs: 180, //   … considered absorbed after this much cast quiet
   // --- attribution (GUIDANCE §4.4, BRIEF §1.13) ---
   taskTierSlackMs: 30,     // requests starting within this of the input task end still count as "task"
   ambientMinCount: 3,      // family occurrences needed before it can be classified ambient

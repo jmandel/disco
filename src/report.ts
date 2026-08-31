@@ -2,13 +2,19 @@
 import type { Daemon, FrameInfo, TargetState } from "./daemon.ts";
 import { defaults } from "../defaults.ts";
 import { ariaDiff } from "./selectors.ts";
-import type { SettleResult } from "./settle.ts";
+import type { SettleResult, Verdict } from "./settle.ts";
 
+/** Outcome of a predicate wait — `watch()`'s result, and `report.until` for act({until}). */
+export interface UntilResult { matched: boolean; elapsedMs: number; preview?: string; request?: string; diagnosis?: Diagnosis }
 export interface WireItem { line: string; body: string | null; id: string; family: string; a: string; m: string; p: string; s: number | null; ms: number | null }
 export interface Report {
   action: string;
   kind: string;
-  verdict: string;
+  verdict: Verdict | "diagnosis";
+  /** act({until}): whether the postcondition arrived, and when (independent of `verdict`, GUIDANCE §9). */
+  until?: UntilResult;
+  /** awaitSettlement extended an existing action's window (settle_ms stays relative to the original dispatch). */
+  extended?: boolean;
   target?: { selector?: string; preview?: string; generated?: string | null; frame: string; count?: number; detachedRetried?: boolean };
   settle?: { ms: number; reportedMs: number; timeline: Array<{ t: number; what: string }>; counts: SettleResult["counts"]; pending?: SettleResult["pending"] };
   ui?: { added: string[]; removed: string[]; addedMore: number; removedMore: number; changedBoxes: Array<{ x: number; y: number; w: number; h: number }>; ambientChurn?: number };
@@ -26,7 +32,7 @@ export interface Diagnosis { reason: "not-found" | "occluded" | "detached" | "bu
 export interface BuildInput {
   actionId: string; kind: string; spec: Record<string, unknown>;
   frame: FrameInfo; root: TargetState;
-  verdict: string; settle?: SettleResult; t0: number; tEnd: number;
+  verdict: Verdict | "diagnosis"; settle?: SettleResult; t0: number; tEnd: number; until?: UntilResult;
   resolved?: { selector?: string; preview?: string; generated?: string | null; count?: number; detachedRetried?: boolean };
   pre?: { shot?: string; aria?: string; url?: string; focused?: string | null };
   post?: { shot?: string; aria?: string; url?: string; focused?: string | null };
@@ -52,6 +58,7 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
   const t = d.targets.get(i.frame.targetId);
   if (i.resolved) r.target = { selector: i.resolved.selector, preview: i.resolved.preview, generated: i.resolved.generated, frame: i.frame.frameId === t?.mainFrameId && !t?.parentTargetId ? "main" : i.frame.frameId, count: i.resolved.count, detachedRetried: i.resolved.detachedRetried || undefined };
   if (i.diagnosis) r.diagnosis = i.diagnosis;
+  if (i.until) r.until = i.until;
   if (i.settle) r.settle = { ms: Math.round(i.settle.tSettled - i.t0), reportedMs: Math.round(i.settle.tReported - i.t0), timeline: i.settle.timeline, counts: i.settle.counts, pending: i.settle.pending };
 
   // ---- UI delta (semantic, from aria snapshots) ----

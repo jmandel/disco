@@ -32,14 +32,14 @@ const postJson = (url: string, body: unknown, method = "POST") =>
 // effective ctl state
 // ---------------------------------------------------------------------------
 let state: CtlView = {
-  slowMs: 400, modal: false, modalDelayMs: 0, toastMs: 2000, saveFails: false, ambient: false, notify: false,
+  slowMs: 400, renderDelayMs: 0, modal: false, modalDelayMs: 0, toastMs: 2000, saveFails: false, ambient: false, notify: false,
   heartbeatMs: 5000, pollHoldMs: 3000, wsPushMs: 7000, timeoutMs: 0, rerenderOnHover: true,
   requireAuth: false, notifyPollHoldMs: 25000, xOrigin: "",
 };
 
 /** URL query → state overrides (client-local; never written back to the server). */
 const QUERY_MAP: Record<string, keyof CtlView> = {
-  modal: "modal", modalDelay: "modalDelayMs", slow: "slowMs", toast: "toastMs", ambient: "ambient",
+  modal: "modal", modalDelay: "modalDelayMs", slow: "slowMs", renderDelay: "renderDelayMs", toast: "toastMs", ambient: "ambient",
   heartbeat: "heartbeatMs", timeout: "timeoutMs", rerender: "rerenderOnHover",
 };
 function applyQueryOverrides(base: CtlView): CtlView {
@@ -107,6 +107,8 @@ $("load-chart").addEventListener("click", async () => {
     getJson("/api/chart/a"),
     getJson("/api/chart/b"),
   ]);
+  // #27: an optional client-side gap between "wire done" and "screen shows it" (a timer, no network, no DOM)
+  if (state.renderDelayMs > 0) await new Promise((r) => setTimeout(r, state.renderDelayMs));
   setText("chart", `Chart loaded (${results.length} responses)`);
   setText("chart-status", "idle");
 });

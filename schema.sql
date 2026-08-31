@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS actions (
   kind TEXT NOT NULL,                -- click | type | press | select | navigate | hover | scroll | settle | watch
   spec TEXT,                         -- JSON: the action as requested
   resolved TEXT,                     -- JSON: selector, generated selector, box, target description
-  verdict TEXT,                      -- no-effect | settled:<signal> | still-active | navigated | dialog | new-target | download | diagnosis | error
+  verdict TEXT,                      -- no-effect | settled:network|dom|visual | settled:late | still-active | navigated | dialog | new-target | download | diagnosis
   settle_ms REAL,
   timeline TEXT,                     -- JSON: settlement signal timeline
   pre_shot TEXT, post_shot TEXT,     -- blob hashes

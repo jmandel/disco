@@ -39,6 +39,7 @@ State and defaults. **All ambient traffic is OFF by default** so timing tests ar
 | key | default | side | meaning |
 |---|---|---|---|
 | `slowMs` | 400 | client | latency the page asks for in `GET /api/slow?ms=` (Load Chart) |
+| `renderDelayMs` | 0 | client | Load Chart: gap between the last response landing and the chart rendering (see 27) |
 | `modal` | false | client | show the Allergy Review dialog after a record renders |
 | `modalDelayMs` | 0 | client | delay from record render to dialog append |
 | `toastMs` | 2000 | client | toast lifetime |
@@ -64,6 +65,7 @@ Effective page state = `GET /ctl` on load → URL query overrides → live `ctl`
 | `?modal=1` | `modal` | `1`/`true` = on |
 | `?modalDelay=N` | `modalDelayMs` | |
 | `?slow=N` | `slowMs` | |
+| `?renderDelay=N` | `renderDelayMs` | |
 | `?toast=N` | `toastMs` | |
 | `?ambient=1` | `ambient` | client half only (heartbeat + poll). Periodic WS pushes need `/ctl` |
 | `?heartbeat=N` | `heartbeatMs` | |
@@ -327,6 +329,16 @@ On drag END (mouseup) each widget sends exactly one `POST /api/drag-report` —
 drag's result. A mousedown with no movement still reports on release (deterministic).
 **B§1.9, G§2.1** — held-button move sequences that `Input.dispatchMouseEvent` must express;
 drag outcome visible on screen and wire.
+
+### 27. Delayed render — a >Q gap between wire and screen (`#s-1` knob)
+With `renderDelayMs` > 0, Load Chart (1) waits that long **after all three responses have landed**
+before writing `#chart` / `#chart-status` = "idle" — a plain timer: no request, no DOM mutation, no
+paint during the gap. Attributed-network, DOM and pixel channels are therefore all quiet for longer
+than Q, so settlement closes with `settled:network` while the screen still says "loading…"; the
+expected state appears only afterwards. This is the deterministic form of the "settled ≠ ready"
+trap (debounces, `requestIdleCallback`, second-hop fetches that aren't attributed).
+Knob: `renderDelayMs` / `?renderDelay=`.
+**G§4.2, §9** — the postcondition (`until`) is the readiness contract; the verdict is the evidence.
 
 ## Server API summary
 
