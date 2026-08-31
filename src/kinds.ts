@@ -10,7 +10,7 @@ export const KINDS = {
   type:        { target: true,  task: "input" },      // appends real key events (debounced inputs count keystrokes)
   fill:        { target: true,  task: "input" },      // select-all + type: REPLACES the value ("" clears) — no evaluate() hacks
   press:       { target: false, task: "keydown" },
-  scroll:      { target: false, task: "wheel" },
+  scroll:      { target: "optional", task: "wheel" }, // with a target: resolved + hit-tested, the wheel lands on it (stranger #3 friction #3)
   select:      { target: true,  task: "change" },
   navigate:    { target: false, task: "click" },
   drag:        { target: true,  task: "mouseup" },

@@ -356,6 +356,11 @@ and lean on them. A move graduates from a pack to `lib/` when a second product w
   of attribution *and* the settlement race. `--scope` picks tabs, not hosts.
 - **`evaluate` args are positional** (`{ args: [a, b] }` → `fn(a, b)`); `evaluateAfterArg` / `fnArg` are
   single values. `--eval` output prints in full right under the verdict; `--json` for the whole report.
+- **`document.body.textContent` includes `<script>` source.** A text predicate over the whole body can
+  match a string that only exists in the app's JavaScript (a stranger's "refused" arm matched on a login
+  that had succeeded). Use `innerText`, or scope the predicate to the element that carries the message.
+- **`scroll({ target })` wheels over the target** — the pointer is moved there first — so a scrolling
+  container scrolls, not the page.
 - **Page functions capture nothing.** A module constant used inside `until.fn` / `evaluate` is a
   `ReferenceError` in the page and `tsc` will not tell you — pass it as `fnArg` / `args`. The wait fails
   **at once** with `diagnosis.error: "ReferenceError: X is not defined — page functions capture nothing…"`

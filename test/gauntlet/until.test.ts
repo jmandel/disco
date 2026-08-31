@@ -85,6 +85,14 @@ describe("kinds and predicates", () => {
     await s.fill("#search", "");    expect(await value()).toBe("");
   }, 15000);
 
+  test("scroll({ target }) wheels over the target: the container scrolls, not the page", async () => {
+    await s.click("#load-rows", { until: { urlLike: "/api/rows", landed: true } });
+    const before = await s.evaluate<{ el: number; win: number }>(() => ({ el: document.getElementById("rows")!.scrollTop, win: window.scrollY }));
+    await s.scroll({ target: "#rows", deltaY: 600 });
+    const after = await s.evaluate<{ el: number; win: number }>(() => ({ el: document.getElementById("rows")!.scrollTop, win: window.scrollY }));
+    expect(after.el).toBeGreaterThan(before.el);
+  }, 15000);
+
   test("a missing frame is a diagnosis with a frame census (act) / a waited-for condition (watch), not an RPC error", async () => {
     const r = await s.click("#noop", { frame: "no-such-frame.html" });
     expect(r.verdict).toBe("diagnosis");

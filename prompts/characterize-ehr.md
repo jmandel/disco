@@ -122,7 +122,7 @@ server agrees — the wire is the truth) · native dialogs / `beforeunload`.
   instance with PASS/FAIL per step and durations (`bun scripts/run-check.ts {{PACK}}` must pass).
 - `screenshots/` — a handful of cited shots (anchors, each interstitial, one diagnosis).
 - `friction.md` — brief: where the tool or docs got in your way, in the format of
-  `apps/gauntlet/friction.md`.
+  `apps/gauntlet/friction-dryrun.md`.
 - The store stays in `apps/{{PACK}}/store/` (gitignored, run-tagged) — every claim in the notes cites an act
   id or store cursor so it can be re-queried.
 

@@ -131,7 +131,8 @@ cannot enumerate retroactively; reload the tab if you need their frames). Reques
 ~1.5s after a window closes on the same root are tagged `attribution=trailing` — causally downstream
 (delayed validations) but not part of settlement. In attach mode the navigation that *creates* a tab is an
 unobserved prefix (the daemon attaches after it has begun): the document request and the first assets can
-be missing from `requests` — use `--launch --url`, or reload the tab.
+be missing from `requests` — reload the tab, or use `--launch --url`, which opens `about:blank`, attaches,
+and then navigates as `act:1` so the whole document load is observed.
 
 ## Report & watch shapes (the fields scripts should rely on)
 

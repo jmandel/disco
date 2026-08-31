@@ -211,6 +211,8 @@ Before touching the page, agree with the user on: **goals** (specific questions/
 
 ### 7.2 Recon before flows
 
+Read the app's **configuration surface first** — a config/feature-flag endpoint (`/config*.json`, an import map, a settings or scenario API, a status bar that prints state) tells you which behaviours are armed before you spend an act on any of them; an app with a scenario switch (the gauntlet's `/ctl`) or a runtime config (O3's `config-core_demo.json`) documents itself.
+
 Spend the first minutes characterizing the terrain, because everything after is cheaper with this map:
 
 - **Target/frame census:** how many frames and windows, which contain the app vs chrome vs ads/legacy islands; EHRs frequently nest the working UI several iframes deep, sometimes cross-origin.

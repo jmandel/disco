@@ -2,7 +2,7 @@
 // the store is opened in-process for reads (no daemon round trip). Anywhere a function is accepted it is
 // stringified and runs IN PAGE — closures do not transfer (BRIEF §1.4); see README.
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { RpcClient } from "./rpc.ts";
 import { openStore, type StoreReader } from "./store.ts";
 import type { Report } from "./report.ts";
@@ -22,19 +22,32 @@ const stringifyPred = (p: any): any => ({ ...p, fn: p.fn ? src(p.fn) : undefined
 export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco"; until?: UntilOptions; expect?: (report: Report) => boolean }
 
 /** Resolve a selector to a product's STORE dir (apps/<product>/store). Accepts a product name, a path, or the current app. */
+/** Candidate `apps/` directories: $DISCO_APPS_DIR, then `apps/` in the cwd and every parent, then the same walk
+ *  from the running script's directory — a helper script in a scratch dir still finds the repo's apps/
+ *  (stranger #3 friction #2). */
+function appsDirCandidates(): string[] {
+  const out: string[] = [];
+  if (process.env.DISCO_APPS_DIR) out.push(resolve(process.env.DISCO_APPS_DIR));
+  const walk = (from: string) => { let d = resolve(from); for (let i = 0; i < 8; i++) { out.push(join(d, "apps")); const up = dirname(d); if (up === d) break; d = up; } };
+  walk(process.cwd());
+  if (process.argv[1]) walk(dirname(resolve(process.argv[1])));
+  return [...new Set(out)];
+}
 export function resolveSessionDir(nameOrDir?: string): string {
-  const appsDir = resolve(process.env.DISCO_APPS_DIR ?? join(process.cwd(), "apps"));
   const hasStore = (d: string) => existsSync(join(d, "store.sqlite")) || existsSync(join(d, "manifest.json"));
+  const candidates = appsDirCandidates();
   const s = nameOrDir ?? process.env.DISCO_APP ?? process.env.DISCO_SESSION;
   if (s) {
     if (hasStore(s)) return resolve(s);                                 // a path to a store dir
     if (hasStore(join(s, "store"))) return resolve(join(s, "store"));   // a path to a product home
-    const d = join(appsDir, s, "store"); if (hasStore(d)) return d;     // a product name
-    throw new Error(`no app "${s}" under ${appsDir}`);
+    for (const appsDir of candidates) { const d = join(appsDir, s, "store"); if (hasStore(d)) return d; } // a product name
+    throw new Error(`no app "${s}" with a store under any of: ${candidates.filter((c) => existsSync(c)).join(", ") || candidates[0]} — start one with \`disco session new ${s} …\`, pass the product home's path, or set DISCO_APPS_DIR to the repo's apps/`);
   }
-  const cur = join(appsDir, ".current");
-  if (existsSync(cur)) { const d = join(appsDir, readFileSync(cur, "utf8").trim(), "store"); if (hasStore(d)) return d; }
-  throw new Error(`no current app (run disco session new <product>, pass a product/path, or set DISCO_APP)`);
+  for (const appsDir of candidates) {
+    const cur = join(appsDir, ".current");
+    if (existsSync(cur)) { const d = join(appsDir, readFileSync(cur, "utf8").trim(), "store"); if (hasStore(d)) return d; }
+  }
+  throw new Error(`no current app (run disco session new <product>, pass a product/path, or set DISCO_APP / DISCO_APPS_DIR)`);
 }
 
 export class Session {

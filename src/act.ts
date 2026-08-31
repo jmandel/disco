@@ -140,7 +140,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   let didScroll = false;
   let tHitTest = d.now();
   let point: Point | null = null;
-  if (KINDS[p.kind].target) {
+  if (KINDS[p.kind].target === true || (KINDS[p.kind].target === "optional" && p.target)) {
     if (!p.target) throw new RpcError(-32602, `act ${p.kind} needs a target selector`);
     const r = await sel.resolve(frame, p.target);
     if (!("objectId" in r)) return fail(await diagnose(d, frame, root, "not-found", { error: r.error, candidates: r.candidates }));

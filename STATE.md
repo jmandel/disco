@@ -45,6 +45,9 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - Stranger #2 (Opus) re-ran the EHR job from `prompts/characterize-ehr.md` with the fixed tool: 26m06s, 12/12, deeper pack
   (adopted); its three tool bugs fixed (nested combinators, relaunch stale port, cron-shaped cadence) + task tier over a
   learned ambient flag (DECISIONS #45).
+- Stranger #3 (Opus) characterized the gauntlet as an unknown app from `prompts/characterize-app.md` (the general prompt):
+  15m37s, 25/25, all 26 sections mapped, the `/ctl` control plane found unaided — pack adopted; fold-back: launch mode
+  observes the document load (act:1), `scroll({target})`, `connect()` resolution, two doc items (DECISIONS #46).
 - OPEN: query-key-aware family identity (only if rules prove insufficient).
 
 ## In progress — platform build-out (PLATFORM.md plan)

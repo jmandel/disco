@@ -33,13 +33,13 @@ describe("gauntlet function library", () => {
   }, 30000);
 
   test("extractRowNames returns the full 10k off the wire", async () => {
-    const names = await g.extractRowNames(s);
-    expect(names.length).toBe(10000);
-    expect(names).toContain("Zebra-Row-9741");        // never rendered in the DOM
+    const rows = await g.loadRows(s);
+    expect(rows.length).toBe(10000);
+    expect(rows.map((r) => r.name)).toContain("Zebra-Row-9741");        // never rendered in the DOM
   }, 20000);
 
   test("search returns the debounced hits", async () => {
-    const hits = await g.search(s, "ada"); // matches "Ada Lovelace" in the gauntlet name list
+    const { hits } = await g.search(s, "ada"); // matches "Ada Lovelace" in the gauntlet name list
     expect(hits.length).toBeGreaterThan(0);
   }, 15000);
 
@@ -65,7 +65,7 @@ describe("gauntlet function library", () => {
     expect(() => reached({ verdict: "diagnosis", kind: "click", diagnosis: { reason: "occluded", occludedBy: "#x" } } as any)).toThrow(/occluded by #x/);
   }, 15000);
 
-  test("assertHome throws off-anchor (robustness: functions verify where they are)", async () => {
+  test("assertShell throws off-anchor (robustness: functions verify where they are)", async () => {
     await env.open("/away.html");                     // navigate somewhere without #load-chart
     await sleep(300);
     const s2 = await Session.connect(env.dir);
@@ -74,7 +74,7 @@ describe("gauntlet function library", () => {
       const targets = await s2.targets();
       const away = targets.find((t: any) => t.url.includes("away.html"));
       if (away) await s2.focusTarget(away.targetId);
-      await expect(g.assertHome(s2)).rejects.toThrow(/anchor/);
+      await expect(g.assertShell(s2)).rejects.toThrow(/anchor|shell/i);
     } finally { s2.close(); }
   }, 20000);
 });

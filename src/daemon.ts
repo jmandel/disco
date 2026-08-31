@@ -185,7 +185,7 @@ export class Daemon {
   private matchesScope(url: string, targetId?: string): boolean {
     if (this.scopeTargetId) return targetId === this.scopeTargetId; // children/popups still adopt via opener logic
     if (!this.scopeRe && !this.scopeSub) return true; // launch mode / explicit --all-targets
-    if (!url || url === "about:blank") return false;
+    if (!url || url === "about:blank") return this.manifest?.mode === "launch"; // a launched browser's blank tab is ours: it gets instrumented BEFORE its first navigation
     return this.scopeRe ? this.scopeRe.test(url) : url.includes(this.scopeSub!);
   }
   /** Observed idle time: ms with no causality window open anywhere (review F8). */

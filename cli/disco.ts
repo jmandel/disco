@@ -85,7 +85,9 @@ switch (cmd) {
       const daemonArgs = ["--dir", dir, "--name", runName, "--product", product];
       let launchedPid: number | undefined;
       if (has("launch")) {
-        const l = await launchChromium({ headless: has("headless"), userDataDir: join(dir, "profile"), url: f("url") });
+        // Launch on about:blank and navigate AFTER the daemon has attached, so the top-level document load is
+        // observed (act:1) instead of being an unobserved prefix (stranger #3 friction #1).
+        const l = await launchChromium({ headless: has("headless"), userDataDir: join(dir, "profile") });
         launchedPid = l.pid;
         daemonArgs.push("--attach", String(l.port), "--launched-pid", String(l.pid), "--user-data-dir", l.userDataDir, "--mode", "launch");
         if (has("headless")) daemonArgs.push("--headless");
@@ -130,7 +132,13 @@ switch (cmd) {
       writeFileSync(join(appsDir(), ".current"), product);
       const c = await RpcClient.connect(sock);
       if (f("state") && has("launch")) { await c.call("state.restore", { state: JSON.parse(readFileSync(f("state")!, "utf8")) }); console.error("storage state restored"); }
-      const info = await c.call("session.info");
+      let info = await c.call("session.info");
+      if (has("launch") && f("url")) {
+        // launched on about:blank; navigate now that the daemon is attached, so the document load is observed as act:1
+        const nav = await c.call("act", { kind: "navigate", url: f("url"), budgetMs: 8000, maxBudgetMs: 12000, until: { fn: "() => document.readyState === \"complete\"", budgetMs: 20000, tailMs: 1500 } }, 90000).catch((e: Error) => { console.error(`navigate failed: ${e.message}`); return null; });
+        if (nav) console.error(`${nav.action}  navigate ${f("url")}  →  ${nav.verdict}${nav.settle ? ` (settled ${nav.settle.ms}ms; ${nav.settle.counts?.requests ?? 0} req)` : ""}`);
+        info = await c.call("session.info");
+      }
       // What did we attach to? A bot challenge (Cloudflare Turnstile, hCaptcha, Akamai, PerimeterX…) is a 403 page
       // that a script mistakes for "loading" — name it now (GUIDANCE §8) instead of letting the run invest in it.
       try {
