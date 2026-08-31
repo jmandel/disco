@@ -77,6 +77,74 @@ describe("act({until}): the postcondition is the readiness contract", () => {
   }, 10000);
 });
 
+describe("kinds and predicates", () => {
+  test("fill replaces the value with real key events; '' clears", async () => {
+    const value = () => s.evaluate<string>(() => (document.getElementById("search") as HTMLInputElement).value);
+    await s.fill("#search", "abc"); expect(await value()).toBe("abc");
+    await s.fill("#search", "xy");  expect(await value()).toBe("xy");
+    await s.fill("#search", "");    expect(await value()).toBe("");
+  }, 15000);
+
+  test("a missing frame is a diagnosis with a frame census (act) / a waited-for condition (watch), not an RPC error", async () => {
+    const r = await s.click("#noop", { frame: "no-such-frame.html" });
+    expect(r.verdict).toBe("diagnosis");
+    expect(r.diagnosis!.reason).toBe("frame-not-found");
+    expect(r.diagnosis!.candidates!.length).toBeGreaterThan(0);
+    const w = await s.watch({ selector: "body" }, { frame: "no-such-frame.html", budgetMs: 400 });
+    expect(w.matched).toBe(false);
+    expect(w.diagnosis!.reason).toBe("frame-not-found");
+    expect((await s.watch({ selector: "#if-name" }, { frame: "iframe.html", budgetMs: 2000 })).matched).toBe(true); // an existing child frame
+  }, 10000);
+
+  test("`until.frame`: a postcondition in another frame than the action (and a frame that never comes is a diagnosis)", async () => {
+    const r = await s.fill("#if-name", "x", { frame: "iframe.html", until: { selector: "#load-chart", frame: "main" } });
+    expect(r.until!.matched).toBe(true);
+    const bad = await s.click("#noop", { until: { selector: "#anything", frame: "never.html", budgetMs: 400 } });
+    expect(bad.until!.matched).toBe(false);
+    expect(bad.until!.diagnosis!.reason).toBe("frame-not-found");
+  }, 15000);
+
+  test("`visible` requires a laid-out box; `landed` waits for the response, not just the request start", async () => {
+    expect((await s.watch({ selector: "#spinner", visible: true }, { budgetMs: 500 })).matched).toBe(true);
+    await setCtl({ slowMs: 1000, renderDelayMs: 0 });
+    const a = await s.click("#load-chart", { until: { urlLike: "/api/slow" } });
+    expect(a.until!.matched).toBe(true);
+    expect(a.until!.elapsedMs).toBeLessThan(700);                 // matched on request START
+    await s.watch({ fn: isIdle }, { budgetMs: 4000 });
+    const b = await s.click("#load-chart", { until: { urlLike: "/api/slow", landed: true } });
+    expect(b.until!.matched).toBe(true);
+    expect(b.until!.elapsedMs).toBeGreaterThanOrEqual(950);       // matched when the 1s response LANDED
+    await setCtl({ slowMs: 100 });
+  }, 20000);
+});
+
+describe("responsiveness is a contract, not a hope", () => {
+  test("a no-op act reports at ~noEffectMs and spends < 400ms outside the wait (resolve + 2 snapshots + report)", async () => {
+    const r = await s.click("#noop");
+    expect(r.verdict).toBe("no-effect");
+    const t = r.timing!;
+    expect(t.reportedMs).toBeLessThan(defaults.noEffectMs + 120);   // the no-effect tier is measured from dispatch, not from entry (would catch pointToRoot-after-t0 again)
+    expect(t.overheadMs).toBeLessThan(400);                          // daemon work per act, under full-suite load
+    expect(t.totalMs).toBeGreaterThanOrEqual(t.waitMs + t.overheadMs - 5);
+  }, 10000);
+
+  test("watch is event-driven: a DOM change is noticed within ~Q of happening, not on the next interval tick", async () => {
+    await s.evaluate(() => { setTimeout(() => { const el = document.createElement("div"); el.id = "late-div"; el.textContent = "late"; document.body.appendChild(el); }, 300); });
+    const w = await s.watch({ selector: "#late-div" }, { budgetMs: 2000 });
+    expect(w.matched).toBe(true);
+    expect(w.elapsedMs).toBeGreaterThanOrEqual(280);
+    expect(w.elapsedMs).toBeLessThan(300 + 160);                     // mutation batch (40ms) + one check — not +250ms
+    await s.evaluate(() => document.getElementById("late-div")?.remove());
+  }, 10000);
+
+  test("until matched at once costs at most the quiet tail, never the until budget", async () => {
+    const r = await s.click("#noop", { until: { selector: "#load-chart", budgetMs: 5000 } }); // already true post-dispatch
+    expect(r.until!.matched).toBe(true);
+    expect(r.until!.elapsedMs).toBeLessThan(150);
+    expect(r.timing!.waitMs).toBeLessThan(defaults.noEffectMs + 200);
+  }, 10000);
+});
+
 describe("settlement paths the review found untested", () => {
   test("trailing: without until, the delayed save-status request is tagged trailing on this action", async () => {
     const r = await s.click("#save");

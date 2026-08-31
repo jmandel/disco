@@ -60,9 +60,9 @@ blob <hash> [--out file]      copy a blob out / print text
 eval "<fn source>" [--frame f] [--world main] [--args json]   run an in-page function, e.g. "() => document.title"
 cdp <Method> [json params] [--target id | --browser]
 act <kind> [target] [--frame f] [--budget ms] [--eval "fn"] [--until sel|--until-fn "fn"|--until-url part] [--until-budget ms] [--json]
-                              kind: click|rightclick|dblclick|middleclick|hover|type(--text)|press(key)|scroll|select(--value)|navigate(url)|drag(--to|--to-dx/--to-dy)
+                              kind: click|rightclick|dblclick|middleclick|hover|type(--text)|fill(--text, replaces)|press(key)|scroll|select(--value)|navigate(url)|drag(--to|--to-dx/--to-dy)
 settle [--action act:N] [--budget ms]   re-arm / extend settlement without acting
-watch <selector> | --url-like part | --fn "fn" [--fn-arg json] [--budget ms]   evidence-driven wait; diagnosis on expiry
+watch <selector> [--visible] | --url-like part [--landed] | --fn "fn" [--fn-arg json] [--budget ms]   evidence-driven wait; diagnosis on expiry
 Select an app via --app <product> (or --session / DISCO_APP / the current app). One home per app: apps/<product>/ (committed pack) + apps/<product>/store/ (gitignored history: one run-tagged SQLite + blobs + stream.jsonl).`;
 
 const cmd = pos[0];

@@ -26,11 +26,12 @@ if (pre.modalUp) {
 }
 
 // Transition: click record button; on occlusion (modal raced us), ack and retry once.
-let r: any = await s.click(`#record-${n}`, { budgetMs: 4000, evaluateAfter: () => document.getElementById("record")?.textContent });
+const open = () => s.click(`#record-${n}`, { budgetMs: 4000, until: { urlLike: `/api/record/${n}`, landed: true }, evaluateAfter: () => document.getElementById("record")?.textContent });
+let r: any = await open();
 if (r.verdict === "diagnosis" && JSON.stringify(r).includes("record-modal")) {
   console.log(`occluded by interstitial; acknowledging and retrying (${r.action})`);
   await s.click("#modal-ack", { budgetMs: 2000 });
-  r = await s.click(`#record-${n}`, { budgetMs: 4000, evaluateAfter: () => document.getElementById("record")?.textContent });
+  r = await open();
 }
 if (r.verdict === "diagnosis") die("record button not actionable", r.report ?? r);
 

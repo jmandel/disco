@@ -13,6 +13,9 @@ export const defaults = {
   untilTailMs: 1000,       // act({until}): once the postcondition holds, wait at most this long for quiet
   scrollAbsorbMaxMs: 800,  // scrollIntoView repaint absorbed before the window opens (DECISIONS: gotchas)
   scrollAbsorbQuietMs: 180, //   … considered absorbed after this much cast quiet
+  diagnosisDomActiveMs: 1000, // diagnosis.domActive = a DOM mutation within this of the failure
+  stalledEvictMs: 60000,   // stalled/unread in-flight requests leave `inflight` after this (review F4: don't haunt diagnoses)
+  ambientDom: { minSamples: 5, spanMs: 1500, medianMs: 600, bigBatch: 12 }, // a DOM root is ambient churn when it recurs ≥minSamples times at ≤medianMs cadence over ≥spanMs of idle; batches bigger than bigBatch are real work regardless
   // --- attribution (GUIDANCE §4.4, BRIEF §1.13) ---
   taskTierSlackMs: 30,     // requests starting within this of the input task end still count as "task"
   ambientMinCount: 3,      // family occurrences needed before it can be classified ambient

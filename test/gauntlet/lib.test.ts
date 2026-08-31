@@ -6,6 +6,7 @@ import { startEnv, type Env, sleep } from "../helpers.ts";
 import { registerActions } from "../../src/act.ts";
 import { Session } from "../../src/client.ts";
 import * as g from "../../apps/gauntlet/lib.ts";
+import { assertVisible, until, reached } from "../../lib/nav.ts";
 
 let env: Env; let s: Session;
 beforeAll(async () => {
@@ -52,6 +53,16 @@ describe("gauntlet function library", () => {
       const v = await s2.evaluate<string>(() => (document.getElementById("search") as HTMLInputElement).value);
       expect(v).toBe("a_b-c.d");
     } finally { s2.close(); }
+  }, 15000);
+
+  test("lib/nav: assertVisible speaks Playwright syntax and is budgeted; until()/reached() carry the diagnosis", async () => {
+    await assertVisible(s, 'role=button[name="Load Chart"]');
+    const t0 = performance.now();
+    await expect(assertVisible(s, "#never-exists", undefined, { budgetMs: 400 })).rejects.toThrow(/anchor not reached.*budget-expired/s);
+    expect(performance.now() - t0).toBeLessThan(2500);
+    await expect(until(s, { selector: "#never-exists" }, { budgetMs: 300 })).rejects.toThrow(/not reached/);
+    expect(() => reached({ verdict: "no-effect", kind: "click", until: { matched: false, elapsedMs: 5 } } as any)).toThrow(/postcondition not reached/);
+    expect(() => reached({ verdict: "diagnosis", kind: "click", diagnosis: { reason: "occluded", occludedBy: "#x" } } as any)).toThrow(/occluded by #x/);
   }, 15000);
 
   test("assertHome throws off-anchor (robustness: functions verify where they are)", async () => {

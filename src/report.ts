@@ -6,6 +6,7 @@ import type { SettleResult, Verdict } from "./settle.ts";
 
 /** Outcome of a predicate wait — `watch()`'s result, and `report.until` for act({until}). */
 export interface UntilResult { matched: boolean; elapsedMs: number; preview?: string; request?: string; diagnosis?: Diagnosis }
+export interface Timing { resolveMs: number; absorbMs: number; preMs: number; settleMs: number; reportedMs: number; untilMs?: number; waitMs: number; postMs: number; buildMs: number; overheadMs: number; totalMs: number }
 export interface WireItem { line: string; body: string | null; id: string; family: string; a: string; m: string; p: string; s: number | null; ms: number | null }
 export interface Report {
   action: string;
@@ -15,6 +16,9 @@ export interface Report {
   until?: UntilResult;
   /** awaitSettlement extended an existing action's window (settle_ms stays relative to the original dispatch). */
   extended?: boolean;
+  /** Where the milliseconds went. Page time = settleMs/reportedMs/untilMs; daemon overhead = everything else
+   *  (resolve + hit-test + pre/post snapshots + report build). Responsiveness is a tested contract, not a hope. */
+  timing?: Timing;
   target?: { selector?: string; preview?: string; generated?: string | null; frame: string; count?: number; detachedRetried?: boolean };
   settle?: { ms: number; reportedMs: number; timeline: Array<{ t: number; what: string }>; counts: SettleResult["counts"]; pending?: SettleResult["pending"] };
   ui?: { added: string[]; removed: string[]; addedMore: number; removedMore: number; changedBoxes: Array<{ x: number; y: number; w: number; h: number }>; ambientChurn?: number };
@@ -27,7 +31,7 @@ export interface Report {
   cursor: { from: number; to: number };
   diagnosis?: Diagnosis;
 }
-export interface Diagnosis { reason: "not-found" | "occluded" | "detached" | "budget-expired" | "error"; error?: string; candidates?: string[]; occludedBy?: string; census?: unknown; pendingRequests?: string[]; domActive?: boolean; shot?: string | null }
+export interface Diagnosis { reason: "not-found" | "occluded" | "detached" | "budget-expired" | "frame-not-found" | "error"; error?: string; candidates?: string[]; occludedBy?: string; census?: unknown; pendingRequests?: string[]; domActive?: boolean; shot?: string | null }
 
 export interface BuildInput {
   actionId: string; kind: string; spec: Record<string, unknown>;
@@ -84,7 +88,11 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
     body: h16(x.body_hash) ?? null, id: x.id, family: x.family, a: x.attribution,
     m: x.method, p: x.path ?? x.url, s: x.status ?? null, ms: x.t_end ? Math.round(x.t_end - x.t_start) : null, // structured fields (dry-run friction #1)
   }));
-  const other = d.store.all<any>("SELECT method, path, attribution FROM requests WHERE t_start BETWEEN ? AND ? AND (action_id IS NULL OR action_id != ?) ORDER BY t_start LIMIT 4", i.t0, i.tEnd, i.actionId);
+  // Time-windowed queries are scoped to THIS action's target tree (like sentinels, review F15) so a
+  // multi-tab session's other tabs don't leak into the report.
+  const tree = d.treeIds(i.root.rootTargetId);
+  const inTree = `target_id IN (${tree.map(() => "?").join(",")})`;
+  const other = d.store.all<any>(`SELECT method, path, attribution FROM requests WHERE t_start BETWEEN ? AND ? AND (action_id IS NULL OR action_id != ?) AND ${inTree} ORDER BY t_start LIMIT 4`, i.t0, i.tEnd, i.actionId, ...tree);
   const ws = d.store.get<{ n: number }>("SELECT COUNT(*) n FROM ws_frames WHERE t BETWEEN ? AND ?", i.t0, i.tEnd)?.n ?? 0;
   const sse = d.store.get<{ n: number }>("SELECT COUNT(*) n FROM sse_events WHERE t BETWEEN ? AND ?", i.t0, i.tEnd)?.n ?? 0;
   r.wire = { attributed: wire, more: Math.max(0, attributed.length - wire.length), ambientInWindow: ambient, otherActivity: other.map((o) => `${o.method} ${o.path} (${o.attribution ?? "outside-window"})`), ws, sse };
@@ -94,21 +102,20 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
   if (writes.length) r.env.writeFlag = writes.slice(0, 4);
 
   // ---- console ----
-  const cons = d.store.all<any>("SELECT level, text FROM console WHERE t BETWEEN ? AND ? AND level IN ('warning','error','exception') ORDER BY t LIMIT ?", i.t0, i.tEnd, defaults.digestMaxConsole);
+  const cons = d.store.all<any>(`SELECT level, text FROM console WHERE t BETWEEN ? AND ? AND level IN ('warning','error','exception') AND ${inTree} ORDER BY t LIMIT ?`, i.t0, i.tEnd, ...tree, defaults.digestMaxConsole);
   if (cons.length) r.console = cons.map((c) => `${c.level}: ${String(c.text).slice(0, 160)}`);
 
   // ---- environment flags ----
   if (i.pre?.url && i.post?.url && i.pre.url !== i.post.url) r.env.urlChanged = i.post.url;
   if (i.settle?.navigated) r.env.navigated = i.settle.navigated;
   r.env.focus = i.post?.focused ?? null;
-  const dlg = d.store.all<any>("SELECT type, message FROM dialogs WHERE t BETWEEN ? AND ?", i.t0 - 50, i.tEnd);
+  const dlg = d.store.all<any>(`SELECT type, message FROM dialogs WHERE t BETWEEN ? AND ? AND ${inTree}`, i.t0 - 50, i.tEnd, ...tree);
   if (dlg.length) r.env.dialogs = dlg.map((x) => `${x.type}: ${String(x.message).slice(0, 120)}`);
   const newT = d.store.all<any>("SELECT target_id, url FROM targets WHERE attached_t BETWEEN ? AND ? AND scoped=1", i.t0, i.tEnd);
   if (newT.length) r.env.newTargets = newT.map((x) => `${x.target_id.slice(0, 8)} ${x.url}`);
   const goneT = d.store.all<any>("SELECT target_id, url FROM targets WHERE detached_t BETWEEN ? AND ?", i.t0, i.tEnd);
   if (goneT.length) r.env.closedTargets = goneT.map((x) => `${x.target_id.slice(0, 8)} ${x.url}`);
   // Sentinel flags are scoped to THIS action's target tree (review F15); global ones (no target) ride along.
-  const tree = d.treeIds(i.root.rootTargetId);
   const sent = d.store.all<any>("SELECT seq, name, detail, shot, target_id FROM sentinels WHERE reported=0 ORDER BY seq LIMIT 16").filter((s) => !s.target_id || tree.includes(s.target_id)).slice(0, 8);
   if (sent.length) {
     r.env.sentinels = sent.map((s) => ({ seq: s.seq, name: s.name, title: safeTitle(s.detail), shot: h16(s.shot) ?? null }));
@@ -132,5 +139,5 @@ export async function diagnose(d: Daemon, frame: FrameInfo, root: TargetState, r
   const lastMut = d.store.get<{ t: number }>("SELECT MAX(t) t FROM mutations WHERE target_id=?", root.targetId)?.t ?? -1;
   let shot: string | null = null;
   try { shot = (await d.captureShot(root, "diag")).hash; } catch {}
-  return { reason, census, pendingRequests: pending, domActive: lastMut > 0 && d.now() - lastMut < 1000, shot, ...extra };
+  return { reason, census, pendingRequests: pending, domActive: lastMut > 0 && d.now() - lastMut < defaults.diagnosisDomActiveMs, shot, ...extra };
 }

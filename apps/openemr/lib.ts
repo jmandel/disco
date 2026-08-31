@@ -14,7 +14,7 @@
 //
 import type { Session } from "../../src/client.ts";
 import { extractFromWire, wireHas } from "../../lib/wire.ts";
-import { waitForFrame } from "../../lib/nav.ts";
+import { reached, until, waitForFrame } from "../../lib/nav.ts";
 
 export const INSTANCES = {
   main: "https://demo.openemr.io/openemr",
@@ -25,29 +25,18 @@ export const DEFAULT_BASE = INSTANCES.a;
 export const DEMO_CREDENTIALS = { physician: "physician", clinician: "clinician", admin: "pass", receptionist: "receptionist" };
 const FINDER_FRAME = "dynamic_finder.php";
 const CHART_FRAME = "demographics.php";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ---- anchors (GUIDANCE §7.3, §9): reliably reach a named state, or throw a clear error ----
 
 /** Anchor: the main application shell (logged in, tab bar present). */
 export async function assertMainShell(s: Session, budgetMs = 15000): Promise<void> {
-  const t0 = Date.now();
-  for (;;) {
-    if (await s.evaluate<boolean>(() => location.href.includes("main/tabs/main.php")).catch(() => false)) return;
-    if (Date.now() - t0 > budgetMs) throw new Error(`assertMainShell: not at the app shell (url=${await s.evaluate(() => location.href).catch(() => "?")})`);
-    await sleep(300);
-  }
+  await until(s, { fn: () => location.href.includes("main/tabs/main.php") }, { budgetMs, msg: "assertMainShell: not at the app shell" });
 }
 
 /** Anchor: a patient chart dashboard is open (optionally for a specific pid). */
 export async function assertChart(s: Session, pid?: number, budgetMs = 15000): Promise<void> {
-  const t0 = Date.now();
-  for (;;) {
-    const ok = await s.evaluate<boolean>(() => !!document.getElementById("medical_problem_ps_expand"), { frame: CHART_FRAME }).catch(() => false);
-    if (ok) return;
-    if (Date.now() - t0 > budgetMs) throw new Error(`assertChart: chart dashboard not reached${pid != null ? ` for pid ${pid}` : ""}`);
-    await sleep(300);
-  }
+  // `frame:` on a predicate also waits for the frame itself to appear (watch re-resolves it per check)
+  await until(s, { selector: "#medical_problem_ps_expand" }, { frame: CHART_FRAME, budgetMs, msg: `assertChart: chart dashboard not reached${pid != null ? ` for pid ${pid}` : ""}` });
 }
 
 // ---- steps ----
@@ -63,10 +52,11 @@ export async function login(s: Session, opts: { user?: string; pass?: string; ba
   const authed = await s.evaluate<boolean>(() => location.href.includes("main/tabs/main.php")).catch(() => false);
   if (!authed) await s.navigate(`${base}/index.php`, { budgetMs: 15000 });
   if (await s.evaluate<boolean>(() => !!document.querySelector("#authUser")).catch(() => false)) {
-    await s.type("#authUser", user);
-    await s.type("#clearPass", pass);
-    const r = await s.click("#login-button", { budgetMs: 20000 });
-    if (r.verdict === "diagnosis") throw new Error("login: could not submit the login form");
+    await s.fill("#authUser", user);
+    await s.fill("#clearPass", pass);
+    // Login redirect + shell build is ~6-7s on the demo: the network detector holds settlement, and the
+    // postcondition is the shell URL (the main-world predicate simply reads false while documents swap).
+    reached(await s.click("#login-button", { budgetMs: 20000, until: { fn: () => location.href.includes("main/tabs/main.php"), budgetMs: 25000 } }), "login: submit");
   }
   await assertMainShell(s);
 }
@@ -79,8 +69,8 @@ export async function openFinder(s: Session): Promise<void> {
   const r = await s.click("text=Finder", { budgetMs: 12000 });
   if (r.verdict === "diagnosis") throw new Error("openFinder: could not click Finder");
   await waitForFrame(s, FINDER_FRAME, 12000);
-  const t0 = Date.now();
-  while (!wireHas(s.store, "dynamic_finder_ajax") && Date.now() - t0 < 8000) await sleep(300);
+  // the finder's list JSON is the fact source; wait for it to land unless a previous open already captured it
+  if (!wireHas(s.store, "dynamic_finder_ajax")) await until(s, { urlLike: "dynamic_finder_ajax", landed: true }, { budgetMs: 8000 }).catch(() => {});
 }
 
 export interface Patient { pid: number; name: string; dob: string; externalId: string }
@@ -104,13 +94,11 @@ export async function findPatient(s: Session, name: string): Promise<Patient> {
   const hit = (rows: Patient[]) => rows.find((r) => r.name.toLowerCase().includes(name.toLowerCase()));
   let found = hit(readFinder(s));
   if (!found) {
-    // Search by the first name token (the column filter matches poorly on the full "Last, First" string),
-    // clearing any residual filter first (type() appends, it doesn't replace).
+    // Search by the first name token (the column filter matches poorly on the full "Last, First" string).
+    // fill() replaces any residual filter; the postcondition is the per-keystroke ajax LANDING (the until tail
+    // then absorbs the later keystrokes' requests), after which the newest list is re-read.
     const term = (name.split(/[,\s]+/).filter(Boolean)[0] ?? name);
-    await s.evaluate((sel: string) => { const el = document.querySelector(sel) as HTMLInputElement | null; if (el) { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true })); } }, { frame: FINDER_FRAME, args: ['input[placeholder="Search by Name"]'] });
-    const r = await s.type('css=input[placeholder="Search by Name"]', term, { frame: FINDER_FRAME });
-    if (r.verdict === "diagnosis") throw new Error("findPatient: could not use the finder name search");
-    await sleep(500); // the per-keystroke column filter's trailing ajax lands, then re-read the newest list
+    reached(await s.fill('css=input[placeholder="Search by Name"]', term, { frame: FINDER_FRAME, until: { urlLike: "dynamic_finder_ajax", landed: true, budgetMs: 8000 } }), "findPatient: finder name search");
     found = hit(readFinder(s));
   }
   if (!found) throw new Error(`findPatient: no patient matching ${JSON.stringify(name)}`);
@@ -124,9 +112,9 @@ export async function openPatient(s: Session, target: number | string): Promise<
   let pid: number;
   if (typeof target === "string") { pid = (await findPatient(s, target)).pid; }        // search leaves the row visible
   else { pid = target; await openFinder(s); }
-  const r = await s.click(`#pid_${pid}`, { frame: FINDER_FRAME, budgetMs: 15000 });
-  if (r.verdict === "diagnosis") throw new Error(`openPatient(${pid}): could not click the finder row (on the current page? open by name to search)`);
-  await waitForFrame(s, CHART_FRAME, 15000);
+  // The postcondition of a finder-row click lives in a DIFFERENT frame — the chart frame the click creates —
+  // so `until` names it (`frame:`); the frame is waited for, then the dashboard landmark inside it.
+  reached(await s.click(`#pid_${pid}`, { frame: FINDER_FRAME, budgetMs: 15000, until: { selector: "#medical_problem_ps_expand", frame: CHART_FRAME, budgetMs: 20000 } }), `openPatient(${pid}): finder row (on the current page? open by name to search)`);
   await assertChart(s, pid);
   return pid;
 }
@@ -150,14 +138,9 @@ export async function extractSummary(s: Session): Promise<ChartSummary> {
     };
     return { problems: read("medical_problem_ps_expand"), allergies: read("allergy_ps_expand"), medications: read("medication_ps_expand") };
   }, { frame: CHART_FRAME });
-  const t0 = Date.now();
-  let last = await readOnce();
-  while (Date.now() - t0 < 6000) {
-    if (last.problems.length || last.allergies.length || last.medications.length) break;
-    await sleep(300);
-    last = await readOnce();
-  }
-  return last;
+  // wait (bounded) for any card to carry an entry — a patient may genuinely have none, so expiry is not an error
+  await until(s, { fn: () => ["medical_problem_ps_expand", "allergy_ps_expand", "medication_ps_expand"].some((id) => !!document.getElementById(id)?.querySelector(".list-group-item, a")) }, { frame: CHART_FRAME, budgetMs: 6000 }).catch(() => {});
+  return readOnce();
 }
 
 /** Convenience: just the problem list from the open chart. */

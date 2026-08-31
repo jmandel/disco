@@ -135,7 +135,7 @@ function armStallTimer(d: Daemon, t: TargetState, inf: InflightRequest) {
       d.store.update("requests", { body_hash: stored.hash, resp_size: stored.size, body_state: "unread" }, "id=? AND t_end IS NULL", [inf.id]);
     } catch { d.store.update("requests", { body_state: "unread" }, "id=? AND t_end IS NULL", [inf.id]); }
     d.publish({ kind: "response", t: at, targetId: t.targetId, actionId: inf.actionId, ref: inf.id, summary: { s: inf.status, u: short(inf.url), a: inf.attribution, stalled: true, bs: "unread" } });
-    setTimeout(() => { d.inflight.delete(inf.id); }, 60_000); // review F4: do not haunt diagnoses forever
+    setTimeout(() => { d.inflight.delete(inf.id); }, defaults.stalledEvictMs); // review F4: do not haunt diagnoses forever
   }, defaults.unreadBodyGraceMs);
 }
 

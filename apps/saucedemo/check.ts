@@ -3,9 +3,13 @@
 import { connect, type Session } from "../../src/client.ts";
 import * as swag from "./lib.ts";
 
+/** Where run-check points the browser and what host it scopes the session to. */
+export const target = { url: swag.BASE, scope: "saucedemo.com" };
+
 export async function check(s: Session): Promise<boolean> {
-  let failed = false;
-  const ok = (label: string, cond: boolean, detail?: unknown) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}${detail !== undefined ? "  " + JSON.stringify(detail) : ""}`); if (!cond) failed = true; };
+  let failed = false; let last = Date.now();
+  const ok = (label: string, cond: boolean, detail?: unknown) => { const now = Date.now(); const ms = now - last; last = now; // elapsed since the previous line = this step
+    console.log(`${cond ? "PASS" : "FAIL"}  ${label}  (${ms}ms)${detail !== undefined ? "  " + JSON.stringify(detail) : ""}`); if (!cond) failed = true; };
   try {
     await swag.login(s);
     ok("login reaches inventory", true);
@@ -25,7 +29,7 @@ export async function check(s: Session): Promise<boolean> {
 }
 
 if (import.meta.main) {
-  const s = await connect(process.env.DISCO_SESSION ?? "sauce");
+  const s = await connect(process.env.DISCO_APP ?? "saucedemo");
   const passed = await check(s).finally(() => s.close());
   process.exit(passed ? 0 : 1);
 }

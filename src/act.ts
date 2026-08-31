@@ -4,23 +4,25 @@
 import type { Daemon, DaemonEvent, FrameInfo, TargetState } from "./daemon.ts";
 import { Selectors, type Resolved } from "./selectors.ts";
 import { Settler, type SettleResult, type SettleSignal } from "./settle.ts";
-import { buildReport, diagnose, type Diagnosis, type Report, type UntilResult } from "./report.ts";
+import { buildReport, diagnose, type Diagnosis, type Report, type Timing, type UntilResult } from "./report.ts";
 import { clickAt, hoverAt, wheelAt, dragFromTo, pressKey, typeText, pointToRoot } from "./input.ts";
 import { RpcError } from "./rpc.ts";
+import { KINDS, type ActKind } from "./kinds.ts";
 import { defaults } from "../defaults.ts";
 
 /** Settler deadlines must run on the SAME clock as t0 and the fed event times: the session clock. */
 const sessionClock = (d: Daemon) => ({ now: () => d.now(), setTimeout: (f: () => void, ms: number) => setTimeout(f, ms), clearTimeout: (h: unknown) => clearTimeout(h as any) });
 
-/** A predicate over the page/wire: an element exists, an in-page function is truthy, a request matching
- *  a URL fragment has started/landed. Shared by `watch()` and `act({until})`. */
-export interface WatchPred { selector?: string; fn?: string; fnArg?: unknown; urlLike?: string }
+/** A predicate over the page/wire: an element exists (`visible`: and is laid out with a box), an in-page
+ *  function is truthy (called with `fnArg`), a request matching a URL fragment has started (`landed`: its
+ *  response and body are captured). Shared by `watch()` and `act({until})`. */
+export interface WatchPred { selector?: string; visible?: boolean; fn?: string; fnArg?: unknown; urlLike?: string; landed?: boolean }
 /** `until`: the postcondition act() must reach before it returns (GUIDANCE §9). The verdict keeps saying
  *  what the page DID; `until` says whether the state you need ARRIVED. */
-export interface UntilSpec extends WatchPred { budgetMs?: number; tailMs?: number }
+export interface UntilSpec extends WatchPred { budgetMs?: number; tailMs?: number; frame?: string /* the postcondition's frame, when not the action's (a finder click whose effect is a new chart frame) */ }
 
 export interface ActParams {
-  kind: "click" | "rightclick" | "dblclick" | "middleclick" | "hover" | "type" | "press" | "scroll" | "select" | "navigate" | "drag";
+  kind: ActKind;
   target?: string; frame?: string; targetId?: string;
   text?: string; key?: string; url?: string; value?: string; deltaY?: number; to?: string; toOffset?: { dx: number; dy: number };
   budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number;
@@ -32,8 +34,8 @@ const POINTER: Record<string, { button: "left" | "right" | "middle"; clickCount:
   click: { button: "left", clickCount: 1 }, rightclick: { button: "right", clickCount: 1 },
   dblclick: { button: "left", clickCount: 2 }, middleclick: { button: "middle", clickCount: 1 },
 };
-const NEEDS_TARGET = new Set(["click", "rightclick", "dblclick", "middleclick", "hover", "type", "select", "drag"]);
-const TASK_EVENT: Record<string, string> = { click: "click", rightclick: "contextmenu", dblclick: "click", middleclick: "auxclick", type: "input", press: "keydown", select: "change", scroll: "wheel", drag: "mouseup" };
+const NO_HIT_TEST = new Set<ActKind>(["type", "fill", "select"]); // keyboard/value kinds act on the resolved handle, not a point
+
 
 export function registerActions(d: Daemon): Selectors {
   const sel = new Selectors(d);
@@ -100,13 +102,28 @@ async function snapshot(d: Daemon, sel: Selectors, frame: FrameInfo, root: Targe
   return out;
 }
 
+/** Frames in a root's target tree, for frame-not-found diagnoses. */
+const frameCensus = (d: Daemon, rootId: string) => [...d.frames.values()].filter((f) => d.targets.get(f.targetId)?.rootTargetId === rootId).map((f) => `${f.frameId.slice(0, 6)}:${f.url.slice(0, 80)}`);
+
 export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Report> {
-  const frame = d.resolveFrame(p.frame, p.targetId);
-  const root = d.targets.get(d.targetOfFrame(frame).rootTargetId) ?? d.primary();
+  if (!KINDS[p.kind]) throw new RpcError(-32602, `unknown act kind ${JSON.stringify(p.kind)}`);
+  const tEntry = d.now();
   const n = d.store.nextActionN();
   const actionId = `act:${n}`;
   const seqStart = d.store.lastSeq() + 1;
   const spec = { ...p, evaluateAfter: p.evaluateAfter ? "(fn)" : undefined, until: p.until ? { ...p.until, fn: p.until.fn ? "(fn)" : undefined } : undefined };
+  // A frame that doesn't exist (yet) is a diagnosis with a frame census, not a bare RPC error (GUIDANCE §2.2):
+  // enterprise apps build tabs as child frames a beat after the action that opens them — `until` on the frame.
+  let frame: FrameInfo;
+  try { frame = d.resolveFrame(p.frame, p.targetId); }
+  catch (e) {
+    const t = p.targetId ? d.targets.get(p.targetId) : d.primary();
+    const main = t?.mainFrameId ? d.frames.get(t.mainFrameId) : null;
+    if (!(e instanceof RpcError) || !p.frame || !t || !main) throw e;
+    const rootT = d.targets.get(t.rootTargetId) ?? t;
+    return failReport(d, { actionId, n, kind: p.kind, spec, frame: main, root: rootT, seqStart, diagnosis: { reason: "frame-not-found", error: (e as Error).message, candidates: frameCensus(d, rootT.rootTargetId) } });
+  }
+  const root = d.targets.get(d.targetOfFrame(frame).rootTargetId) ?? d.primary();
   const fail = (diagnosis: Diagnosis, resolvedInfo?: Resolved) => failReport(d, { actionId, n, kind: p.kind, spec, frame, root, seqStart, resolvedInfo, diagnosis });
 
   // ---- resolve now; fail with a diagnosis, never wait (GUIDANCE §2.2) ----
@@ -114,13 +131,13 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   let detachedRetried = false;
   let didScroll = false;
   let point: Point | null = null;
-  if (NEEDS_TARGET.has(p.kind)) {
+  if (KINDS[p.kind].target) {
     if (!p.target) throw new RpcError(-32602, `act ${p.kind} needs a target selector`);
     const r = await sel.resolve(frame, p.target);
     if (!("objectId" in r)) return fail(await diagnose(d, frame, root, "not-found", { error: r.error, candidates: r.candidates }));
     resolved = r;
     // hit-test with one re-resolve on detachment (GUIDANCE §8 re-render races)
-    if (p.kind !== "type" && p.kind !== "select") {
+    if (!NO_HIT_TEST.has(p.kind)) {
       for (let attempt = 0; ; attempt++) {
         try {
           const hit = await sel.hitCheck(frame, p.target);
@@ -161,9 +178,11 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
 
   // If resolution scrolled the target into view, the whole viewport repaints ~tens of ms later; absorb
   // that BEFORE opening the causality window so the scroll (pre-action adjustment) is not an "effect".
+  const tResolved = d.now();
   if (didScroll) await absorbVisual(d, root, defaults.scrollAbsorbMaxMs);
+  const tAbsorbed = d.now();
   const pre = await snapshot(d, sel, frame, root, "pre");
-  try { await d.callInFrame(frame, "function(t){ return window.__discoApi ? window.__discoApi.armTask(t) : 0; }", [TASK_EVENT[p.kind] ?? "click"]); } catch {}
+  try { await d.callInFrame(frame, "function(t){ return window.__discoApi ? window.__discoApi.armTask(t) : 0; }", [KINDS[p.kind].task]); } catch {}
   const t0 = d.now();
 
   let selfBox: Box | null = null;
@@ -184,13 +203,16 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
     if (POINTER[p.kind]) await clickAt(d, rootPoint!.root, rootPoint!.point, POINTER[p.kind]);
     else if (p.kind === "hover") await hoverAt(d, rootPoint!.root, rootPoint!.point);
     else if (p.kind === "drag") await dragFromTo(d, rootPoint!.root, rootPoint!.point, dragTo!);
-    else if (p.kind === "type") {
+    else if (p.kind === "type" || p.kind === "fill") {
       const t = d.targetOfFrame(frame);
       await d.send(t, "DOM.focus", { objectId: resolved!.objectId }).catch(async () => {
         const hit = await sel.hitCheck(frame, p.target!);
         if (hit.point) { const { point: rp, root: rt } = await pointToRoot(d, frame, hit.point); await clickAt(d, rt, rp, { button: "left", clickCount: 1 }); }
       });
-      await typeText(d, root, p.text ?? "");
+      // fill = select-all then type (or Backspace to clear): real key events, so controlled inputs (React)
+      // see a normal edit — packs used to clear via evaluate(), an unattributed mutation outside the choke point.
+      if (p.kind === "fill") { await pressKey(d, root, "Control+a"); if (!p.text) await pressKey(d, root, "Backspace"); }
+      if (p.text) await typeText(d, root, p.text);
     } else if (p.kind === "press") await pressKey(d, root, p.key ?? "Enter");
     else if (p.kind === "scroll") await wheelAt(d, rootPoint!.root, rootPoint!.point, p.deltaY ?? 400);
     else if (p.kind === "select") {
@@ -215,7 +237,8 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   if (!untilSpec) result = await settler.result;
   else {
     const tail = untilSpec.tailMs ?? defaults.untilTailMs;
-    const w = runWatch(d, sel, frame, root, untilSpec, untilSpec.budgetMs ?? defaults.untilBudgetMs, t0);
+    const untilFrame = untilSpec.frame ? () => { try { return d.resolveFrame(untilSpec.frame, p.targetId); } catch { return null; } } : () => d.frames.get(frame.frameId) ?? frame;
+    const w = runWatch(d, sel, untilFrame, root, untilSpec, untilSpec.budgetMs ?? defaults.untilBudgetMs, t0, untilSpec.frame ?? p.frame, true);
     const first = await Promise.race([settler.result.then((r) => ({ settled: r })), w.done.then((u) => ({ until: u }))]);
     if ("until" in first) {
       // Predicate (or its budget) came first: cap the remaining quiet-wait to a short tail. Matched +
@@ -238,8 +261,10 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   if (untilSpec || !stillActive) d.closeWindow(root.rootTargetId); // with `until` the postcondition decided; the script moves on
   else backgroundSettle(d, root.rootTargetId, actionId, t0); // still-active keeps the window open for awaitSettlement (GUIDANCE §5.1; review F3)
 
+  const tWaited = d.now();
   const postFrame = d.frames.get(frame.frameId) ?? frame; // frame may have navigated
   const post = await snapshot(d, sel, postFrame, root, "post");
+  const tPost = d.now();
   let evalResult: unknown;
   if (p.evaluateAfter) {
     try { evalResult = (await d.callInFrame(postFrame, p.evaluateAfter, [p.evaluateAfterArg ?? null], p.world ?? "main")).value; }
@@ -251,6 +276,11 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
     pre: { shot: pre.shot, aria: pre.aria, url: pre.url, focused: pre.focused }, post: { shot: post.shot, aria: post.aria, url: post.url, focused: post.focused },
     preAriaText: pre.ariaText, postAriaText: post.ariaText, evaluateAfter: evalResult, seqStart,
   });
+  const tBuilt = d.now();
+  const ms = (a: number, b: number) => Math.round(b - a);
+  const timing: Timing = { resolveMs: ms(tEntry, tResolved), absorbMs: ms(tResolved, tAbsorbed), preMs: ms(tAbsorbed, t0), settleMs: ms(t0, result.tSettled), reportedMs: ms(t0, result.tReported), untilMs: until ? Math.round(until.elapsedMs) : undefined, waitMs: ms(t0, tWaited), postMs: ms(tWaited, tPost), buildMs: ms(tPost, tBuilt), overheadMs: 0, totalMs: ms(tEntry, tBuilt) };
+  timing.overheadMs = timing.resolveMs + timing.preMs + timing.postMs + timing.buildMs; // daemon work: everything that isn't waiting on the page (absorb = the page repainting after scrollIntoView)
+  report.timing = timing;
   d.store.update("actions", { t_settled: result.tSettled, verdict: result.verdict, settle_ms: result.tSettled - t0, timeline: JSON.stringify(result.timeline), post_shot: post.shot ?? null, post_aria: post.aria ?? null, report: JSON.stringify(report), seq_start: seqStart, seq_end: report.cursor.to }, "id=?", [actionId]);
   d.publish({ kind: "settle", t: result.tReported, targetId: root.targetId, actionId, summary: { verdict: result.verdict, ms: Math.round(result.tSettled - t0), requests: result.counts.requests, until: until ? (until.matched ? "matched" : "unmatched") : undefined, untilMs: until ? Math.round(until.elapsedMs) : undefined } });
   return report;
@@ -346,35 +376,51 @@ export async function awaitSettlement(d: Daemon, sel: Selectors, p: { action?: s
   return report;
 }
 
-/** watch(): event-driven predicate wait; diagnosis on expiry, never a bare timeout (GUIDANCE §5.2). */
+/** watch(): event-driven predicate wait; diagnosis on expiry, never a bare timeout (GUIDANCE §5.2). A frame
+ *  that doesn't exist yet is waited for, not thrown on (`frame` is re-resolved per check). */
 export async function watch(d: Daemon, sel: Selectors, p: WatchPred & { budgetMs?: number; frame?: string; targetId?: string }): Promise<UntilResult> {
-  const frame = d.resolveFrame(p.frame, p.targetId);
-  const root = d.targets.get(d.targetOfFrame(frame).rootTargetId) ?? d.primary();
   if (!p.selector && !p.fn && !p.urlLike) throw new RpcError(-32602, "watch needs selector, fn, or urlLike");
-  return runWatch(d, sel, frame, root, p, p.budgetMs ?? defaults.watchBudgetMs, d.now()).done;
+  const t = p.targetId ? d.targets.get(p.targetId) : d.primary();
+  if (!t) throw new RpcError(-32602, `unknown target ${p.targetId}`);
+  const root = d.targets.get(t.rootTargetId) ?? t;
+  const frameOf = () => { try { return d.resolveFrame(p.frame, p.targetId); } catch { return null; } };
+  return runWatch(d, sel, frameOf, root, p, p.budgetMs ?? defaults.watchBudgetMs, d.now(), p.frame).done;
 }
 
-/** The predicate loop behind watch() and act({until}): re-checks on mutation/request/response/nav events
- *  (plus a coarse interval for canvas-only changes), budgeted from `t0`, diagnosis on expiry. The frame is
- *  re-fetched per check so a navigation mid-wait doesn't strand the watcher on a stale FrameInfo. */
-function runWatch(d: Daemon, sel: Selectors, frame0: FrameInfo, root: TargetState, pred: WatchPred, budgetMs: number, t0: number): { done: Promise<UntilResult>; cancel(): void } {
-  const frame = () => d.frames.get(frame0.frameId) ?? frame0;
+/** The predicate loop behind watch() and act({until}): re-checks on mutation/request/response/nav/target
+ *  events (plus a coarse interval for canvas-only changes), budgeted from `t0`, diagnosis on expiry. The frame
+ *  is re-resolved per check so a navigation mid-wait, or a frame that appears mid-wait, is handled. */
+function runWatch(d: Daemon, sel: Selectors, frameOf: () => FrameInfo | null, root: TargetState, pred: WatchPred, budgetMs: number, t0: number, frameSpec?: string, sinceDispatch = false): { done: Promise<UntilResult>; cancel(): void } {
   const check = async (): Promise<{ ok: boolean; preview?: string; request?: string }> => {
     try {
       if (pred.urlLike) {
-        const r = d.store.get<any>("SELECT id, url FROM requests WHERE url LIKE ? AND (t_start>=? OR t_end>=?) ORDER BY t_start DESC LIMIT 1", `%${pred.urlLike}%`, t0 - 50, t0 - 50);
+        // Causality: for act({until}) only a request that STARTED after dispatch can be this action's effect;
+        // for a standalone watch(), "started or landed since I began watching" (README). `landed` additionally
+        // needs the response back (status known) and the body's fate decided — captured (`ok`), or known
+        // uncapturable (`none` / `unread` fire-and-forget fetches / `streaming` / …) — never still `pending`;
+        // and never a response that landed before t0 (a previous action's late tail must not satisfy this one).
+        const body = " AND status IS NOT NULL AND body_state IS NOT NULL AND body_state != 'pending'";
+        const since = sinceDispatch ? "t_start>=?" : pred.landed ? "t_response>=?" : "(t_start>=? OR t_end>=?)";
+        const args = sinceDispatch || pred.landed ? [t0 - (sinceDispatch ? 50 : 0)] : [t0 - 50, t0 - 50];
+        const r = d.store.get<any>(`SELECT id FROM requests WHERE url LIKE ? AND ${since}${pred.landed ? body : ""} ORDER BY t_start DESC LIMIT 1`, `%${pred.urlLike}%`, ...args);
         if (r) return { ok: true, request: r.id };
       }
-      if (pred.selector) {
-        const r = await sel.resolve(frame(), pred.selector).catch(() => null);
-        if (r && "objectId" in r) return { ok: true, preview: r.preview };
+      const fr = frameOf();
+      if (pred.selector && fr) {
+        const r = await sel.resolve(fr, pred.selector).catch(() => null);
+        if (r && "objectId" in r && (!pred.visible || (r.box && r.box.w > 1 && r.box.h > 1))) return { ok: true, preview: r.preview };
       }
-      if (pred.fn) {
-        const r = await d.callInFrame(frame(), pred.fn, [pred.fnArg ?? null], "main").catch(() => ({ value: false }));
+      if (pred.fn && fr) {
+        const r = await d.callInFrame(fr, pred.fn, [pred.fnArg ?? null], "main").catch(() => ({ value: false }));
         if (r.value) return { ok: true, preview: JSON.stringify(r.value).slice(0, 120) };
       }
     } catch {}
     return { ok: false };
+  };
+  const expiryDiagnosis = async (): Promise<Diagnosis> => {
+    const fr = frameOf();
+    if (!fr) return { reason: "frame-not-found", error: `no frame matches ${JSON.stringify(frameSpec)}`, candidates: frameCensus(d, root.rootTargetId) };
+    return diagnose(d, fr, root, "budget-expired", pred.selector ? { candidates: await sel.candidates(fr, pred.selector).catch(() => []) } : {}).catch(() => ({ reason: "budget-expired" as const }));
   };
   let done = false; let unsub = () => {}; let timer: ReturnType<typeof setTimeout> | null = null; let iv: ReturnType<typeof setInterval> | null = null;
   let finish!: (matched: boolean, extra?: any) => Promise<void>;
@@ -384,7 +430,7 @@ function runWatch(d: Daemon, sel: Selectors, frame0: FrameInfo, root: TargetStat
       const elapsedMs = Math.round(d.now() - t0);
       if (matched) return resolve({ matched: true, elapsedMs, ...extra });
       if (extra.cancelled) return resolve({ matched: false, elapsedMs });
-      resolve({ matched: false, elapsedMs, diagnosis: await diagnose(d, frame(), root, "budget-expired", pred.selector ? { candidates: await sel.candidates(frame(), pred.selector).catch(() => []) } : {}).catch(() => ({ reason: "budget-expired" as const })) });
+      resolve({ matched: false, elapsedMs, diagnosis: await expiryDiagnosis() });
     };
     void (async () => {
       const first = await check();
@@ -398,7 +444,7 @@ function runWatch(d: Daemon, sel: Selectors, frame0: FrameInfo, root: TargetStat
       };
       unsub = d.listen((ev) => {
         const tin = ev.targetId ? d.targets.get(ev.targetId)?.rootTargetId === root.rootTargetId : false;
-        if ((ev.kind === "mutation" && tin) || ev.kind === "response" || ev.kind === "request" || (ev.kind === "nav" && tin)) void maybeCheck();
+        if ((ev.kind === "mutation" && tin) || ev.kind === "response" || ev.kind === "request" || ev.kind === "nav" || ev.kind === "target") void maybeCheck();
       });
       iv = setInterval(() => void maybeCheck(), defaults.watchIntervalMs); // safety net: covers non-mutating changes (e.g. canvas)
       timer = setTimeout(() => void finish(false), Math.max(0, t0 + budgetMs - d.now()));

@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { RpcClient } from "./rpc.ts";
 import { openStore, type StoreReader } from "./store.ts";
 import type { Report } from "./report.ts";
-import type { ActParams, UntilSpec } from "./act.ts";
+import type { ActParams, UntilSpec, WatchPred } from "./act.ts";
 import { defaults } from "../defaults.ts";
 
 export type PageFn = ((...args: any[]) => unknown) | string;
@@ -73,6 +73,8 @@ export class Session {
   dblclick(target: string, o: ActOptions = {}) { return this.act({ kind: "dblclick", target, ...o }); }
   hover(target: string, o: ActOptions = {}) { return this.act({ kind: "hover", target, ...o }); }
   type(target: string, text: string, o: ActOptions = {}) { return this.act({ kind: "type", target, text, ...o }); }
+  /** Replace an input's value (select-all + type; "" clears) with real key events — use for form fields. */
+  fill(target: string, text: string, o: ActOptions = {}) { return this.act({ kind: "fill", target, text, ...o }); }
   press(key: string, o: ActOptions = {}) { return this.act({ kind: "press", key, ...o }); }
   scroll(o: ActOptions & { target?: string; deltaY?: number } = {}) { return this.act({ kind: "scroll", ...o }); }
   select(target: string, value: string, o: ActOptions = {}) { return this.act({ kind: "select", target, value, ...o }); }
@@ -81,7 +83,7 @@ export class Session {
     return this.act({ kind: "drag", target, ...(typeof to === "string" ? { to } : { toOffset: to }), ...o });
   }
   awaitSettlement(o: { action?: string; budgetMs?: number; frame?: string } = {}): Promise<Report> { return this.rpc.call("settle", o, (o.budgetMs ?? 30000) + 30000); }
-  watch(pred: { selector?: string; fn?: PageFn; fnArg?: unknown; urlLike?: string }, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult> {
+  watch(pred: Omit<WatchPred, "fn"> & { fn?: PageFn }, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult> {
     return this.rpc.call("watch", { ...pred, fn: pred.fn ? src(pred.fn) : undefined, ...o }, (o.budgetMs ?? 30000) + 30000);
   }
   /** Run a self-contained function in a frame. world "main" sees the page's globals; "disco" is our isolated world. */

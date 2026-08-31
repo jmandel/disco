@@ -13,7 +13,7 @@ let via = "store (previously captured)";
 if (!hash) {
   const pre = await s.evaluate(() => !!document.getElementById("load-rows"));
   if (!pre) die("precondition: #load-rows not on screen and no captured /api/rows body in store");
-  const r: any = await s.click("#load-rows", { budgetMs: 8000 });
+  const r: any = await s.click("#load-rows", { budgetMs: 8000, until: { urlLike: "/api/rows", landed: true, budgetMs: 8000 } });
   const req = (r.wire?.attributed ?? []).find((x: any) => x.family?.includes("/api/rows"));
   if (!req?.body) die("clicked #load-rows but no attributed /api/rows body", { verdict: r.verdict, wire: r.wire });
   hash = req.body; via = `fresh click (${r.action})`;

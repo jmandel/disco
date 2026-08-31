@@ -1,9 +1,11 @@
 // Slice 2 CLI commands: act / settle / watch. Human-readable digest by default; --json for the full report.
 import type { RpcClient } from "../src/rpc.ts";
+import { KIND_NAMES } from "../src/kinds.ts";
+import { defaults } from "../defaults.ts";
 
 interface Ctx { client: (dir?: string) => Promise<RpcClient>; sessionDir: (s?: string) => string; out: (o: unknown) => void; die: (m: string) => never }
 
-const KINDS = new Set(["click", "rightclick", "dblclick", "middleclick", "hover", "type", "press", "scroll", "select", "navigate", "drag"]);
+const KINDS = new Set<string>(KIND_NAMES);
 
 export async function run(cmd: string, pos: string[], flags: Record<string, string | boolean>, ctx: Ctx): Promise<void> {
   const f = (k: string) => (typeof flags[k] === "string" ? (flags[k] as string) : undefined);
@@ -24,8 +26,8 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
     if (kind === "press") p.target = undefined;
     if (kind === "navigate") p.target = undefined;
     if (f("to-dx") || f("to-dy")) p.toOffset = { dx: num("to-dx") ?? 0, dy: num("to-dy") ?? 0 };
-    if (f("until") || f("until-fn") || f("until-url")) p.until = { selector: f("until"), fn: f("until-fn"), urlLike: f("until-url"), budgetMs: num("until-budget"), tailMs: num("until-tail") };
-    const report = await call("act", p, (p.maxBudgetMs ?? 30000) + 60000);
+    if (f("until") || f("until-fn") || f("until-url")) p.until = { selector: f("until"), visible: !!flags["until-visible"], fn: f("until-fn"), urlLike: f("until-url"), landed: !!flags["until-landed"], budgetMs: num("until-budget"), tailMs: num("until-tail") };
+    const report = await call("act", p, (p.maxBudgetMs ?? defaults.maxBudgetMs) + (p.until ? (p.until.budgetMs ?? defaults.untilBudgetMs) + (p.until.tailMs ?? defaults.untilTailMs) : 0) + 60000);
     printReport(report, flags, ctx);
     return;
   }
@@ -35,7 +37,7 @@ export async function run(cmd: string, pos: string[], flags: Record<string, stri
     return;
   }
   if (cmd === "watch") {
-    const p: any = { selector: pos[0], urlLike: f("url-like"), fn: f("fn"), fnArg: f("fn-arg") !== undefined ? JSON.parse(f("fn-arg")!) : undefined, budgetMs: num("budget"), frame: f("frame") };
+    const p: any = { selector: pos[0], visible: !!flags.visible, urlLike: f("url-like"), landed: !!flags.landed, fn: f("fn"), fnArg: f("fn-arg") !== undefined ? JSON.parse(f("fn-arg")!) : undefined, budgetMs: num("budget"), frame: f("frame") };
     if (!p.selector && !p.urlLike && !p.fn) ctx.die('watch <selector> | --url-like part | --fn "()=>…" [--budget ms]');
     const r = await call("watch", p);
     if (flags.json) return ctx.out(r);
@@ -53,6 +55,7 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
   if (flags.json) return ctx.out(r);
   const s = r.settle;
   console.log(`${r.action}  ${r.kind}${r.target?.selector ? " " + r.target.selector : ""}  →  ${r.verdict}${s ? `  (settled ${s.ms}ms, reported ${s.reportedMs}ms${s.counts ? `; ${s.counts.requests} req, ${s.counts.mutations} mut, ${s.counts.visuals} px` : ""})` : ""}`);
+  if (r.timing) console.log(`  timing: page ${r.timing.waitMs}ms (settled ${r.timing.settleMs}, reported ${r.timing.reportedMs}${r.timing.untilMs !== undefined ? `, until ${r.timing.untilMs}` : ""}) + overhead ${r.timing.overheadMs}ms (resolve ${r.timing.resolveMs}, pre ${r.timing.preMs}, post ${r.timing.postMs}, build ${r.timing.buildMs})${r.timing.absorbMs ? ` + scroll-absorb ${r.timing.absorbMs}ms` : ""} = ${r.timing.totalMs}ms`);
   if (r.target?.detachedRetried) console.log(`  note: element detached mid-dispatch; re-resolved once (re-render race)`);
   if (r.until) {
     if (r.until.matched) console.log(`  ✓ until: matched in ${r.until.elapsedMs}ms${r.until.preview ? "  " + r.until.preview : ""}${r.until.request ? "  req " + r.until.request : ""}`);

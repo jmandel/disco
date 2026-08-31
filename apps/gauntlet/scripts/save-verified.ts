@@ -9,9 +9,11 @@ const s = await connect();
 const die = (msg: string, extra?: unknown) => { console.error("FAIL:", msg, extra ? JSON.stringify(extra).slice(0, 800) : ""); s.close(); process.exit(1); };
 if (!(await s.evaluate(() => !!document.getElementById("save")))) die("precondition: #save not on screen");
 
-const r: any = await s.click("#save", { budgetMs: 4000, evaluateAfter: () => document.getElementById("save-state")?.textContent });
+// `until` on the follow-up status request keeps the causality window open past the 202, so the async
+// completion lands ATTRIBUTED in this report instead of `trailing` (DECISIONS #35).
+const r: any = await s.click("#save", { budgetMs: 4000, until: { urlLike: "/api/save/status", landed: true, budgetMs: 4000 }, evaluateAfter: () => document.getElementById("save-state")?.textContent });
 if (r.verdict === "diagnosis") die("save button not actionable", r);
-const post = (r.wire?.attributed ?? []).find((x: any) => x.family?.includes("/api/save"));
+const post = (r.wire?.attributed ?? []).find((x: any) => x.family?.includes("/api/save") && !x.family?.includes("/api/save/status"));
 if (!post) die("no attributed POST /api/save — click swallowed?", { verdict: r.verdict, screen: r.evaluateAfter });
 const wireBody = post.body ? s.store.json(post.body) : null;
 const screenAtSettle = r.evaluateAfter;
