@@ -46,7 +46,7 @@ async function withClient<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> { con
 
 const HELP = `disco — discovery daemon CLI
 
-session new <product> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--run name] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--fg]
+session new <product> (--attach <port> [--host h] | --launch [--headless] [--url u]) [--scope <substr|/re/>] [--run name] [--dialogs accept|dismiss] [--no-idle] [--idle-ms N] [--ignore <url-part>]… [--fg]
                               (open the app in the browser FIRST: the 30s idle observation learns its ambient traffic; skipped when nothing is scoped)
 session end [product]         end current run; next 'session new' starts another
 session ls | info             list apps (runs per app) / current run info
@@ -55,7 +55,9 @@ focus <id-prefix|url-part>    make another scoped page the primary target
 tail [--from seq]             stream digested events as JSONL (Ctrl-C to stop)
 sql [<product>] <query> [--json]  query one app's whole history (every run, tagged by run; t restarts per run); read-only; table cells cut at 60 chars, --json for full values
 note "<text>" [--kind state|transition|ledger|note] [--name n] [--action act:N] [--data json]
-families [--mark-read F] [--ambient F] [--not-ambient F]
+families [--mark-read F] [--ambient F|url-part] [--not-ambient F|url-part] [--forget]   learned families + evidence; a url-part becomes a persistent rule
+rules [--remove id] [--json]  per-app overrides: attribution rules + sentinel mutes (persist across runs)
+sentinels [--mute name [--selector s] [--text t] [--url u]] [--unmute id]   mute noisy sentinels (recorded, not reported)
 idle [ms] [--json]            idle-observe to warm the ambient classifier; prints the ambient digest (--json: full families)
 screenshot [--out file.jpg]   capture now; prints the blob hash
 blob <hash|prefix> [--out file]  copy a blob out / print text (any hash argument accepts a prefix, e.g. the 12-char handles in reports)
@@ -109,6 +111,7 @@ switch (cmd) {
       } else die("session new needs --attach <port> or --launch");
       if (f("scope")) daemonArgs.push("--scope", f("scope")!);
       if (f("dialogs")) daemonArgs.push("--dialogs", f("dialogs")!);
+      const ignores = argv.flatMap((a, i) => (a === "--ignore" && argv[i + 1] ? [argv[i + 1]] : []));
       const daemonPath = join(import.meta.dir, "..", "src", "daemon.ts");
       if (f("state") && !has("launch")) console.error("--state only applies with --launch");
       if (has("fg")) {
@@ -127,6 +130,7 @@ switch (cmd) {
       const c = await RpcClient.connect(sock);
       if (f("state") && has("launch")) { await c.call("state.restore", { state: JSON.parse(readFileSync(f("state")!, "utf8")) }); console.error("storage state restored"); }
       const info = await c.call("session.info");
+      for (const ig of ignores) { const r = await c.call("rules.add", { kind: "ambient", match: ig, note: "session new --ignore" }); console.error(`rule #${r.id}: requests whose URL contains ${JSON.stringify(ig)} are ambient`); }
       console.error(`app "${product}" — run ${info.manifest.run} ${info.resumed ? "(resumed)" : "(new)"} (${info.manifest.mode}, scope=${info.manifest.scope ?? "all"}); ${info.targets.length} scoped target(s)`);
       for (const t of info.targets) console.error(`  ${t.targetId.slice(0, 8)} ${t.type} ${t.url}`);
       if (!has("no-idle") && info.targets.length === 0) {
@@ -178,6 +182,31 @@ switch (cmd) {
   }
 
   case "targets": out(await withClient((c) => c.call("targets"))); break;
+
+  case "rules": {
+    // per-app overrides: attribution rules (URL substrings) and sentinel mutes — persist across runs
+    await withClient(async (c) => {
+      if (f("remove")) { await c.call("rules.remove", { id: Number(f("remove")) }); console.error(`rule #${f("remove")} removed`); }
+      const rows: any[] = await c.call("rules.list");
+      if (has("json")) return out(rows);
+      if (!rows.length) return console.log("(no rules)  — disco families --ambient|--not-ambient <url-part>; disco sentinels --mute <name> [--selector s] [--text t] [--url u]");
+      for (const r of rows) console.log(`#${String(r.id).padStart(3)}  ${String(r.kind).padEnd(14)} ${r.match}${r.note ? "   # " + r.note : ""}`);
+    });
+    break;
+  }
+
+  case "sentinels": {
+    await withClient(async (c) => {
+      if (f("mute")) { const r = await c.call("rules.add", { kind: "mute-sentinel", name: f("mute"), selector: f("selector"), text: f("text"), url: f("url"), note: f("note") }); console.error(`rule #${r.id}: ${f("mute")} sentinels matching ${r.match} are muted (recorded with muted=1, not reported)`); }
+      if (f("unmute")) { await c.call("rules.remove", { id: Number(f("unmute")) }); console.error(`rule #${f("unmute")} removed`); }
+      const rows: any[] = (await c.call("rules.list")).filter((r: any) => r.kind === "mute-sentinel");
+      console.log(rows.length ? rows.map((r: any) => `#${r.id}  mute ${r.match}`).join("\n") : "(no sentinel mutes)");
+    });
+    const st = openStore(sessionDir());
+    const counts = st.sql<any>("SELECT name, SUM(muted=0) live, SUM(muted=1) muted FROM sentinels WHERE run=(SELECT max(run) FROM runs) GROUP BY name ORDER BY live DESC"); st.close();
+    for (const x of counts) console.log(`  ${String(x.name).padEnd(15)} ${String(x.live).padStart(4)} reported  ${String(x.muted).padStart(4)} muted   (this run)`);
+    break;
+  }
 
   case "focus": {
     // make a scoped page the PRIMARY target — where act/watch/eval/screenshot go when no --target is given.
@@ -232,8 +261,14 @@ switch (cmd) {
   case "families": {
     await withClient(async (c) => {
       if (f("mark-read")) await c.call("family.mark", { family: f("mark-read"), read: true });
-      if (f("ambient")) await c.call("family.mark", { family: f("ambient"), ambient: true });
-      if (f("not-ambient")) await c.call("family.mark", { family: f("not-ambient"), ambient: false });
+      if (has("forget")) { await c.call("families.forget"); console.error("learned families cleared (rules kept)"); }
+      // --ambient / --not-ambient take a family name (exact) OR a URL substring → a persistent rule (DECISIONS #43)
+      for (const [flag, kind, ambient] of [["ambient", "ambient", true], ["not-ambient", "not-ambient", false]] as const) {
+        const v = f(flag); if (!v) continue;
+        const fams0: any[] = await c.call("families");
+        if (fams0.some((x) => x.family === v)) await c.call("family.mark", { family: v, ambient });
+        else { const r = await c.call("rules.add", { kind, match: v }); console.error(`rule #${r.id}: requests whose URL contains ${JSON.stringify(v)} are ${kind} (persists for this app; \`disco rules\` lists, --remove <id> drops)`); }
+      }
       const fams = await c.call("families");
       console.log(`${"".padEnd(8)} ${"write".padEnd(7)} ${"count".padStart(4)}  family  (ambient reason)   — ambient = periodic (≥${defaults.ambientMinCount} samples, gap cv ≤ ${defaults.ambientMaxCv}) or chained long-poll, seen while no action window was open; excluded from attribution AND settlement`);
       for (const x of fams) console.log(`${x.ambient ? "ambient " : "        "} ${x.writeKind.padEnd(7)} ${String(x.count).padStart(4)}  ${x.family}${x.reason ? "  (" + x.reason + ")" : ""}`);

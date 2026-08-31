@@ -238,7 +238,8 @@ CREATE TABLE IF NOT EXISTS sentinels (
   detail TEXT,                       -- JSON: title/text/role/selector/status...
   shot TEXT,                         -- blob hash of the screenshot taken at firing
   action_id TEXT,                    -- window it fired in, if any
-  reported INTEGER NOT NULL DEFAULT 0 -- 1 once surfaced in a report's environment flags
+  reported INTEGER NOT NULL DEFAULT 0, -- 1 once surfaced in a report's environment flags
+  muted INTEGER NOT NULL DEFAULT 0    -- 1 when a mute rule matched: recorded, never reported/streamed (DECISIONS #43)
 );
 
 -- Ambient classifier state, per request family (BRIEF §1.13). Reversible: attribution keeps its tag.
@@ -250,7 +251,8 @@ CREATE TABLE IF NOT EXISTS families (
   ambient INTEGER NOT NULL DEFAULT 0,
   ambient_reason TEXT,               -- periodic | chained | manual
   evidence TEXT,                     -- JSON: gaps, cv, outside-window count...
-  write_kind TEXT NOT NULL DEFAULT 'unknown' -- read | write | unknown
+  write_kind TEXT NOT NULL DEFAULT 'unknown', -- read | write | unknown
+  last_run INTEGER                   -- the run that last saw this family (stale families from another host are visible)
 );
 
 -- The one table the agent writes (via `disco note` / session.note()). GUIDANCE §6.2.
@@ -288,3 +290,13 @@ CREATE INDEX IF NOT EXISTS events_run ON events(run);
 CREATE INDEX IF NOT EXISTS requests_run ON requests(run);
 CREATE INDEX IF NOT EXISTS actions_run ON actions(run);
 CREATE INDEX IF NOT EXISTS sentinels_run ON sentinels(run);
+
+-- Per-app overrides (DECISIONS #43): URL-substring attribution rules and sentinel mutes. Persist across runs.
+CREATE TABLE IF NOT EXISTS rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run INTEGER NOT NULL DEFAULT 1,
+  t REAL,
+  kind TEXT NOT NULL,                -- ambient | not-ambient | mute-sentinel
+  match TEXT NOT NULL,               -- ambient/not-ambient: a URL substring; mute-sentinel: JSON {name, selector?, text?, url?}
+  note TEXT
+);

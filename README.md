@@ -66,7 +66,8 @@ s.close();
    s.watch(pred, { budgetMs?, frame? }) → { matched, elapsedMs, … }      s.awaitSettlement({ action?, budgetMs?, frame? }) → Report
    s.evaluate(fn, { args?: any[], frame?, targetId?, world? }) → value     ← args is an ARRAY of positional parameters: fn(a, b) ← args: [a, b]
    s.note(text, { kind?, name?, action?, data? })   s.targets()   s.info()   s.screenshot()   s.families()   s.idle(ms?)   s.focusTarget(id)
-   s.onEvent(fn) → unsubscribe   s.cdp(method, params, { targetId? | browser? })   s.end()   s.close()
+   s.rules()   s.ignore(urlPart)   s.attend(urlPart)   s.mute(name, { selector?, text?, url? })   s.unrule(id)     ← per-app overrides, persist across runs
+  s.onEvent(fn) → unsubscribe   s.cdp(method, params, { targetId? | browser? })   s.end()   s.close()
    s.store → sql | requests | body/json/bodyBytes | appearances | timeline | screenshotAt | action | frames | diffTrace | runs
    ```
 
@@ -137,7 +138,8 @@ be missing from `requests` — use `--launch --url`, or reload the tab.
 `report.wire.attributed[i]` = `{ line, m, p, s, ms, body, id, family, a }` — use the structured
 fields (`m`ethod, `p`ath, `s`tatus, `ms`, `body` = 16-char blob prefix), not the display `line`.
 `report.settle = { ms, reportedMs, timeline, counts, pending? }`; `report.cursor = { from, to }`;
-`report.until = { matched, elapsedMs (from dispatch), preview?|request?, diagnosis? }` when `until` was passed;
+`report.until = { matched, elapsedMs (from dispatch), which?, preview?|request?, diagnosis? }` when `until` was passed
+(`which` = the `any` arm that held — its `name`, else its index);
 `report.timing = { resolveMs, absorbMs, preMs, settleMs, reportedMs, untilMs?, waitMs, postMs, buildMs, overheadMs, totalMs }`
 (`waitMs` + `absorbMs` = page time; `overheadMs` = daemon work).
 `watch(pred, {budgetMs, frame})` → `{ matched, elapsedMs, preview?, request?, diagnosis? }`; predicates (also
@@ -145,8 +147,11 @@ fields (`m`ethod, `p`ath, `s`tatus, `ms`, `body` = 16-char blob prefix), not the
 `{selector, visible?}` | `{urlLike, landed?}` (for `watch`: started OR responded since watching; for `until`:
 started after dispatch; `landed` = the response is back and the body's fate decided — captured, or known
 uncapturable such as an `unread` fire-and-forget body after its 1.2s grace) | `{fn, fnArg?}` (in-page, called
-with `fnArg`, truthy = match). A `frame` that doesn't exist yet is waited for, not thrown on; from `act()` it is
-a `frame-not-found` diagnosis with a frame census.
+with `fnArg`, truthy = match) | **`{ any: [pred, …] }`** (one arm holds; `until.which` names it) | **`{ all: [pred, …] }`**
+(every arm holds — a wire-AND-dom postcondition is `all: [{ urlLike, landed: true }, { selector }]`); arms take a
+`name`. A `frame` that doesn't exist yet is waited for, not thrown on; from `act()` it is a `frame-not-found`
+diagnosis with a frame census. A ReferenceError inside a page function fails the wait **immediately** with the
+closure hint (page functions capture nothing from your script), never `false` until the budget.
 
 One report, annotated (every path is `json_extract(report, '$…')`-able from `actions.report`):
 
@@ -183,6 +188,15 @@ observed while no action window is open; `disco families` shows the evidence, `f
 settlement race. Per-event third-party traffic (crash/telemetry reporters that fire on a refusal, a
 CORS-blocked beacon) never looks periodic — mark it ambient yourself. **`--scope` selects tabs** (targets
 whose URL matches), not hosts: every request a scoped tab makes is recorded, third parties included.
+
+**Per-app overrides** (the `rules` table; persist across runs; `disco rules` lists, `--remove <id>` drops):
+`disco families --ambient <url-part>` / `--not-ambient <url-part>` (or `session new --ignore <url-part>`,
+`s.ignore()` / `s.attend()`) match the **full URL**, so one rule covers a host (`backtrace.io`) or a query key
+(`Location?_tag=Login`) — finer than a family mark, and `not-ambient` beats a mis-learned family. Ambient
+requests are out of attribution **and** the settlement race. `disco sentinels --mute <name> [--selector s]
+[--text t] [--url u]` (`s.mute()`) silences a sentinel that fires on noise: muted firings are still recorded
+(`sentinels.muted=1`), just never reported or streamed. `disco families --forget` clears learned families
+(rules stay); `families.last_run` shows which run last saw a family.
 
 ## Responsiveness is measured
 

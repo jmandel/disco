@@ -7,7 +7,7 @@ import type { Diagnosis, Report, UntilResult } from "../src/report.ts";
 
 /** A state to wait for: an element (`visible`: laid out with a box), an in-page predicate (`fnArg` travels
  *  in), or a request (`landed`: response + body captured). Same shape as act()'s `until`. */
-export interface Pred { selector?: string; visible?: boolean; fn?: PageFn; fnArg?: unknown; urlLike?: string; landed?: boolean }
+export interface Pred { selector?: string; visible?: boolean; fn?: PageFn; fnArg?: unknown; urlLike?: string; landed?: boolean; any?: Pred[]; all?: Pred[]; name?: string }
 export interface UntilOpts { budgetMs?: number; frame?: string; msg?: string }
 
 /** Wait for evidence of a state with a short budget; throw with the diagnosis on expiry. THE postcondition
@@ -66,7 +66,7 @@ export async function firstOf<K extends string>(s: Session, preds: Record<K, Pre
   return null;
 }
 
-export const describePred = (p: Pred): string => p.selector ? `${p.selector}${p.visible ? " (visible)" : ""}` : p.urlLike ? `request ${p.urlLike}${p.landed ? " landed" : ""}` : "predicate";
+export const describePred = (p: Pred): string => p.any ? `any(${p.any.map(describePred).join(" | ")})` : p.all ? `all(${p.all.map(describePred).join(" & ")})` : p.selector ? `${p.selector}${p.visible ? " (visible)" : ""}` : p.urlLike ? `request ${p.urlLike}${p.landed ? " landed" : ""}` : "predicate";
 
 /** One line of a diagnosis for error messages: reason, near-matches, what was pending. */
 export function diagnosisLine(dg?: Diagnosis): string {

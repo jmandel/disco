@@ -83,7 +83,7 @@ function onRequest(d: Daemon, t: TargetState, p: RequestWillBeSent) {
   // closed on this root — with no new window open — is causally downstream of that action (delayed
   // validations, optimistic-save status checks). Tagged "trailing"; never fed to settlement.
   let actionId = a.actionId; let attribution: string = a.attribution;
-  if (!actionId && attribution === "none" && !d.attrib.isAmbient(a.family)) {
+  if (!actionId && attribution === "none" && !d.attrib.isAmbient(a.family, p.request.url)) {
     const rootId = d.targets.get(t.targetId)?.rootTargetId ?? t.targetId;
     const lc = d.lastClosed.get(rootId);
     if (lc && tStart - lc.tClosed <= defaults.trailingAttributionMs && !d.windows.get(rootId)) { actionId = lc.actionId; attribution = "trailing"; }

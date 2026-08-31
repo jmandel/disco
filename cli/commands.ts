@@ -69,7 +69,7 @@ export function printReport(r: any, flags: Record<string, string | boolean>, ctx
   if (r.timing) console.log(`  timing: page ${r.timing.waitMs}ms (settled ${r.timing.settleMs}, reported ${r.timing.reportedMs}${r.timing.untilMs !== undefined ? `, until ${r.timing.untilMs}` : ""}) + overhead ${r.timing.overheadMs}ms (resolve ${r.timing.resolveMs}, pre ${r.timing.preMs}, post ${r.timing.postMs}, build ${r.timing.buildMs})${r.timing.absorbMs ? ` + scroll-absorb ${r.timing.absorbMs}ms` : ""} = ${r.timing.totalMs}ms`);
   if (r.target?.detachedRetried) console.log(`  note: element detached mid-dispatch; re-resolved once (re-render race)`);
   if (r.until) {
-    if (r.until.matched) console.log(`  ✓ until: matched in ${r.until.elapsedMs}ms${r.until.preview ? "  " + r.until.preview : ""}${r.until.request ? "  req " + r.until.request : ""}`);
+    if (r.until.matched) console.log(`  ✓ until: matched in ${r.until.elapsedMs}ms${r.until.which !== undefined ? "  [" + r.until.which + "]" : ""}${r.until.preview ? "  " + r.until.preview : ""}${r.until.request ? "  req " + r.until.request : ""}`);
     else { console.log(`  ✗ until: NOT matched in ${r.until.elapsedMs}ms — diagnosis:`); printDiagnosis(r.until.diagnosis); }
   }
   if (r.diagnosis) { printDiagnosis(r.diagnosis); if (r.env?.url) console.log(`    in: ${r.env.url}   (multi-tab? \`disco targets\`, then --target <id-prefix|url-part> or \`disco focus\`)`); }

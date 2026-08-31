@@ -16,7 +16,15 @@ const sessionClock = (d: Daemon) => ({ now: () => d.now(), setTimeout: (f: () =>
 /** A predicate over the page/wire: an element exists (`visible`: and is laid out with a box), an in-page
  *  function is truthy (called with `fnArg`), a request matching a URL fragment has started (`landed`: its
  *  response and body are captured). Shared by `watch()` and `act({until})`. */
-export interface WatchPred { selector?: string; visible?: boolean; fn?: string; fnArg?: unknown; urlLike?: string; landed?: boolean }
+export interface WatchPred {
+  selector?: string; visible?: boolean; fn?: string; fnArg?: unknown; urlLike?: string; landed?: boolean;
+  /** Combinators, one level (DECISIONS #43): `any` holds when one arm holds (`report.until.which` names it),
+   *  `all` when every arm holds — arms are full predicates, so wire-AND-DOM postconditions work. */
+  any?: WatchPred[]; all?: WatchPred[];
+  /** Optional label for an arm (what `which` reports; defaults to the arm's index). */
+  name?: string;
+}
+export const hasPred = (p: WatchPred | undefined | null): boolean => !!p && !!(p.selector || p.fn || p.urlLike || p.any?.length || p.all?.length);
 /** `until`: the postcondition act() must reach before it returns (GUIDANCE §9). The verdict keeps saying
  *  what the page DID; `until` says whether the state you need ARRIVED. */
 export interface UntilSpec extends WatchPred { budgetMs?: number; tailMs?: number; frame?: string /* the postcondition's frame, when not the action's (a finder click whose effect is a new chart frame) */ }
@@ -111,7 +119,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   const n = d.store.nextActionN();
   const actionId = `act:${n}`;
   const seqStart = d.store.lastSeq() + 1;
-  const spec = { ...p, evaluateAfter: p.evaluateAfter ? "(fn)" : undefined, until: p.until ? { ...p.until, fn: p.until.fn ? "(fn)" : undefined } : undefined };
+  const spec = { ...p, evaluateAfter: p.evaluateAfter ? "(fn)" : undefined, until: p.until ? redactFns(p.until) : undefined };
   // A frame that doesn't exist (yet) is a diagnosis with a frame census, not a bare RPC error (GUIDANCE §2.2):
   // enterprise apps build tabs as child frames a beat after the action that opens them — `until` on the frame.
   let frame: FrameInfo;
@@ -235,7 +243,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   // page did, `until` whether the expected state arrived — and the return is gated on both (bounded).
   let result: SettleResult;
   let until: UntilResult | undefined;
-  const untilSpec = p.until && (p.until.selector || p.until.fn || p.until.urlLike) ? p.until : null;
+  const untilSpec = hasPred(p.until) ? p.until! : null;
   if (!untilSpec) result = await settler.result;
   else {
     const tail = untilSpec.tailMs ?? defaults.untilTailMs;
@@ -270,7 +278,7 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   let evalResult: unknown;
   if (p.evaluateAfter) {
     try { evalResult = (await d.callInFrame(postFrame, p.evaluateAfter, [p.evaluateAfterArg ?? null], p.world ?? "main")).value; }
-    catch (e) { evalResult = { error: (e as Error).message }; }
+    catch (e) { const m = (e as Error).message; evalResult = { error: /ReferenceError|is not defined/.test(m) ? closureHint(m) : m }; }
   }
   const report = buildReport(d, {
     actionId, kind: p.kind, spec, frame: postFrame, root, verdict: result.verdict, settle: result, t0, tEnd, until,
@@ -288,7 +296,10 @@ export async function act(d: Daemon, sel: Selectors, p: ActParams): Promise<Repo
   return report;
 }
 
-const untilLabel = (u: UntilSpec) => u.selector ?? u.urlLike ?? "(fn)";
+const redactFns = (u: WatchPred): WatchPred => ({ ...u, fn: u.fn ? "(fn)" : undefined, any: u.any?.map(redactFns), all: u.all?.map(redactFns) });
+const untilLabel = (u: UntilSpec): string => u.any ? `any(${u.any.map(untilLabel).join(" | ")})` : u.all ? `all(${u.all.map(untilLabel).join(" & ")})` : u.selector ?? u.urlLike ?? "(fn)";
+/** The hint for a ReferenceError inside a page function (they capture nothing from the caller's script). */
+export const closureHint = (msg: string) => `${msg.replace(/^in-page error: /, "")} — page functions capture nothing from your script; pass the value in as fnArg / args / evaluateAfterArg`;
 
 /** After an `until` match that came after settlement: a short settle seeded with this action's in-flight
  *  attributed requests, so the response that the predicate announced (e.g. a `urlLike` match fires on
@@ -385,7 +396,7 @@ export async function awaitSettlement(d: Daemon, sel: Selectors, p: { action?: s
 /** watch(): event-driven predicate wait; diagnosis on expiry, never a bare timeout (GUIDANCE §5.2). A frame
  *  that doesn't exist yet is waited for, not thrown on (`frame` is re-resolved per check). */
 export async function watch(d: Daemon, sel: Selectors, p: WatchPred & { budgetMs?: number; frame?: string; targetId?: string }): Promise<UntilResult> {
-  if (!p.selector && !p.fn && !p.urlLike) throw new RpcError(-32602, "watch needs selector, fn, or urlLike");
+  if (!hasPred(p)) throw new RpcError(-32602, "watch needs selector, fn, urlLike, any, or all");
   const t = p.targetId ? d.targets.get(p.targetId) : d.primary();
   if (!t) throw new RpcError(-32602, `unknown target ${p.targetId}`);
   const root = d.targets.get(t.rootTargetId) ?? t;
@@ -397,7 +408,10 @@ export async function watch(d: Daemon, sel: Selectors, p: WatchPred & { budgetMs
  *  events (plus a coarse interval for canvas-only changes), budgeted from `t0`, diagnosis on expiry. The frame
  *  is re-resolved per check so a navigation mid-wait, or a frame that appears mid-wait, is handled. */
 function runWatch(d: Daemon, sel: Selectors, frameOf: () => FrameInfo | null, root: TargetState, pred: WatchPred, budgetMs: number, t0: number, frameSpec?: string, sinceDispatch = false): { done: Promise<UntilResult>; cancel(): void } {
-  const check = async (): Promise<{ ok: boolean; preview?: string; request?: string }> => {
+  /** A page function that throws ReferenceError is a closure-capture bug, not a "not yet": fail fast with the hint
+   *  instead of reading `false` until the budget expires (DECISIONS #43). */
+  class PageFnError extends Error {}
+  const checkOne = async (pred: WatchPred): Promise<{ ok: boolean; preview?: string; request?: string }> => {
     try {
       if (pred.urlLike) {
         // Causality: for act({until}) only a request that STARTED after dispatch can be this action's effect;
@@ -417,11 +431,25 @@ function runWatch(d: Daemon, sel: Selectors, frameOf: () => FrameInfo | null, ro
         if (r && "objectId" in r && (!pred.visible || (r.box && r.box.w > 1 && r.box.h > 1))) return { ok: true, preview: r.preview };
       }
       if (pred.fn && fr) {
-        const r = await d.callInFrame(fr, pred.fn, [pred.fnArg ?? null], "main").catch(() => ({ value: false }));
+        const r = await d.callInFrame(fr, pred.fn, [pred.fnArg ?? null], "main").catch((e: Error) => { if (/ReferenceError|is not defined/.test(e.message)) throw new PageFnError(closureHint(e.message)); return { value: false }; });
         if (r.value) return { ok: true, preview: JSON.stringify(r.value).slice(0, 120) };
       }
-    } catch {}
+    } catch (e) { if (e instanceof PageFnError) throw e; }
     return { ok: false };
+  };
+  const check = async (): Promise<{ ok: boolean; preview?: string; request?: string; which?: string; fatal?: string }> => {
+    try {
+      if (pred.any?.length) {
+        for (const [i, arm] of pred.any.entries()) { const r = await checkOne(arm); if (r.ok) return { ...r, which: arm.name ?? String(i) }; }
+        return { ok: false };
+      }
+      if (pred.all?.length) {
+        let last: { ok: boolean; preview?: string; request?: string } = { ok: false };
+        for (const arm of pred.all) { last = await checkOne(arm); if (!last.ok) return { ok: false }; }
+        return { ...last, ok: true };
+      }
+      return await checkOne(pred);
+    } catch (e) { return { ok: false, fatal: (e as Error).message }; }
   };
   const expiryDiagnosis = async (): Promise<Diagnosis> => {
     const fr = frameOf();
@@ -436,17 +464,19 @@ function runWatch(d: Daemon, sel: Selectors, frameOf: () => FrameInfo | null, ro
       const elapsedMs = Math.round(d.now() - t0);
       if (matched) return resolve({ matched: true, elapsedMs, ...extra });
       if (extra.cancelled) return resolve({ matched: false, elapsedMs });
+      if (extra.fatal) return resolve({ matched: false, elapsedMs, diagnosis: { reason: "error", error: extra.fatal } });
       resolve({ matched: false, elapsedMs, diagnosis: await expiryDiagnosis() });
     };
     void (async () => {
       const first = await check();
       if (first.ok) return finish(true, first);
+      if (first.fatal) return finish(false, { fatal: first.fatal });
       if (done) return;
       let checking = false; let lastCheck = 0;
       const maybeCheck = async () => {
         if (checking || done || d.now() - lastCheck < defaults.watchMinGapMs) return;
         checking = true; lastCheck = d.now();
-        try { const r = await check(); if (r.ok) await finish(true, r); } finally { checking = false; }
+        try { const r = await check(); if (r.ok) await finish(true, r); else if (r.fatal) await finish(false, { fatal: r.fatal }); } finally { checking = false; }
       };
       unsub = d.listen((ev) => {
         const tin = ev.targetId ? d.targets.get(ev.targetId)?.rootTargetId === root.rootTargetId : false;

@@ -51,8 +51,11 @@ fell back from `o3.` to `dev3.openmrs.org`). Then `bun cli/disco.ts session new 
 once (≥ 3 cycles of the slowest heartbeat) before trusting settlement. Check `bun cli/disco.ts families`
 — every ambient family should be tagged ambient with evidence. EHR front-ends refetch in bursts (SWR) and
 re-read `session`/`user` on every route change: if a real heartbeat is not tagged, or a request that fired
-*with* your action is (the report names these), `disco families --ambient|--not-ambient <family>` is the
-override — note every override in `nav-and-quirks.md`, with the evidence.
+*with* your action is (the report names these), a **rule** is the override: `disco families --ambient
+<url-part>` (third-party telemetry, an unlearnable poll) / `--not-ambient <url-part>` (a mis-learned read);
+`disco sentinels --mute <name> --text <t>` for sentinel noise (Carbon table rows). Rules persist per app;
+register a pack's rules in its `login` so every run starts right, and note each one in `nav-and-quirks.md`
+with the evidence.
 
 **2. Recon before flows.** Before driving anything: what is the architecture (SPA? MPA? tabs as iframes —
 `bun cli/disco.ts targets` shows frames), where does auth live (cookie/session, token, redirect patterns,

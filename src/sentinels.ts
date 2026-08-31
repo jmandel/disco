@@ -20,6 +20,8 @@ export async function fireSentinel(d: Daemon, t: TargetState | null, name: Senti
     recent.set(key, at);
   }
   const actionId = t ? d.windowFor(t.targetId, at)?.actionId ?? null : null;
+  const mute = muteFor(d, name, detail);
+  if (mute) return d.store.insert("sentinels", { t: at, target_id: t?.targetId ?? null, frame_id: opts.frameId ?? null, name, detail: JSON.stringify({ ...detail, mutedBy: mute.id }), shot: null, action_id: actionId, muted: 1, reported: 1 });
   let shot: string | null = null;
   if (opts.shot !== false && t) {
     try { shot = (await d.captureShot(t, `sentinel:${name}`)).hash; } catch (e) { d.log(`sentinel shot failed: ${(e as Error).message}`); }
@@ -27,6 +29,14 @@ export async function fireSentinel(d: Daemon, t: TargetState | null, name: Senti
   const seq = d.store.insert("sentinels", { t: at, target_id: t?.targetId ?? null, frame_id: opts.frameId ?? null, name, detail: JSON.stringify(detail), shot, action_id: actionId });
   d.publish({ kind: "sentinel", t: at, targetId: t?.targetId, frameId: opts.frameId ?? undefined, actionId, ref: seq, summary: { name, ...digest(detail), shot } });
   return seq;
+}
+
+/** A per-app mute rule (DECISIONS #43) matching this firing: same sentinel name, and every given field
+ *  (selector / text / url) a substring of the firing's detail. Muted firings are recorded with muted=1 — never
+ *  hidden from the store — but take no screenshot, are not streamed, and do not surface in reports. */
+function muteFor(d: Daemon, name: string, detail: Record<string, unknown>) {
+  const text = `${detail.title ?? ""} ${detail.text ?? ""} ${detail.message ?? ""}`;
+  return d.rules.mutes.find((m) => m.name === name && (!m.selector || String(detail.sel ?? "").includes(m.selector)) && (!m.text || text.includes(m.text)) && (!m.url || String(detail.url ?? "").includes(m.url)));
 }
 
 function digest(detail: Record<string, unknown>) {

@@ -15,7 +15,10 @@ const src = (f: PageFn): string => (typeof f === "string" ? f : f.toString());
 /** `until` (GUIDANCE §9): the postcondition act() must reach before returning — a selector, an in-page
  *  predicate (stringified; pass data via `fnArg`), or a request URL fragment. The verdict still reports
  *  what the page did; `report.until` says whether the state arrived. Automation should always pass one. */
-export interface UntilOptions extends Omit<UntilSpec, "fn"> { fn?: PageFn }
+export interface PredOptions extends Omit<WatchPred, "fn" | "any" | "all"> { fn?: PageFn; any?: PredOptions[]; all?: PredOptions[] }
+export interface UntilOptions extends PredOptions { budgetMs?: number; tailMs?: number; frame?: string }
+/** Page functions travel as source (README "closures do not transfer"); combinator arms recurse. */
+const stringifyPred = (p: any): any => ({ ...p, fn: p.fn ? src(p.fn) : undefined, any: p.any?.map(stringifyPred), all: p.all?.map(stringifyPred) });
 export interface ActOptions { frame?: string; targetId?: string; budgetMs?: number; quietMs?: number; noEffectMs?: number; maxBudgetMs?: number; evaluateAfter?: PageFn; evaluateAfterArg?: unknown; world?: "main" | "disco"; until?: UntilOptions; expect?: (report: Report) => boolean }
 
 /** Resolve a selector to a product's STORE dir (apps/<product>/store). Accepts a product name, a path, or the current app. */
@@ -56,7 +59,7 @@ export class Session {
     const { expect: expectation, ...rest } = p;
     const q: any = { ...rest };
     if (q.evaluateAfter) q.evaluateAfter = src(q.evaluateAfter);
-    if (q.until?.fn) q.until = { ...q.until, fn: src(q.until.fn) };
+    if (q.until) q.until = stringifyPred(q.until);
     const timeout = (p.maxBudgetMs ?? defaults.maxBudgetMs) + (p.until ? (p.until.budgetMs ?? defaults.untilBudgetMs) + (p.until.tailMs ?? defaults.untilTailMs) : 0) + 30000;
     const report: Report & { surprise?: boolean } = await this.rpc.call("act", q, timeout);
     if (expectation) {
@@ -83,9 +86,18 @@ export class Session {
     return this.act({ kind: "drag", target, ...(typeof to === "string" ? { to } : { toOffset: to }), ...o });
   }
   awaitSettlement(o: { action?: string; budgetMs?: number; frame?: string } = {}): Promise<Report> { return this.rpc.call("settle", o, (o.budgetMs ?? 30000) + 30000); }
-  watch(pred: Omit<WatchPred, "fn"> & { fn?: PageFn }, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult> {
-    return this.rpc.call("watch", { ...pred, fn: pred.fn ? src(pred.fn) : undefined, ...o }, (o.budgetMs ?? 30000) + 30000);
+  watch(pred: PredOptions, o: { budgetMs?: number; frame?: string } = {}): Promise<import("./report.ts").UntilResult> {
+    return this.rpc.call("watch", { ...stringifyPred(pred), ...o }, (o.budgetMs ?? 30000) + 30000);
   }
+  /** Per-app overrides (DECISIONS #43) — persist in the app's store across runs. */
+  rules() { return this.rpc.call("rules.list"); }
+  /** Treat every request whose URL contains `urlSubstring` as ambient: out of attribution AND the settlement race (third-party telemetry, a bursty poll the classifier can't learn). */
+  ignore(urlSubstring: string, note?: string) { return this.rpc.call("rules.add", { kind: "ambient", match: urlSubstring, note }); }
+  /** Never treat requests whose URL contains `urlSubstring` as ambient (a burst-refetched read the classifier mis-learned). */
+  attend(urlSubstring: string, note?: string) { return this.rpc.call("rules.add", { kind: "not-ambient", match: urlSubstring, note }); }
+  /** Mute a sentinel: same name and every given field a substring of the firing (recorded with muted=1, never reported/streamed). */
+  mute(name: "dialog" | "toast" | "error" | "session_expiry" | "new_target", m: { selector?: string; text?: string; url?: string } = {}, note?: string) { return this.rpc.call("rules.add", { kind: "mute-sentinel", name, ...m, note }); }
+  unrule(id: number) { return this.rpc.call("rules.remove", { id }); }
   /** Run a self-contained function in a frame. world "main" sees the page's globals; "disco" is our isolated world. */
   async evaluate<T = unknown>(fn: PageFn, o: { frame?: string; targetId?: string; args?: unknown[]; world?: "main" | "disco" } = {}): Promise<T> {
     if (o === null || typeof o !== "object" || Array.isArray(o)) throw new Error(`evaluate(fn, options): the second argument is an options object — pass data as { args: [${JSON.stringify(o)}] } (positional: fn(a, b) ← args: [a, b])`);

@@ -336,16 +336,22 @@ and lean on them. A move graduates from a pack to `lib/` when a second product w
 - **`evaluate` args are positional** (`{ args: [a, b] }` → `fn(a, b)`); `evaluateAfterArg` / `fnArg` are
   single values. `--eval` output prints in full right under the verdict; `--json` for the whole report.
 - **Page functions capture nothing.** A module constant used inside `until.fn` / `evaluate` is a
-  `ReferenceError` in the page and `tsc` will not tell you — pass it as `fnArg` / `args`. Re-read every
-  in-page function for free identifiers before shipping a pack.
-- **The classifier can be wrong for your app** — a read endpoint re-fetched in bursts on every route change
-  can look chained; a bursty SWR heartbeat can look irregular. Reports name ambient-tagged requests that fired
-  *with* the action; `disco families --not-ambient <family>` / `--ambient <family>` are the overrides (a
-  family is the path shape without the query string, so a manual mark is coarse).
-- **Combining postconditions:** one `until` is one predicate; AND/OR is an in-page `fn`
-  (`() => a() || b()`), and `firstOf` tells you which arm held afterwards. A wire-AND-DOM condition is
-  `until: { urlLike, landed: true }` on the act, then `assertVisible` for the DOM half. To wait for the *page*
-  URL, `until: { fn: () => location.href.includes("/chart") }` (`urlLike` matches *request* URLs).
+  `ReferenceError` in the page and `tsc` will not tell you — pass it as `fnArg` / `args`. The wait fails
+  **at once** with `diagnosis.error: "ReferenceError: X is not defined — page functions capture nothing…"`
+  (never `false` until the budget), and `evaluate` rethrows with the same hint.
+- **The classifier can be wrong for your app** — reports name ambient-tagged requests that fired *with*
+  the action. Override with a **URL-substring rule**: `disco families --not-ambient /api/session` (a
+  burst-refetched read the classifier mis-learned) or `--ambient backtrace.io` / `session new --ignore
+  backtrace.io` (third-party telemetry that holds settlement until it fails). Rules persist per app, match
+  the full URL (so `Location?_tag=Login` is one rule), and `not-ambient` wins. `disco rules` lists them.
+- **Sentinel noise** (a Carbon app fires "toasts" for table rows): `disco sentinels --mute toast --text
+  "Loading"` — muted firings are still in the store (`muted=1`), just not in reports. Put a pack's mutes in
+  its `check.ts`/`login` (`s.mute(…)`) so every run starts quiet.
+- **Combining postconditions:** `until: { any: [pred, …] }` (one holds; `report.until.which` names the arm
+  — give arms a `name`) or `{ all: [pred, …] }` (every arm; a wire-AND-DOM postcondition is
+  `all: [{ urlLike, landed: true }, { selector }]`). `firstOf` still answers "which state holds now" after
+  the fact. To wait for the *page* URL, `{ fn: () => location.href.includes("/chart") }` (`urlLike` matches
+  *request* URLs).
 - **`disco sql` is read-only** — it can't mutate the store; notes are written only through the daemon.
 - **Warm the classifiers** (`disco idle`) before trusting settlement on a heartbeat-heavy app.
 - Full gotcha list: `STATE.md` "Gotchas" + `DECISIONS.md` #16–31.

@@ -45,6 +45,18 @@ export class Daemon {
   wsUrls = new Map<string, string>();
   windows = new Map<string, ActionWindow>(); // rootTargetId → open causality window
   lastClosed = new Map<string, { actionId: string; tClosed: number }>(); // for trailing attribution (friction #3)
+  /** Per-app overrides (DECISIONS #43), cached from the `rules` table. */
+  rules: { ambient: string[]; notAmbient: string[]; mutes: Array<{ id: number; name: string; selector?: string; text?: string; url?: string }> } = { ambient: [], notAmbient: [], mutes: [] };
+  loadRules() {
+    const rows = this.store.all<{ id: number; kind: string; match: string }>("SELECT id, kind, match FROM rules ORDER BY id");
+    const r = { ambient: [] as string[], notAmbient: [] as string[], mutes: [] as Array<{ id: number; name: string; selector?: string; text?: string; url?: string }> };
+    for (const x of rows) {
+      if (x.kind === "ambient") r.ambient.push(x.match);
+      else if (x.kind === "not-ambient") r.notAmbient.push(x.match);
+      else if (x.kind === "mute-sentinel") { try { r.mutes.push({ id: x.id, ...JSON.parse(x.match) }); } catch {} }
+    }
+    this.rules = r;
+  }
   attrib!: Attributor;
   ambientDom = new AmbientDom();
   primaryTargetId: string | null = null;
@@ -87,7 +99,8 @@ export class Daemon {
       wsUrl = disc.wsUrl; d.manifest.browser = disc.browser; d.store.setRunBrowser(disc.browser);
     }
     d.writeManifest();
-    d.attrib = new Attributor({ now: () => d.now(), windowFor: (tid, t) => d.windowFor(tid, t), onFamily: (f) => d.persistFamily(f), startT: 0, idleObservedMs: () => d.idleObservedMs() });
+    d.attrib = new Attributor({ now: () => d.now(), windowFor: (tid, t) => d.windowFor(tid, t), onFamily: (f) => d.persistFamily(f), startT: 0, idleObservedMs: () => d.idleObservedMs(), rules: () => d.rules });
+    d.loadRules();
     d.cdp = await Cdp.connect(wsUrl);
     d.connected = true;
     d.cdp.on((e) => d.route(e));
@@ -164,7 +177,7 @@ export class Daemon {
     this.publish({ kind: "task", t: span.t0, targetId: t.targetId, actionId: w.actionId, summary: { type: msg.type, ms: Math.round(span.t2 - span.t0), upgraded: rows.length } }, { stream: false });
   }
   persistFamily(f: FamilyState) {
-    this.store.upsert("families", { family: f.family, method: f.method, host: f.host, path_shape: f.pathShape, count: f.count, first_t: f.firstT, last_t: f.lastT, ambient: f.ambient ? 1 : 0, ambient_reason: f.ambientReason, evidence: JSON.stringify(f.evidence), write_kind: f.writeKind });
+    this.store.upsert("families", { family: f.family, method: f.method, host: f.host, path_shape: f.pathShape, count: f.count, first_t: f.firstT, last_t: f.lastT, ambient: f.ambient ? 1 : 0, ambient_reason: f.ambientReason, evidence: JSON.stringify(f.evidence), write_kind: f.writeKind, last_run: this.store.runId });
   }
   isAuthRedirect(url: string, t: TargetState): boolean { return /\/(login|signin|sign-in|auth|sso|logout|session-expired|timeout)\b/i.test(url) && !/\/(login|signin|sign-in|auth|sso)\b/i.test(t.url || ""); }
 
@@ -350,7 +363,10 @@ export class Daemon {
     const res = await this.send<{ result: any; exceptionDetails?: any }>(t, "Runtime.callFunctionOn", {
       functionDeclaration: fn, arguments: args.map((a) => ({ value: a })), executionContextId: ctx, returnByValue: opts.returnByValue ?? true, awaitPromise: opts.awaitPromise ?? true, userGesture: false,
     });
-    if (res.exceptionDetails) throw new RpcError(-32010, `in-page error: ${res.exceptionDetails.exception?.description ?? res.exceptionDetails.text}`);
+    if (res.exceptionDetails) {
+      const desc = String(res.exceptionDetails.exception?.description ?? res.exceptionDetails.text);
+      throw new RpcError(-32010, `in-page error: ${desc.split("\n")[0]}${/ReferenceError|is not defined/.test(desc) ? " — page functions capture nothing from your script; pass the value in as args / fnArg / evaluateAfterArg" : ""}`);
+    }
     return opts.returnByValue === false ? { objectId: res.result.objectId } : { value: res.result.value };
   }
 
@@ -438,6 +454,17 @@ export class Daemon {
       }
       case "families": return [...this.attrib.families.values()].map((f) => ({ family: f.family, count: f.count, ambient: f.ambient, reason: f.ambientReason, writeKind: f.writeKind, evidence: f.evidence }));
       case "family.mark": { if (p.read !== undefined && p.read) this.attrib.markRead(p.family); if (p.ambient !== undefined) this.attrib.markAmbient(p.family, !!p.ambient); return { ok: true }; }
+      case "families.forget": { this.attrib.families.clear(); this.store.run("DELETE FROM families"); return { ok: true }; }
+      case "rules.list": return this.store.all("SELECT id, run, t, kind, match, note FROM rules ORDER BY id");
+      case "rules.add": {
+        if (!["ambient", "not-ambient", "mute-sentinel"].includes(p.kind)) throw new RpcError(-32602, "rules.add: kind must be ambient | not-ambient | mute-sentinel");
+        const match = p.kind === "mute-sentinel" ? JSON.stringify({ name: p.name, selector: p.selector, text: p.text, url: p.url }) : String(p.match ?? "");
+        if (p.kind === "mute-sentinel" ? !p.name : !match) throw new RpcError(-32602, "rules.add: a URL substring (ambient/not-ambient) or a sentinel name (mute-sentinel) is required");
+        const id = this.store.insert("rules", { t: this.now(), kind: p.kind, match, note: p.note ?? null });
+        this.loadRules();
+        return { id, kind: p.kind, match };
+      }
+      case "rules.remove": { this.store.run("DELETE FROM rules WHERE id=?", Number(p.id)); this.loadRules(); return { ok: true }; }
       case "idle": {
         const ms = Number(p.ms ?? defaults.idleObserveMs);
         const t0 = this.now();

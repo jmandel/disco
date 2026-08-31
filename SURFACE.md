@@ -36,13 +36,14 @@ sentinels shots sse_events targets websockets ws_frames
   families()
   idle(ms?: number)
   focusTarget(targetId: string)
-  onEvent(fn: (ev: any) => void): Promise<() => void> { const off = this.rpc.onEvent(fn); return this.rpc.call("subscribe").then(() => off); }
+  rules() / ignore(urlPart, note?) / attend(urlPart, note?) / mute(name, { selector?, text?, url? }, note?) / unrule(id)   — per-app overrides (rules table, DECISIONS #43)
+  onEvent(fn: (ev: any) => void): Promise<() => void>
   end()
   close() { this.rpc.close(); this._store?.close(); }
 ```
 
 Options: `ActOptions = { frame?, targetId?, budgetMs?, quietMs?, noEffectMs?, maxBudgetMs?, evaluateAfter?, evaluateAfterArg?, world?, until?, expect? }`;
-`until = { selector?, visible?, fn?, fnArg?, urlLike?, landed?, budgetMs?, tailMs?, frame? }` (the postcondition — DECISIONS #35, #38); `expect` never waits (client-side ledger flag).
+`until = { selector?, visible?, fn?, fnArg?, urlLike?, landed?, any?: pred[], all?: pred[], name?, budgetMs?, tailMs?, frame? }` (the postcondition — DECISIONS #35, #38, #43); `expect` never waits (client-side ledger flag).
 Report: `{ action, kind, verdict, target?, settle?, until?, timing?, ui?, wire?, console?, env, evaluateAfter?, shots, aria, cursor, diagnosis?, extended? }` — shapes in README "Report & watch shapes".
 
 Store readers (src/store.ts — `openStore(dir)` / `openApp(product)`): sql, one, body/bodyBytes/json (hash or 16-char prefix), blobPath, requests, appearances, timeline, screenshotAt, action, frames, diffTrace, runs — each documented with its SQL/TS desugaring in the source and README.

@@ -39,8 +39,10 @@ Milestone tag: **`v0.1.0-platform-base`**.
 - P5 fold-back DONE (DECISIONS #40–42): docs order + `--target`/`focus` + run-filtered queries (C); Session surface on one
   screen, no-pipe launch, data: URLs, sentinel dedupe, evaluate args (A); burst-collapsed cadence + long-poll-shaped
   `chained`, API-first digest ranking, named ambient/pending requests, label hit-test, toast exclusions, `run-check ready` (B).
-- OPEN from the runs: `until: { any: […] }`; a `run` column on `families` (and query-key-aware families); a free-identifier
-  lint for page functions; a per-pack sentinel mute list.
+- Decided + built (DECISIONS #43): `until: { any | all }` with `which`; per-app URL-substring rules (`disco rules`, `families
+  --ambient|--not-ambient <url-part>`, `session new --ignore`, `s.ignore/attend`); sentinel mutes (`disco sentinels --mute`,
+  `s.mute`; recorded muted=1, never reported); ReferenceError in a page function fails fast with the closure hint.
+- OPEN: query-key-aware family identity (only if rules prove insufficient); `until` nesting deeper than one level.
 
 ## In progress — platform build-out (PLATFORM.md plan)
 - Slice 1 ✅ ways-of-knowing palette named in `apps/README.md` (descriptive, not a schema).

@@ -104,6 +104,45 @@ describe("kinds and predicates", () => {
     expect(bad.until!.diagnosis!.reason).toBe("frame-not-found");
   }, 15000);
 
+  test("until: { any } names the arm that held; { all } needs every arm (a wire-AND-dom postcondition)", async () => {
+    await setCtl({ slowMs: 300, renderDelayMs: 0 });
+    const a = await s.click("#load-chart", { until: { any: [{ selector: "#never-exists", name: "never" }, { fn: isIdle, name: "idle" }] } });
+    expect(a.until!.matched).toBe(true);
+    expect(a.until!.which).toBe("idle");
+    const b = await s.click("#load-chart", { until: { all: [{ urlLike: "/api/slow", landed: true }, { fn: isIdle }] } });
+    expect(b.until!.matched).toBe(true);
+    expect(b.until!.elapsedMs).toBeGreaterThanOrEqual(280);   // the slow response had to land too
+    const c = await s.click("#noop", { until: { any: [{ selector: "#never-1" }, { selector: "#never-2" }], budgetMs: 400 } });
+    expect(c.until!.matched).toBe(false);
+    expect(c.until!.diagnosis!.reason).toBe("budget-expired");
+    await setCtl({ slowMs: 100 });
+  }, 20000);
+
+  test("a ReferenceError inside a page function fails fast with the closure hint (not `false` until the budget)", async () => {
+    const t0 = performance.now();
+    const w = await s.watch({ fn: "() => !!document.querySelector(NOT_DEFINED_CONST)" }, { budgetMs: 5000 });
+    expect(w.matched).toBe(false);
+    expect(w.diagnosis!.reason).toBe("error");
+    expect(w.diagnosis!.error).toMatch(/NOT_DEFINED_CONST[\s\S]*capture nothing/);
+    expect(performance.now() - t0).toBeLessThan(1500);
+    await expect(s.evaluate("() => NOT_DEFINED_CONST")).rejects.toThrow(/capture nothing/);
+  }, 10000);
+
+  test("per-app rules: a sentinel mute is recorded (muted=1) but never reported; rules list/remove round-trip", async () => {
+    const rule = await s.mute("toast", { text: "Saved" }, "test");
+    const ign = await s.ignore("/api/never-called", "test");
+    expect((await s.rules()).map((x: any) => x.id)).toEqual(expect.arrayContaining([rule.id, ign.id]));
+    const r = await s.click("#save", { until: { urlLike: "/api/save/status", landed: true } });
+    await s.watch({ fn: () => !!document.getElementById("toast") }, { budgetMs: 3000 });
+    await sleep(300);
+    expect((r.env.sentinels ?? []).some((x) => x.name === "toast")).toBe(false);
+    const row = s.store.sql<any>("SELECT muted, detail FROM sentinels WHERE name='toast' ORDER BY seq DESC LIMIT 1")[0];
+    expect(row?.muted).toBe(1);
+    expect(JSON.parse(row.detail).mutedBy).toBe(rule.id);
+    await s.unrule(rule.id); await s.unrule(ign.id);
+    expect((await s.rules()).some((x: any) => x.id === rule.id)).toBe(false);
+  }, 20000);
+
   test("`visible` requires a laid-out box; `landed` waits for the response, not just the request start", async () => {
     expect((await s.watch({ selector: "#spinner", visible: true }, { budgetMs: 500 })).matched).toBe(true);
     await setCtl({ slowMs: 1000, renderDelayMs: 0 });
@@ -147,6 +186,10 @@ describe("responsiveness is a contract, not a hope", () => {
 
 describe("settlement paths the review found untested", () => {
   test("trailing: without until, the delayed save-status request is tagged trailing on this action", async () => {
+    // Earlier tests in this file saved twice; a third /api/save/status at a similar interval, arriving outside any
+    // window, can classify the family `periodic` (the heuristic working as designed) — which would suppress
+    // `trailing`. Start from a clean classifier (also exercises the RPC behind `disco families --forget`).
+    await s.rpc.call("families.forget");
     const r = await s.click("#save");
     expect(String(r.verdict).startsWith("settled:")).toBe(true);
     expect((await s.watch({ urlLike: "/api/save/status" }, { budgetMs: 3000 })).matched).toBe(true);

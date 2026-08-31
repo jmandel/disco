@@ -44,7 +44,17 @@ function isGraphQLMutation(url: string, postData: string | null | undefined): bo
 export class Attributor {
   families = new Map<string, FamilyState>();
   private byId = new Map<string, { family: string; attribution: Attribution; actionId: string | null }>();
-  constructor(private opts: { now: () => number; windowFor: (targetId: string, t: number) => WindowInfo | null; onFamily: (f: FamilyState) => void; startT?: number; idleObservedMs?: () => number }) {}
+  constructor(private opts: { now: () => number; windowFor: (targetId: string, t: number) => WindowInfo | null; onFamily: (f: FamilyState) => void; startT?: number; idleObservedMs?: () => number; rules?: () => { ambient: string[]; notAmbient: string[] } }) {}
+
+  /** Per-app URL-substring overrides (DECISIONS #43): `not-ambient` wins over `ambient`, both win over the family's
+   *  learned flag. Matched against the FULL url, so one rule can be a host (`backtrace.io`) or a query key
+   *  (`Location?_tag=Login`) — finer than the path-shape family a manual family mark would cover. */
+  ruleFor(url: string): "ambient" | "not-ambient" | null {
+    const r = this.opts.rules?.(); if (!r) return null;
+    if (r.notAmbient.some((s) => s && url.includes(s))) return "not-ambient";
+    if (r.ambient.some((s) => s && url.includes(s))) return "ambient";
+    return null;
+  }
 
   /** Immature until the session has OBSERVED enough idle time (BRIEF §1.13; review F8). */
   immature(): boolean {
@@ -54,7 +64,7 @@ export class Attributor {
 
   markRead(family: string) { const f = this.families.get(family); if (f) { f.writeKind = "read"; this.opts.onFamily(f); } }
   markAmbient(family: string, ambient: boolean) { const f = this.families.get(family); if (f) { f.ambient = ambient; f.ambientReason = ambient ? "manual" : null; this.opts.onFamily(f); } }
-  isAmbient(family: string): boolean { return this.families.get(family)?.ambient ?? false; }
+  isAmbient(family: string, url?: string): boolean { const rule = url ? this.ruleFor(url) : null; if (rule) return rule === "ambient"; return this.families.get(family)?.ambient ?? false; }
 
   /** Called at requestWillBeSent. Returns the attribution decision for the request row. */
   observeRequest(r: RequestObservation): { family: string; host: string; path: string; pathShape: string; actionId: string | null; attribution: Attribution; writeKind: WriteKind; inWindow: boolean } {
@@ -78,11 +88,13 @@ export class Attributor {
     const writeKind: WriteKind = gqNow === true ? "write" : f.writeKind;
     this.classify(f);
     // attribution
+    const rule = this.ruleFor(r.url);
+    const ambientNow = rule === "ambient" || (rule !== "not-ambient" && f.ambient);
     let attribution: Attribution = "none"; let actionId: string | null = null;
     if (win) {
       actionId = win.actionId;
       if (r.redirectFrom && this.byId.get(r.redirectFrom)?.attribution !== "none" && this.byId.get(r.redirectFrom)?.attribution !== "ambient") attribution = "dependency";
-      else if (f.ambient) attribution = "ambient";
+      else if (ambientNow) attribution = "ambient";
       else if (win.taskSpans?.some((s) => r.tStart >= s.t0 - 2 && r.tStart <= s.t2 + defaults.taskTierSlackMs)) attribution = "task";
       else attribution = "window";
     } else if (r.redirectFrom) {

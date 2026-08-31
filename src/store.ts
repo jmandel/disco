@@ -35,6 +35,8 @@ export class Store {
     mkdirSync(join(dir, "blobs"), { recursive: true });
     this.db = new Database(join(dir, "store.sqlite"), { create: true });
     this.db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+    // Additive migrations for stores created by an older schema (CREATE TABLE IF NOT EXISTS won't add columns).
+    for (const ddl of ["ALTER TABLE sentinels ADD COLUMN muted INTEGER NOT NULL DEFAULT 0", "ALTER TABLE families ADD COLUMN last_run INTEGER"]) { try { this.db.exec(ddl); } catch {} }
   }
 
   /** Begin a new run, or resume the last still-open one (its id, clock anchor). Sets the store clock. */

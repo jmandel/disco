@@ -5,7 +5,7 @@ import { ariaDiff } from "./selectors.ts";
 import type { SettleResult, Verdict } from "./settle.ts";
 
 /** Outcome of a predicate wait — `watch()`'s result, and `report.until` for act({until}). */
-export interface UntilResult { matched: boolean; elapsedMs: number; preview?: string; request?: string; diagnosis?: Diagnosis }
+export interface UntilResult { matched: boolean; elapsedMs: number; preview?: string; request?: string; which?: string /* the `any` arm that held (its name, else index) */; diagnosis?: Diagnosis }
 export interface Timing { resolveMs: number; absorbMs: number; preMs: number; settleMs: number; reportedMs: number; untilMs?: number; waitMs: number; postMs: number; buildMs: number; overheadMs: number; totalMs: number }
 export interface WireItem { line: string; body: string | null; id: string; family: string; a: string; m: string; p: string; s: number | null; ms: number | null }
 export interface Report {
@@ -130,7 +130,7 @@ export function buildReport(d: Daemon, i: BuildInput): Report {
   const goneT = d.store.all<any>("SELECT target_id, url FROM targets WHERE detached_t BETWEEN ? AND ?", i.t0, i.tEnd);
   if (goneT.length) r.env.closedTargets = goneT.map((x) => `${x.target_id.slice(0, 8)} ${x.url}`);
   // Sentinel flags are scoped to THIS action's target tree (review F15); global ones (no target) ride along.
-  const sent = d.store.all<any>("SELECT seq, name, detail, shot, target_id FROM sentinels WHERE reported=0 ORDER BY seq LIMIT 16").filter((s) => !s.target_id || tree.includes(s.target_id)).slice(0, 8);
+  const sent = d.store.all<any>("SELECT seq, name, detail, shot, target_id FROM sentinels WHERE reported=0 AND muted=0 ORDER BY seq LIMIT 16").filter((s) => !s.target_id || tree.includes(s.target_id)).slice(0, 8);
   if (sent.length) {
     r.env.sentinels = sent.map((s) => ({ seq: s.seq, name: s.name, title: safeTitle(s.detail), shot: h16(s.shot) ?? null }));
     for (const s of sent) d.store.run("UPDATE sentinels SET reported=1 WHERE seq=?", s.seq);

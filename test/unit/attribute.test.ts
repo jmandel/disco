@@ -87,3 +87,17 @@ describe("write kinds", () => {
     expect(a.observeRequest({ ...req("4", "http://h/api/graphql", 3), method: "POST", postData: JSON.stringify({ query: "mutation { b }" }) }).writeKind).toBe("write");
   });
 });
+
+describe("rules (DECISIONS #43): URL-substring overrides", () => {
+  test("an `ambient` rule forces ambient inside a window; a `not-ambient` rule overrides a learned/marked family", () => {
+    const rules = { ambient: ["backtrace.io"], notAmbient: ["/api/session"] };
+    const win = { current: { actionId: "act:1", tStart: 0, targetId: "T1" } as WindowInfo };
+    const a = new Attributor({ now: () => 0, windowFor: () => win.current, onFamily: () => {}, startT: 0, rules: () => rules });
+    expect(a.observeRequest(req("r1", "https://submit.backtrace.io/u/t/json", 10)).attribution).toBe("ambient");
+    a.observeRequest(req("s0", "http://h/api/session", 20));
+    a.markAmbient("GET h/api/session", true);                       // the family says ambient…
+    expect(a.isAmbient("GET h/api/session")).toBe(true);
+    expect(a.observeRequest(req("s1", "http://h/api/session", 30)).attribution).not.toBe("ambient"); // …the rule wins
+    expect(a.isAmbient("GET h/api/session", "http://h/api/session?x=1")).toBe(false);
+  });
+});
