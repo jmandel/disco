@@ -45,6 +45,7 @@ export class Daemon {
   wsUrls = new Map<string, string>();
   windows = new Map<string, ActionWindow>(); // rootTargetId → open causality window
   lastClosed = new Map<string, { actionId: string; tClosed: number }>(); // for trailing attribution (friction #3)
+  private notedThisRun = false; // first note of a run opens a run header in NOTES.md
   /** Per-app overrides (DECISIONS #43), cached from the `rules` table. */
   rules: { ambient: string[]; notAmbient: string[]; mutes: Array<{ id: number; name: string; selector?: string; text?: string; url?: string }> } = { ambient: [], notAmbient: [], mutes: [] };
   loadRules() {
@@ -407,6 +408,14 @@ export class Daemon {
       case "focus": { const t = this.targets.get(p.targetId); if (!t?.scoped || t.detached) throw new RpcError(-32602, "unknown/unscoped target"); this.primaryTargetId = t.targetId; return { ok: true }; }
       case "note": {
         const at = this.now();
+        // A note is a line in a COMMITTED doc first (apps/<app>/NOTES.md), a store row second: the store is
+        // gitignored scratch, and annotations that live only there die with it (DECISIONS #49). Accumulate in
+        // NOTES.md; distill into README.md / lib.ts / check.ts whenever something has earned it — no ceremony.
+        try {
+          const notesPath = join(this.store.dir, "..", "NOTES.md");
+          if (!this.notedThisRun) { appendFileSync(notesPath, `\n## run ${this.store.runId} — ${new Date().toISOString().slice(0, 16)}Z\n\n`); this.notedThisRun = true; }
+          appendFileSync(notesPath, `- ${p.action ? `\`${p.action}\` ` : ""}${String(p.text ?? "").replace(/\n/g, " ")}\n`);
+        } catch (e) { this.log(`NOTES.md append failed: ${(e as Error).message}`); }
         const seq = this.store.insert("notes", { t: at, kind: p.kind ?? "note", action_id: p.action ?? p.action_id ?? null, name: p.name ?? null, text: p.text ?? null, data: p.data === undefined ? null : JSON.stringify(p.data) });
         this.publish({ kind: "note", t: at, actionId: p.action ?? null, ref: seq, summary: { kind: p.kind ?? "note", name: p.name, text: String(p.text ?? "").slice(0, 200) } }, { store: false });
         return { seq, t: at };

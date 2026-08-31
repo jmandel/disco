@@ -35,7 +35,7 @@ in your way, note it briefly and route around it.
 
 ## Method (GUIDANCE §7)
 
-**0. Session contract.** Write it at the top of `nav-and-quirks.md` before acting: target, roles, stance,
+**0. Session contract.** make it your first `disco note` (it opens NOTES.md) before acting: target, roles, stance,
 posture, what "done" means for this pass.
 
 **1. Instrument.** Start a session (`session new … --launch --headless --url …`, or attach), then look at
@@ -43,7 +43,7 @@ what you attached to (`disco targets`, a screenshot) before investing anything; 
 way the field guide describes — overlapped with recon, never as a blocking step. Check `disco families`:
 what is ambient should be tagged ambient with evidence; when the classifier is wrong for this app, a rule
 (`families --ambient|--not-ambient <url-part>`) or a sentinel mute is the override — note every override
-in `nav-and-quirks.md` with its evidence.
+— `disco note` it with its evidence.
 
 **2. Recon before flows.** Architecture (SPA/MPA, frames, workers, standing channels — WS/SSE/long-poll),
 auth (cookie/token, redirects, expiry), the wire at rest, the write-flag pass (which non-GET families are
@@ -76,20 +76,23 @@ multi-window flows · reads over POST · optimistic UI · native dialogs / `befo
 
 ## Deliverables — `apps/{{PACK}}/`
 
-- `nav-and-quirks.md` — session contract; architecture; **anchors** with cheap predicates; **transitions**
-  with settle profile + wire signature; interstitials and how to handle each; keyboard recipes; recovery;
-  the checklist with a verdict per item; open questions.
-- `ledger.md` — the variability ledger (what varied | n | hypothesis | resolving experiment | evidence act ids).
-- `wire.md` — **where the facts live**: endpoint family → what it carries, read/write, read-POSTs; the
-  handful of bodies worth citing by handle; standing channels and what they deliver.
-- `lib.ts` — plain importable TypeScript: the flows as robust functions (anchor in → anchor out,
-  postcondition on every transition, wire-first reads, interstitials optional, idempotent where sensible,
-  declared write footprint). Composable; no sleeps; one selector language.
+The shape is `apps/README.md`'s — **NOTES.md accumulates as you work** (`disco note` writes it; every
+claim cites an act id) and you distill what earns it, as you go, into:
+
+- `README.md` — what this app is; how to drive it (anchors with cheap predicates, transitions with their
+  settle profile + wire signature, interstitials and recovery, keyboard recipes verbatim); where the facts
+  live on the wire (endpoint family → what it carries, read/write); what varies (n-counts, observed vs
+  inferred, the experiment that would resolve each); the checklist above with a verdict per item; open questions.
+- `lib.ts` — the flows as robust functions: anchor in → anchor out, postcondition on every transition,
+  wire-first reads, interstitials optional both ways, idempotent where sensible, declared write footprint,
+  no sleeps, one selector language.
 - `check.ts` — `export const target = { url, scope }` (+ optional `ready`) and `check(s)` with PASS/FAIL
-  per step and durations (`run-check` must pass).
-- `screenshots/` — a handful of cited shots.
-- `friction.md` — brief: where the tool or docs got in your way, in the format of the reference packs' logs.
-- The store stays in `apps/{{PACK}}/store/` — every claim in the notes cites an act id or store cursor.
+  per step and durations; `bun scripts/run-check.ts` must pass.
+- Extra files only when they earn their place (`screenshots/` with cited shots; `wire.md`; `friction.md` —
+  put tool/doc friction somewhere, briefly and bluntly).
+
+The store stays in `apps/{{PACK}}/store/` (gitignored, run-tagged); NOTES.md and README cite act ids so
+everything can be re-queried.
 
 ## Quality bar
 

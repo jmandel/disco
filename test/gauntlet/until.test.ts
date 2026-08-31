@@ -78,6 +78,17 @@ describe("act({until}): the postcondition is the readiness contract", () => {
 });
 
 describe("kinds and predicates", () => {
+  test("a note is a line in the committed NOTES.md, not just a store row", async () => {
+    const { existsSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    await s.note("the chart renders after a client-side gap", { action: "act:1" });
+    const p = join(env.dir, "..", "NOTES.md");
+    expect(existsSync(p)).toBe(true);
+    const txt = readFileSync(p, "utf8");
+    expect(txt).toContain("## run ");
+    expect(txt).toContain("`act:1` the chart renders after a client-side gap");
+  });
+
   test("fill replaces the value with real key events; '' clears", async () => {
     const value = () => s.evaluate<string>(() => (document.getElementById("search") as HTMLInputElement).value);
     await s.fill("#search", "abc"); expect(await value()).toBe("abc");

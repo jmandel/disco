@@ -39,7 +39,7 @@ in your way, note it briefly and route around it.
 
 ## Method (GUIDANCE §7, applied to an EHR)
 
-**0. Session contract.** Write it at the top of `nav-and-quirks.md` before acting: target, roles, stance,
+**0. Session contract.** make it your first `disco note` (it opens NOTES.md) before acting: target, roles, stance,
 posture, what "done" means for this pass (the flows below).
 
 **1. Instrument.** `bun cli/disco.ts session new {{PACK}} --launch --headless --url {{BASE_URL}}`, then
@@ -53,8 +53,7 @@ re-read `session`/`user` on every route change: if a real heartbeat is not tagge
 *with* your action is (the report names these), a **rule** is the override: `disco families --ambient
 <url-part>` (third-party telemetry, an unlearnable poll) / `--not-ambient <url-part>` (a mis-learned read);
 `disco sentinels --mute <name> --text <t>` for sentinel noise (Carbon table rows). Rules persist per app;
-register a pack's rules in its `login` so every run starts right, and note each one in `nav-and-quirks.md`
-with the evidence.
+register a pack's rules in its `login` so every run starts right, and `disco note` each one with its evidence.
 
 **2. Recon before flows.** Before driving anything: what is the architecture (SPA? MPA? tabs as iframes —
 `bun cli/disco.ts targets` shows frames), where does auth live (cookie/session, token, redirect patterns,
@@ -106,25 +105,23 @@ server agrees — the wire is the truth) · native dialogs / `beforeunload`.
 
 ## Deliverables — `apps/{{PACK}}/`
 
-- `nav-and-quirks.md` — the session contract; architecture (frames, auth, channels); **anchors** with their
-  cheap predicates; **transitions** with settle profile + wire signature; the interstitials and how to
-  handle each; keyboard recipes; recovery (how to get back to the shell from anywhere); the checklist above
-  with a verdict per item; open questions.
-- `ledger.md` — the variability ledger (table: what varied | n | hypothesis | resolving experiment |
-  evidence act ids).
-- `wire.md` — **where the facts live**: a table of endpoint family → what it carries (patient list,
-  demographics, problems, allergies, meds, vitals, encounters…), read/write, and which are read-POSTs; the
-  handful of response bodies worth citing by handle.
-- `lib.ts` — plain importable TypeScript: the flows above as robust functions (anchor in → anchor out,
-  postcondition on every transition, wire-first reads, interstitials optional, idempotent where sensible,
-  declared write footprint in a header comment). Composable; no sleeps; one selector language.
-- `check.ts` — `export const target = { url, scope }` and `check(s)` running the flows against the live
-  instance with PASS/FAIL per step and durations (`bun scripts/run-check.ts {{PACK}}` must pass).
-- `screenshots/` — a handful of cited shots (anchors, each interstitial, one diagnosis).
-- `friction.md` — brief: where the tool or docs got in your way, in the format of
-  `apps/gauntlet/friction-dryrun.md`.
-- The store stays in `apps/{{PACK}}/store/` (gitignored, run-tagged) — every claim in the notes cites an act
-  id or store cursor so it can be re-queried.
+The shape is `apps/README.md`'s — **NOTES.md accumulates as you work** (`disco note` writes it; every
+claim cites an act id) and you distill what earns it, as you go, into:
+
+- `README.md` — what this app is; how to drive it (anchors with cheap predicates, transitions with their
+  settle profile + wire signature, interstitials and recovery, keyboard recipes verbatim); where the facts
+  live on the wire (endpoint family → what it carries, read/write); what varies (n-counts, observed vs
+  inferred, the experiment that would resolve each); the checklist above with a verdict per item; open questions.
+- `lib.ts` — the flows as robust functions: anchor in → anchor out, postcondition on every transition,
+  wire-first reads, interstitials optional both ways, idempotent where sensible, declared write footprint,
+  no sleeps, one selector language.
+- `check.ts` — `export const target = { url, scope }` (+ optional `ready`) and `check(s)` with PASS/FAIL
+  per step and durations; `bun scripts/run-check.ts` must pass.
+- Extra files only when they earn their place (`screenshots/` with cited shots; `wire.md`; `friction.md` —
+  put tool/doc friction somewhere, briefly and bluntly).
+
+The store stays in `apps/{{PACK}}/store/` (gitignored, run-tagged); NOTES.md and README cite act ids so
+everything can be re-queried.
 
 ## Quality bar
 
