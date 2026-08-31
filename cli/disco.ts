@@ -133,8 +133,15 @@ switch (cmd) {
       // What did we attach to? A bot challenge (Cloudflare Turnstile, hCaptcha, Akamai, PerimeterX…) is a 403 page
       // that a script mistakes for "loading" — name it now (GUIDANCE §8) instead of letting the run invest in it.
       try {
-        const probe = await c.call("evaluate", { fn: "() => ({ title: document.title, html: (document.documentElement.outerHTML || '').slice(0, 40000) })", world: "main" });
-        const v = probe?.value ?? {}; const h = String(v.html ?? ""); const t = String(v.title ?? "");
+        // the document may still be loading right after attach: give it up to 4s to have a title/body
+        let v: any = {};
+        for (let i = 0; i < 20; i++) {
+          const probe = await c.call("evaluate", { fn: "() => ({ ready: document.readyState, title: document.title, html: (document.documentElement && document.documentElement.outerHTML || '').slice(0, 40000) })", world: "main" }).catch(() => null);
+          v = probe?.value ?? {};
+          if (v.ready === "complete" && (String(v.title ?? "") || String(v.html ?? "").length > 200)) break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        const h = String(v.html ?? ""); const t = String(v.title ?? "");
         const challenge = /challenges\.cloudflare\.com|cf-chl|cf_chl|turnstile|hcaptcha\.com|_Incapsula_|perimeterx|px-captcha|akamai.*bot|distil_/i.test(h) || /^just a moment|attention required|access denied|are you a human|verify you are human/i.test(t);
         if (challenge) console.error(`⚠ the page you attached to looks like a BOT CHALLENGE (title ${JSON.stringify(t.slice(0, 60))}). A headless browser will not pass it by waiting — attach to a real browser that has passed it, or use another host. Everything recorded from here is the challenge, not the app.`);
       } catch {}
