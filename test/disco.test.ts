@@ -449,6 +449,23 @@ describe("exam B fold-backs", () => {
     assert.ok(r.downloads.includes("hello.txt"), JSON.stringify(r.downloads));
     assert.match(String(r), /download: hello\.txt/);
   });
+  it("every printed proposal holds right after its act (proposals self-test)", async () => {
+    const acts = [
+      () => s.act("tab b", (p) => p.click("#tab-b")),
+      () => s.act("open panel", (p) => p.click("#open-panel")),
+      () => s.act("close panel", (p) => p.click("#panel-close")),
+    ];
+    let checked = 0;
+    for (const a of acts) {
+      const r = reached(await a());
+      for (const p of r.proposed.filter((x) => x.kind !== "response")) {
+        const fn = new Function("page", `return (${p.code})`)(s.page) as () => Promise<unknown>;
+        await Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new Error(`proposal did not hold: ${p.code}`)), 1500))]);
+        checked++;
+      }
+    }
+    assert.ok(checked >= 3, `only ${checked} proposals checked`);
+  });
   it("reached says the action ran when it refuses an already-true until", async () => {
     const r = await s.act("already", (p) => p.click("#noop"), { until: () => s.page.locator("#load-chart").waitFor() });
     assert.throws(() => reached(r), /the action itself ran/);

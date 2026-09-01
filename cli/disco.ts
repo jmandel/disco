@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { open, type Session } from "../src/session.ts";
 import { formatLook } from "../src/format.ts";
-import { appsRoot, appStoreDir, openStore } from "../src/store.ts";
+import { appsRoot, appStoreDir, appDir, openStore, syncEvidence } from "../src/store.ts";
 import { readBrowserInfo, killLaunched, writeBrowserInfo, isAlive, pidAlive } from "../src/browser.ts";
 
 const HELP = `disco — drive a web app you have never seen; everything it does lands in a SQLite log.
@@ -104,11 +104,13 @@ async function main() { switch (cmd) {
   case "close": {
     const app = args._[1] ?? currentApp();
     const dir = appStoreDir(app); const info = readBrowserInfo(dir);
-    if (!info) { console.log(`${app}: no browser`); break; }
-    if (pidAlive(info.recorderPid)) { try { process.kill(info.recorderPid!, "SIGTERM"); } catch {} await new Promise((r) => setTimeout(r, 400)); }
-    killLaunched(info); writeBrowserInfo(dir, null);
-    try { const st = openStore(dir, { readonly: false }); st.db.prepare("UPDATE runs SET ended_wall=? WHERE ended_wall IS NULL").run(new Date().toISOString()); st.close(); } catch {}
-    console.log(`${app}: ${info.mode === "launch" ? "browser killed" : "detached"} (the log stays; ${app} remains the default app)`);
+    if (info) {
+      if (pidAlive(info.recorderPid)) { try { process.kill(info.recorderPid!, "SIGTERM"); } catch {} await new Promise((r) => setTimeout(r, 400)); }
+      killLaunched(info); writeBrowserInfo(dir, null);
+      try { const st = openStore(dir, { readonly: false }); st.db.prepare("UPDATE runs SET ended_wall=? WHERE ended_wall IS NULL").run(new Date().toISOString()); st.close(); } catch {}
+    }
+    console.log(`${app}: ${!info ? "no browser" : info.mode === "launch" ? "browser killed" : "detached"} (the log stays; ${app} remains the default app)`);
+    try { const ev = syncEvidence(appDir(app), dir); if (ev.cited) console.log(`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} report${ev.copied.length === 1 ? "" : "s"} to apps/${app}/evidence/` : "nothing new to copy"}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`); } catch {}
     break;
   }
   case "look": {

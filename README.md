@@ -164,8 +164,8 @@ apps/<app>/
 
 **The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
 report or shot is in `evidence/`; a number without an act id is a guess. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
-the docblock above the function, once. `./disco sql "SELECT report FROM actions WHERE id='act:7'" --json > apps/shop/evidence/act-7.json`
-copies a report, and the report names its shot's path. `sdk.ts` runs its own check:
+the docblock above the function, once. Every `close` (a script's or `./disco close`) copies the report of each act the README
+cites into `evidence/act-N.json` (plus its shot) and names the cites that have no report behind them. `sdk.ts` runs its own check:
 
 ```ts
 // apps/shop/sdk.ts

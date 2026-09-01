@@ -1,7 +1,7 @@
 // The CLI and the pack convention, as a stranger would run them.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -111,5 +111,13 @@ if (import.meta.main) {
     const out = r.stdout + r.stderr;
     assert.equal(r.status, 1, out);
     assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose: nope \(act:\d+\): not-found/);
+    // the pack rule is mechanical: close copies cited reports into evidence/ and names cites with nothing behind them
+    const failedId = out.match(/nope \((act:\d+)\)/)![1];
+    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (act:2). A missing button is diagnosed (${failedId}). Nothing backs act:999.\n`);
+    const c = disco("close", "chk");
+    assert.match(c.out, /evidence: README cites 3 acts; copied 2 reports/); assert.match(c.out, /NO REPORT for act:999/);
+    const ev = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.json`), "utf8"));
+    assert.equal(ev.action, failedId); assert.equal(ev.diagnosis.reason, "not-found");
+    assert.ok(existsSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.jpg`)), "the diagnosis shot is copied too");
   });
 });

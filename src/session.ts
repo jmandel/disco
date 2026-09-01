@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
-import { Store, appStoreDir, appDir, appsRoot, openStore, type StoreReader } from "./store.ts";
+import { Store, appStoreDir, appDir, appsRoot, openStore, syncEvidence, type StoreReader } from "./store.ts";
 import { attachRecorder, type Recorder, type EventKind, type Events } from "./record.ts";
 import { readBrowserInfo, writeBrowserInfo, isAlive, launchChromium, attachEndpoint, connect, killLaunched, pidAlive, type BrowserInfo } from "./browser.ts";
 import { lookAt, controls, inspect, dialogCensus, locatorFromDescription, type Look, type LookCtx } from "./look.ts";
@@ -168,10 +168,12 @@ export class Session {
   }
   /** @internal */ static _ready(s: Session): Promise<void> { return s.#recorder.ready; }
 
-  /** Disconnect. `{ browser: true }` also kills a browser disco launched (an attached one is only forgotten). A script that never closes never exits. */
+  /** Disconnect. `{ browser: true }` also kills a browser disco launched (an attached one is only forgotten). A script that never closes never exits.
+   *  Also copies the report of every act the pack's README cites into evidence/ (once). */
   async close(o: { browser?: boolean } = {}): Promise<void> {
     await this.#recorder.flush(500);
     this.#recorder.detach();
+    try { syncEvidence(this.dir, this.#store.dir); } catch {}
     if (this.#recording) {
       this.#store.update("requests", { body_state: "missing", error: "body not read by the page (session closed)" }, "run=? AND body_state='pending' AND status IS NOT NULL", [this.#store.run]);
       // a request still unanswered when the recording session ends can never be completed by anyone: say so instead of "pending"
@@ -273,7 +275,7 @@ export class Session {
       pages: store.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1).map((x) => x.url),
       downloads: store.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='download' AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1).map((x) => x.url),
       openPages: this.context.pages().filter((p) => !isScratch(p)).length,
-      proposed: propose(matchedRows, t0, ms(tStart, tDispatch), ui, preAria.split("\n").map((l) => l.trim()), preUrl, url, storage),
+      proposed: await selfTest(page, propose(matchedRows, t0, ms(tStart, tDispatch), ui, preAria.split("\n").map((l) => l.trim()), preUrl, url, storage)),
       window: { t0: Math.round(t0), t1: Math.round(t1) },
       timing: { runMs: ms(tDispatch, tRun1), observeMs: ms(tRun1, tObs1), reportMs: 0, totalMs: 0 },
     };
@@ -505,6 +507,19 @@ function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLi
   if (removed[0]) out.push({ kind: "gone", code: `() => page.getByRole(${JSON.stringify(removed[0].role)}, { name: ${JSON.stringify(removed[0].name!.slice(0, 60))}, exact: true }).first().waitFor({ state: "hidden" })`, atMs: null });
   for (const line of storage.local.slice(0, 1)) { const k = line.replace(/^\+/, "").split(/[=:]/)[0]; if (k && line.startsWith("+")) out.push({ kind: "storage", code: `() => page.waitForFunction(k => localStorage.getItem(k) !== null, ${JSON.stringify(k)})`, atMs: null }); }
   return out.slice(0, 7);
+}
+
+/** A proposal must hold right after the act — otherwise it is a guess. DOM/url/storage proposals are run with a short budget; response proposals already happened. */
+async function selfTest(page: Page, proposals: Proposal[]): Promise<Proposal[]> {
+  const keep = await Promise.all(proposals.map(async (p) => {
+    if (p.kind === "response") return true;
+    try {
+      const fn = new Function("page", `return (${p.code})`)(page) as () => Promise<unknown>;
+      const run = Promise.resolve(fn()); run.catch(() => {});
+      return await Promise.race([run.then(() => true, () => false), new Promise<boolean>((r) => setTimeout(() => r(false), 400))]);
+    } catch { return false; }
+  }));
+  return proposals.filter((_, i) => keep[i]);
 }
 
 function diffStorage(a: Record<string, string>, b: Record<string, string>): Report["storage"] {

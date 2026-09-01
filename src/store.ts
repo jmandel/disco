@@ -276,6 +276,31 @@ export function openStore(dir: string, opts: { readonly?: boolean } = {}) {
 }
 export type StoreReader = ReturnType<typeof openStore>;
 
+/** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
+ *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
+export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; missing: string[] } {
+  const readme = join(packDir, "README.md");
+  if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return { cited: 0, copied: [], missing: [] };
+  const ids = [...new Set([...readFileSync(readme, "utf8").matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
+  if (!ids.length) return { cited: 0, copied: [], missing: [] };
+  const st = openStore(storeDir);
+  const copied: string[] = [], missing: string[] = [];
+  try {
+    for (const id of ids) {
+      const n = id.slice(4);
+      const target = join(packDir, "evidence", `act-${n}.json`);
+      if (existsSync(target)) continue;
+      const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id);
+      if (!row?.report) { missing.push(id); continue; }
+      mkdirSync(join(packDir, "evidence"), { recursive: true });
+      writeFileSync(target, JSON.stringify(JSON.parse(row.report), null, 2) + "\n");
+      try { const rep = JSON.parse(row.report); const shot: string | undefined = rep?.diagnosis?.shot; if (shot && existsSync(shot)) writeFileSync(join(packDir, "evidence", `act-${n}.jpg`), readFileSync(shot)); } catch {}
+      copied.push(id);
+    }
+  } finally { st.close(); }
+  return { cited: ids.length, copied, missing };
+}
+
 /** apps/ next to this checkout (not the process cwd), unless DISCO_APPS_DIR or an explicit root says otherwise. */
 export function appsRoot(root?: string): string { return root ?? process.env.DISCO_APPS_DIR ?? join(import.meta.dirname, "..", "apps"); }
 export function appDir(app: string, root?: string): string { return join(appsRoot(root), app); }
