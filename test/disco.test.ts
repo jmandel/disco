@@ -115,11 +115,14 @@ describe("act + report", () => {
     assert.equal(r.dialogs[0]?.type, "confirm");
     assert.equal(r.dialogs[0]?.handled, "accept");
   });
-  it("child window: the new page is reported with its URL and recorded", async () => {
+  it("child window: the new page is reported; the driven page is not throttled behind it; closeOtherPages", async () => {
     const r = reached(await s.click("#open-child"));
     assert.ok(r.pages.some((u) => u.includes("/child.html")), JSON.stringify(r.pages));
-    assert.equal(s.context.pages().length, 2);
-    await s.context.pages()[1].close();
+    assert.equal(r.openPages, 2);
+    const r2 = reached(await s.click("#noop", { window: 0 }));
+    assert.ok(r2.timing.actMs < 800, `act ${r2.timing.actMs}ms with a popup open (background throttling?)`);
+    assert.equal(await s.closeOtherPages(), 1);
+    assert.equal(s.context.pages().length, 1);
   });
   it("push channels: WS frames recorded; SSE marked streaming", async () => {
     const dirs = s.store.sql<{ dir: string; n: number }>("SELECT dir, count(*) n FROM ws_frames GROUP BY dir").map((x) => x.dir);
@@ -181,6 +184,22 @@ describe("round-1 friction", () => {
     assert.match(r1.diagnosis!.message, /js: true/);
     const r2 = reached(await s.click("#rerender", { js: true, until: { fn: `document.getElementById('rerender-count').textContent !== ${JSON.stringify(before)}` } }));
     assert.equal(r2.until?.ok, true);
+  });
+  it("a fixed element outside the viewport → offscreen, fast", async () => {
+    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"fx\" style=\"position:fixed;top:5000px;left:10px\">fx</button>')");
+    const r = await s.click("#fx");
+    assert.equal(r.diagnosis?.reason, "offscreen", r.diagnosis?.message);
+    assert.match(r.diagnosis!.message, /position: fixed/);
+    assert.ok(r.timing.totalMs < 900, `total ${r.timing.totalMs}`);
+    await s.evaluate("document.getElementById('fx').remove()");
+  });
+  it("an element with pointer-events: none → unclickable, fast, with the keyboard hint", async () => {
+    reached(await s.type("#med", "as", { until: { request: "/api/meds" } }));
+    const r = await s.click("#med-list li >> nth=0");
+    assert.equal(r.diagnosis?.reason, "unclickable", r.diagnosis?.message);
+    assert.match(r.diagnosis!.message, /keyboard/);
+    assert.ok(r.timing.totalMs < 900, `total ${r.timing.totalMs}`);
+    reached(await s.press("Escape", { target: "#med" }));
   });
   it("drag: the slider thumb moves and the drag report is posted", async () => {
     const r = reached(await s.drag("#slider-thumb", "#slider-track", { until: { request: "/api/drag-report" } }));

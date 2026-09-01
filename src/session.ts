@@ -62,7 +62,7 @@ export interface ActSpec {
 }
 
 export interface Diagnosis {
-  reason: "not-found" | "hidden" | "disabled" | "occluded" | "detached" | "timeout" | "error";
+  reason: "not-found" | "hidden" | "disabled" | "occluded" | "offscreen" | "unclickable" | "detached" | "timeout" | "error";
   message: string;
   target?: string;
   matches?: number;
@@ -88,6 +88,8 @@ export interface Report {
   console: Array<{ level: string; text: string }>;
   dialogs: Array<{ type: string; message: string | null; handled: string | null }>;
   pages: string[];
+  /** Pages open in the browser after this act (popups included). More than 1 means the driven page can be throttled in the background. */
+  openPages: number;
   shot?: string;
   window: { t0: number; t1: number };
   timing: { actMs: number; untilMs: number; windowMs: number; reportMs: number; totalMs: number };
@@ -128,6 +130,7 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
     if (opts.url && info.mode === "attach") page = pages.find((p) => p.url().includes(opts.url!)) ?? pages[0];
     page = page ?? (await context.newPage());
   }
+  await page.bringToFront().catch(() => {});
   const store = new Store(storeDir);
   if (fresh || !store.resumeRun()) store.beginRun({ url: opts.url ?? page.url(), mode: info.mode });
   const s = new Session(app, dir, store, browser, context, page, info, { ...DEFAULT_TIMEOUTS, ...(opts.timeouts ?? {}) }, opts.dialogs ?? "accept");
@@ -177,6 +180,14 @@ export class Session {
   navigate(url: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "navigate", url, ...o }); }
   /** Wait for a state without acting. Same report shape; `report.until` says whether it arrived. */
   until(pred: Pred, o: { timeout?: number } = {}) { return this.act({ kind: "noop", until: pred, timeout: o.timeout }); }
+
+  /** Close every page except the driven one (popups left by earlier scripts throttle the browser). Returns how many were closed. */
+  async closeOtherPages(): Promise<number> {
+    let n = 0;
+    for (const p of this.context.pages()) if (p !== this.page) { await p.close().catch(() => {}); n++; }
+    await this.page.bringToFront().catch(() => {});
+    return n;
+  }
 
   /** A FrameLocator for `iframe#a >> iframe#b`. */
   frame(spec: string): FrameLocator {
@@ -233,6 +244,7 @@ export class Session {
     const alreadyTrue = spec.until && spec.kind !== "noop" ? await this.holdsNow(spec.until) : false;
     const armed = spec.until ? this.arm(spec.until, untilBudget) : null;
     const tAct0 = performance.now();
+    if (this.context.pages().length > 1) await this.page.bringToFront().catch(() => {});
     try {
       if (spec.kind !== "noop" && spec.kind !== "navigate" && spec.kind !== "scroll" && !(spec.kind === "press" && !spec.target)) {
         const r = await this.resolve(spec);
@@ -263,6 +275,7 @@ export class Session {
       console: this.log.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", this.log.run, t0, t1 + 1),
       dialogs: this.log.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1),
       pages: this.log.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1).map((x) => x.url),
+      openPages: this.context.pages().length,
       shot,
       window: { t0: Math.round(t0), t1: Math.round(t1) },
       timing: { actMs: ms(tAct0, tAct1), untilMs: armed ? ms(tAct1, tWin1) : 0, windowMs: armed ? 0 : ms(tAct1, tWin1), reportMs: 0, totalMs: 0 },
@@ -295,16 +308,23 @@ export class Session {
       return { diagnosis: await this.finish({ reason: "disabled", message: `${targetText} is disabled`, target: targetText, matches: count }) };
     if ((spec.kind === "click" || spec.kind === "dblclick") && !spec.js) {
       try { await el.scrollIntoViewIfNeeded({ timeout: 1000 }); } catch {}
-      const over = await el.evaluate((node: Element) => {
+      const hit = await el.evaluate((node: Element) => {
+        const d = (e: Element) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (typeof e.className === "string" && e.className ? "." + e.className.trim().split(/\s+/).slice(0, 2).join(".") : "");
         const r = node.getBoundingClientRect();
         const x = r.left + r.width / 2, y = r.top + r.height / 2;
-        let hit = document.elementFromPoint(x, y);
-        while (hit && hit.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); if (!inner || inner === hit) break; hit = inner; }
-        if (!hit || node.contains(hit) || hit.contains(node)) return null;
-        const d = (e: Element) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (typeof e.className === "string" && e.className ? "." + e.className.trim().split(/\s+/).slice(0, 2).join(".") : "");
-        return d(hit);
+        if (r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) {
+          let fixed: Element | null = node; while (fixed && getComputedStyle(fixed).position !== "fixed") fixed = fixed.parentElement;
+          return { offscreen: `at (${Math.round(r.left)}, ${Math.round(r.top)}) in a ${innerWidth}×${innerHeight} viewport${fixed ? `; ${d(fixed)} is position: fixed, so scrolling cannot bring it into view` : ""}` };
+        }
+        for (let e: Element | null = node; e; e = e.parentElement) if (getComputedStyle(e).pointerEvents === "none") return { noPointer: d(e) };
+        let h = document.elementFromPoint(x, y);
+        while (h && h.shadowRoot) { const inner = h.shadowRoot.elementFromPoint(x, y); if (!inner || inner === h) break; h = inner; }
+        if (!h || node.contains(h) || h.contains(node)) return null;
+        return { over: d(h) };
       }).catch(() => null);
-      if (over) return { diagnosis: await this.finish({ reason: "occluded", message: `${targetText} is covered by ${over}`, target: targetText, matches: count, over }) };
+      if (hit?.offscreen) return { diagnosis: await this.finish({ reason: "offscreen", message: `${targetText} is outside the viewport ${hit.offscreen} — scroll the page so it is visible, or click with { js: true } if its handler is delegated`, target: targetText, matches: count }) };
+      if (hit?.noPointer) return { diagnosis: await this.finish({ reason: "unclickable", message: `${targetText} ignores the mouse (pointer-events: none on ${hit.noPointer}) — the app wants the keyboard (type / ArrowDown / Enter), or { js: true }`, target: targetText, matches: count }) };
+      if (hit?.over) return { diagnosis: await this.finish({ reason: "occluded", message: `${targetText} is covered by ${hit.over}`, target: targetText, matches: count, over: hit.over }) };
     }
     return { locator: el, matches: count };
   }

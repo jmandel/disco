@@ -6,7 +6,7 @@ export function formatReport(r: Report): string {
   const head = `${r.action} ${r.kind}${r.target ? " " + r.target : ""}${r.matches && r.matches > 1 ? ` (${r.matches} matches, used first)` : ""}`;
   const tm = r.timing;
   const parts = [`act ${tm.actMs}`, tm.untilMs ? `until ${tm.untilMs}` : `window ${tm.windowMs}`, `report ${tm.reportMs}`];
-  L.push(`${head}  ${r.ok ? "ok" : "FAILED"}  ${tm.totalMs}ms (${parts.join(" · ")})  ${r.url}`);
+  L.push(`${head}  ${r.ok ? "ok" : "FAILED"}  ${tm.totalMs}ms (${parts.join(" · ")})  ${r.url}${r.openPages > 1 ? `  (+${r.openPages - 1} other page${r.openPages > 2 ? "s" : ""} open)` : ""}`);
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
   if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.which ?? ""} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action — proves nothing; pick a predicate that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}${r.until.diagnosis ? "\n    " + fmtDiag(r.until.diagnosis) : ""}`);
   if (r.requests.length) {

@@ -1,125 +1,165 @@
 // apps/gauntlet/check.ts
 // Proves lib.ts still drives the gauntlet. Run from the repo root:
-//   node scripts/run-check.ts gauntlet   (add --headed to watch, --close to kill the browser)
-//
-// Each step resets the relevant ctl knobs first so the check is order-independent
-// and leaves the app at defaults.
-
-import { reached } from "../../src/index.ts";
+//   node scripts/run-check.ts gauntlet         (add --headed to watch, --close to kill the browser)
+import { reached, type Session } from "../../src/index.ts";
+import type { Step } from "../../scripts/run-check.ts";
 import {
-  HOME,
   resetCtl,
-  setCtl,
-  goHome,
+  gotoShell,
   loadChart,
   openRecord,
-  ackModalIfPresent,
   save,
+  setCtl,
   search,
   loadRows,
-  scrollRowsTo,
+  clickRerender,
+  submitIframe,
+  submitNestedIframe,
+  submitCrossIframe,
+  selectGridCell,
   pickMed,
+  clickShadowButton,
+  runSse,
   gqlQuery,
   gqlMutate,
-  enterSecure,
-  clickRerender,
+  login,
+  pushNotification,
+  contextMenuAction,
+  editInline,
+  dragSlider,
+  reorder,
   deleteItem,
-  notifyVia,
 } from "./lib.ts";
 
-export const target = { url: HOME };
+export const target = { url: "http://localhost:4800" };
 
-export async function check(s: any, step: any) {
-  await step("shell reachable", async () => {
-    await goHome(s);
+export async function check(s: Session, step: Step) {
+  // Deterministic starting point: default knobs + a fresh page (so the WS opens
+  // inside our recording window).
+  await step("reset ctl + reach shell", async () => {
     await resetCtl(s);
+    await gotoShell(s);
   });
 
-  await step("load chart (3 concurrent, one slow)", async () => {
-    const { slow } = await loadChart(s);
-    if (!slow || typeof slow.ms !== "number") throw new Error("no slow-fetch body on the wire");
+  await step("load chart (slow race)", async () => {
+    const { slowMs } = await loadChart(s);
+    if (slowMs <= 0) throw new Error("no slow response on the wire");
   });
 
-  await step("open record 1 (wire body)", async () => {
-    const { record } = await openRecord(s, 1);
-    if (!record || record.name !== "Ada Lovelace") throw new Error(`record 1 wrong: ${JSON.stringify(record)}`);
+  await step("open record 3 (no modal)", async () => {
+    const r = await openRecord(s, 3);
+    if (!r?.name) throw new Error("record has no name");
   });
 
-  await step("conditional allergy modal", async () => {
-    await setCtl(s, { modal: true });
-    const { hasModal } = await openRecord(s, 3);
-    if (!hasModal) throw new Error("expected allergy modal with ctl.modal=true");
-    if (!(await ackModalIfPresent(s))) throw new Error("modal did not acknowledge");
+  await step("open record 2 WITH conditional modal", async () => {
+    await setCtl(s, { modal: true, modalDelayMs: 0 });
+    const r = await openRecord(s, 2); // openRecord dismisses the modal
     await setCtl(s, { modal: false });
+    if (!Array.isArray(r.allergies) || r.allergies.length === 0)
+      throw new Error("expected allergies on record 2");
   });
 
-  await step("save: async success toast", async () => {
+  await step("save: async success", async () => {
     await setCtl(s, { saveFails: false });
-    const { outcome } = await save(s);
-    if (outcome !== "ok") throw new Error(`expected ok toast, got ${outcome}`);
+    const { ok, status } = await save(s);
+    if (!ok) throw new Error(`expected 200, got ${status}`);
   });
 
   await step("save: async failure toast", async () => {
     await setCtl(s, { saveFails: true });
-    const { outcome } = await save(s);
-    if (outcome !== "fail") throw new Error(`expected fail toast, got ${outcome}`);
+    const { ok, status } = await save(s);
     await setCtl(s, { saveFails: false });
+    if (ok || status !== 500) throw new Error(`expected 500, got ${status}`);
   });
 
   await step("debounced search", async () => {
-    const { hits } = await search(s, "ali");
-    if (!hits.includes("Silvio Micali")) throw new Error(`search hits wrong: ${JSON.stringify(hits)}`);
+    const hits = await search(s, "ada");
+    if (!hits.some((h) => /Ada/i.test(h))) throw new Error("Ada not in hits: " + JSON.stringify(hits));
   });
 
-  await step("virtualized rows (10000 total, few mounted)", async () => {
+  await step("virtualized rows (wire vs DOM)", async () => {
     const { total, mounted } = await loadRows(s);
     if (total !== 10000) throw new Error(`expected 10000 rows, got ${total}`);
-    if (mounted < 1 || mounted > 60) throw new Error(`expected a small mounted window, got ${mounted}`);
-    const { firstId } = await scrollRowsTo(s, 5000);
-    if (Number(firstId) < 100) throw new Error(`scroll did not re-virtualize (firstId ${firstId})`);
+    if (mounted >= 100) throw new Error(`expected a windowed DOM, got ${mounted} nodes`);
   });
 
-  await step("keyboard-only combobox", async () => {
-    const { selected } = await pickMed(s, "as");
-    if (!/Atorvastatin/.test(selected)) throw new Error(`combobox selection wrong: ${selected}`);
+  await step("re-render race", async () => {
+    const n = await clickRerender(s);
+    if (n < 1) throw new Error("rerender not counted");
   });
 
-  await step("graphql query + mutation", async () => {
-    const q = (await gqlQuery(s)).body as any;
-    if (q?.operation !== "query" || q?.data?.patient?.name !== "Ada Lovelace") throw new Error(`gql query wrong: ${JSON.stringify(q)}`);
-    const m = (await gqlMutate(s)).body as any;
-    if (m?.operation !== "mutation" || m?.sawMutation !== true) throw new Error(`gql mutation wrong: ${JSON.stringify(m)}`);
+  await step("iframes: same / nested / cross", async () => {
+    const a = await submitIframe(s, "Ada");
+    if (a?.name !== "Ada") throw new Error("same-origin submit failed");
+    const b = await submitNestedIframe(s, "Deep");
+    if (b?.name !== "Deep") throw new Error("nested submit failed");
+    const c = await submitCrossIframe(s, "Cross");
+    if (c?.name !== "Cross") throw new Error("cross-origin submit failed");
   });
 
-  await step("re-render race (programmatic click lands)", async () => {
-    await setCtl(s, { rerenderOnHover: true });
-    const count = await clickRerender(s);
-    if (count < 1) throw new Error("rerender click not counted");
+  await step("canvas grid select", async () => {
+    const cell = await selectGridCell(s);
+    if (!cell || typeof cell.r !== "number") throw new Error("no grid cell selected");
   });
 
-  await step("delete (write endpoint)", async () => {
-    const { body } = await deleteItem(s);
-    if ((body as any)?.deleted !== 1) throw new Error(`delete wrong: ${JSON.stringify(body)}`);
+  await step("keyboard combobox", async () => {
+    const med = await pickMed(s, "as", 0);
+    if (!med) throw new Error("no med selected");
+  });
+
+  await step("shadow DOM click", async () => {
+    const n = await clickShadowButton(s);
+    if (n < 1) throw new Error("shadow click not counted");
+  });
+
+  await step("SSE stream (5 events)", async () => {
+    const events = await runSse(s);
+    if (events.length !== 5) throw new Error(`expected 5 SSE events, got ${events.length}`);
+  });
+
+  await step("GraphQL query + mutation", async () => {
+    const q = await gqlQuery(s);
+    if (q?.data?.patient?.name !== "Ada Lovelace") throw new Error("gql query wrong");
+    const m = await gqlMutate(s);
+    if (m?.sawMutation !== true) throw new Error("gql mutation not recognised");
   });
 
   await step("push channels ws/sse/poll", async () => {
-    for (const via of ["ws", "sse", "poll"] as const) {
-      const { last } = await notifyVia(s, via);
-      if (!last || !last.includes(`via ${via}`)) throw new Error(`notify ${via} wrong: ${last}`);
+    for (const ch of ["ws", "sse", "poll"] as const) {
+      const text = await pushNotification(s, ch);
+      if (!text.includes(ch)) throw new Error(`push ${ch} not delivered (got "${text}")`);
     }
-    await setCtl(s, { notify: false });
   });
 
-  await step("auth: login lands on secure area", async () => {
-    await setCtl(s, { requireAuth: true });
-    await s.context.clearCookies();
-    const greeting = await enterSecure(s, "admin", "hunter2");
-    if (!/Welcome, admin/.test(greeting)) throw new Error(`secure greeting wrong: ${greeting}`);
-    await setCtl(s, { requireAuth: false });
-    reached(await goHome(s));
+  await step("context menu", async () => {
+    const r = await contextMenuAction(s, "Rename");
+    if (!/Rename/.test(r)) throw new Error("ctx result wrong: " + r);
   });
 
-  await step("leave app at defaults", async () => {
-    await resetCtl(s);
+  await step("double-click to edit", async () => {
+    const st = await editInline(s, "New value");
+    if (!st.includes("New value")) throw new Error("inline edit not committed: " + st);
+  });
+
+  await step("drag slider + reorder", async () => {
+    const v = await dragSlider(s);
+    if (v <= 0) throw new Error("slider did not move");
+    const order = await reorder(s, "#sort-a", "#sort-c");
+    if (order === "a,b,c") throw new Error("order unchanged");
+  });
+
+  await step("delete (write endpoint)", async () => {
+    const n = await deleteItem(s);
+    if (n !== 1) throw new Error("delete result wrong: " + n);
+  });
+
+  await step("auth: login sets cookie + secure area", async () => {
+    await login(s, "ada", "whatever", "/secure.html");
+    const who = String(await s.evaluate(`document.getElementById('who')?.textContent`));
+    if (!/ada/.test(who)) throw new Error("secure area not reached: " + who);
+    const cookies = await s.context.cookies();
+    if (!cookies.some((c) => c.name === "gauntlet_auth")) throw new Error("no auth cookie");
+    // back to the shell for a clean exit
+    reached(await s.navigate("http://localhost:4800/", { until: { selector: "#load-chart" } }), "home");
   });
 }

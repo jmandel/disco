@@ -89,7 +89,8 @@ await s.close();                                     // disconnect; the browser 
 ```
 
 `reached(report)` throws with the diagnosis unless the action was performed *and* its `until` held.
-Everything else is the report, returned as data.
+Everything else is the report, returned as data; `formatReport(report)` renders it as the text the CLI prints —
+log it while exploring.
 
 ---
 
@@ -168,7 +169,7 @@ way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s
 | `window` | observation window when there is no `until` (default 700) |
 | `frame` | resolve the target inside an iframe: `"#frame"`, nested with `"#outer >> #inner"` |
 | `shot` | take a screenshot at the end (hash in `report.shot`) |
-| `js: true` | click: dispatch a DOM `click` event instead of moving the mouse — for widgets the app replaces faster than a real click can land (the handler is usually delegated to a parent that survives) |
+| `js: true` | click: dispatch a DOM `click` event instead of moving the mouse. For widgets the app replaces faster than a real click can land, for fixed-position items outside the viewport, for anything whose handler is delegated to a parent. No actionability checks, no scrolling, no hover |
 | `button`, `deltaY`, `to`, `text`, `key`, `value`, `url` | per kind |
 
 Before performing a click, disco checks the element exists (waiting up to 1 s for it to attach), is
@@ -203,6 +204,7 @@ act:6 click #record-2  ok  299ms (act 78 · until 200 · report 10)  http://loca
 | `console` | errors, exceptions and warnings inside the window |
 | `dialogs` | native dialogs inside the window and how they were handled |
 | `pages` | URLs of pages opened inside the window (popups, `window.open`) |
+| `openPages` | pages open in the browser afterwards; printed as `(+N other pages open)` — leftover popups throttle the driven page |
 | `window` | `{ t0, t1 }` in the run's clock — `SELECT … WHERE t BETWEEN t0 AND t1` |
 | `timing` | `actMs` (checks + the Playwright action) · `untilMs` · `windowMs` · `reportMs` · `totalMs` |
 
@@ -217,6 +219,8 @@ that fires during your window is in your report; you will recognise it because i
 | `hidden` | matched, not visible | it is rendered but collapsed/off-screen/`display:none`; open the thing that reveals it |
 | `disabled` | matched, disabled | the form is not ready; wait for what enables it (`until: { fn }` on `!el.disabled` is fine) |
 | `occluded` | another element is under the pointer (`over`) | usually a dialog — `dialogs` lists open ones; dismiss it, then retry |
+| `offscreen` | the element is outside the viewport and cannot be scrolled to (`position: fixed` menus opened near the bottom) | scroll the page so it is visible, or `{ js: true }` when its handler is delegated |
+| `unclickable` | the element or an ancestor has `pointer-events: none` | it is a keyboard widget: `type` / `press("ArrowDown")` / `press("Enter")`; or `{ js: true }` |
 | `detached` | the element was replaced while Playwright was clicking it | the app re-renders it continuously (on hover, on a timer): `s.click(target, { js: true })` |
 | `timeout` | Playwright's actionability wait or your `until` expired | read `message` and the `shot` |
 | `error` | anything else (navigation mid-click, detached frame…) | `message` is Playwright's |
@@ -231,7 +235,7 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 | `{ selector, visible?, frame? }` | an element matches (and is visible) | the landmark of the next screen: a heading, a specific row, a status text — `#status:has-text("idle")` |
 | `{ gone: selector, frame? }` | no visible match | a spinner, a modal, a "loading" row |
 | `{ text }` | visible text anywhere | when you only know the words |
-| `{ url }` | a string: the URL *without its query string* contains it (a string containing `?` matches the whole href); a RegExp: tests the whole href | navigations, logins, route changes. The query-string rule exists because `login?next=/account` contains `/account` |
+| `{ url }` | a string: the URL *without its query string* contains it (a string containing `?` matches the whole href); a RegExp: tests the whole href | navigations, logins, route changes. The query-string rule exists because `login?next=/account` contains `/account`. `{ url: "/" }` is always true — for "back to the shell", wait on the shell's element |
 | `{ request, landed? }` | a response arrives whose URL contains / matches — i.e. the status is known. `landed`: its body finished too, so `latestJson` is safe; waits at most 1 s past the headers | the fact you need travels on the wire; API-first apps; anything a spinner lies about |
 | `{ fn, arg? }` | `page.waitForFunction` returns truthy | everything else: `"document.querySelector('#x')?.dataset.state === 'ready'"` |
 | `{ any: [...] }` | the first arm that holds; `until.which` names it (`label` or its description) | success **or** the app's own failure: `any: [ok, errorBanner]` |
@@ -263,7 +267,9 @@ Wrap every step of a workflow in it and failures explain themselves.
 | `s.screenshot(reason?)` | `{ hash, path }` — JPEG in the blob store, row in `shots` |
 | `s.note(text)` | append a timestamped line to `apps/<app>/NOTES.md` (and the `notes` table) |
 | `s.frame("#a >> #b")` | a `FrameLocator` for nested iframes |
+| `s.closeOtherPages()` | close every page but the driven one (popups left by earlier scripts) |
 | `s.close({ browser? })` | disconnect; `browser: true` also kills a browser disco launched (an attached one is only forgotten) |
+| `formatReport(report)` | the report as the CLI prints it |
 
 ### The log
 
@@ -272,7 +278,7 @@ Wrap every step of a workflow in it and failures explain themselves.
 ```ts
 import { openApp } from "./src/index.ts";
 const st = openApp("shop");                       // read-only; same object as s.store
-st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[]
+st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[] — fields are the requests columns: id, t_start, method, url, path, status, mime, body_hash, body_size, body_state, req_body, resp_headers, action_id…
 st.latestJson("/api/me");                          // parsed body of the newest matching response
 st.json(hash) · st.body(hash) · st.bytes(hash)     // a body by hash or 16-char prefix
 st.action("act:9")                                 // the stored row, report parsed
@@ -283,7 +289,7 @@ Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (hea
 `body_hash`, `body_state` = `ok | truncated | missing | streaming | error | pending`, `action_id`) ·
 `bodies` (text under 512 KB, FTS5 as `bodies_fts`) · `ws_frames` · `console` · `dialogs` · `nav` ·
 `shots` · `notes`. Every row has `run`; time is `t` (ms since the run started) — except `requests`, which has
-`t_start`, `t_response`, `t_end`. Useful one-liners:
+`t_start`, `t_response`, `t_end`. The report's wire line prints `body_size` as "size". Useful one-liners:
 
 ```sql
 -- where does a string on the screen come from?
@@ -402,6 +408,13 @@ into one aria line; anchor on the element you mean (`#chart`), not on the line.
 **Effects that arrive on the next event.** Setting `scrollTop` or dispatching an event returns before the
 handler runs; a synchronous read right after sees the old DOM. Wait on the effect (`until: { fn }` on the
 first row's id changing), never on the cause.
+
+**State leaks between scripts — by design.** A second script joins the same browser *where the last one left
+it*: mid-modal, on another page, with a popup still open, with the app's knobs still flipped. Start every
+script by asserting or reaching an anchor (`navigate(home)` + `until`), and close popups you opened — a page
+left in the background is throttled by Chromium (one animation frame per second), which shows up as clicks
+that take ~3 s with no diagnosis. The report header says `(+1 other page open)` when that is the case;
+`s.closeOtherPages()` / `./disco pages --close-others` clears it.
 
 **The app's own code is on the wire.** `SELECT body_hash FROM requests WHERE resource_type='script'` then
 `./disco body <hash>` — reading the client that issues a request is legitimate, fast, and often the only way

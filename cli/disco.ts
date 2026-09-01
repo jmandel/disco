@@ -30,7 +30,7 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
   disco body <hash-or-prefix>                  a captured body / screenshot blob
   disco note <text>                            append to apps/<app>/NOTES.md
   disco record                                 keep recording until Ctrl-C (between commands nothing is recorded)
-  disco pages                                  list open pages; --page N picks one for any command
+  disco pages [--close N | --close-others]     list open pages (* = driven); --page N picks one for any command
   disco schema
 
 Targets are Playwright selectors: css, text=…, role=button[name="Save"], #id >> css, xpath=…
@@ -103,7 +103,7 @@ async function main() { switch (cmd) {
     if (!args.attach && !url) fail("usage: disco open <app> <url> | disco open <app> --attach <port>");
     const s = await open(app, { url, attach: args.attach as any, headed: args.headed === true, dialogs: (args.dialogs as any) ?? "accept", fresh: args.fresh === true });
     writeFileSync(currentFile, app);
-    console.log(`${app}: ${s.info.mode} ${s.info.endpoint} run ${s.log.run}  page ${s.page.url()}\nstore: ${s.log.dir}`);
+    console.log(`${app}: ${s.info.mode} ${s.info.endpoint} run ${s.log.run}  page ${s.page.url()}${s.context.pages().length > 1 ? `  (+${s.context.pages().length - 1} other pages open — ./disco pages)` : ""}\nstore: ${s.log.dir}`);
     await s.close();
     break;
   }
@@ -206,7 +206,11 @@ async function main() { switch (cmd) {
     break;
   }
   case "pages": {
-    await withSession(async (s) => { s.context.pages().forEach((p, i) => console.log(`${i}\t${p.url()}`)); });
+    await withSession(async (s) => {
+      if (args["close-others"] === true) console.log(`closed ${await s.closeOtherPages()}`);
+      else if (args.close !== undefined) { const p = s.context.pages()[Number(args.close)]; if (!p || p === s.page) fail("--close <n>: not a closable page index (see ./disco pages)"); await p.close(); console.log("closed"); }
+      s.context.pages().forEach((p, i) => console.log(`${i}\t${p === s.page ? "*" : " "}\t${p.url()}`));
+    });
     break;
   }
   default: fail(`unknown command ${cmd}\n\n${HELP}`);
