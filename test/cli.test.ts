@@ -68,6 +68,25 @@ describe("cli", () => {
     assert.match(x.out, /killed/);
     assert.doesNotMatch(disco("ls").out, /recording/);
   });
+  it("attach: a browser started independently with a debugging port is driven and recorded", async () => {
+    const { launchChromium, killLaunched } = await import("../src/browser.ts");
+    const dir = join(appsDir, "_external");
+    mkdirSync(dir, { recursive: true });
+    const ext = await launchChromium(dir, {});            // stands in for a browser the user started with --remote-debugging-port
+    try {
+      const o = disco("open", "att", "--attach", String(ext.port), "--url", g.origin);
+      assert.equal(o.code, 0, o.out);
+      assert.match(o.out, /attach http:\/\/127\.0\.0\.1:\d+/);
+      const n = disco("navigate", g.origin, "--until-selector", "#load-chart");
+      assert.equal(n.code, 0, n.out);
+      const c = disco("click", "#load-chart", "--until-request", "/api/slow", "--landed");
+      assert.equal(c.code, 0, c.out);
+      assert.match(c.out, /GET \/api\/chart\/a 200/);
+      const x = disco("close", "att");
+      assert.match(x.out, /detached/);                     // an attached browser is forgotten, never killed
+      assert.equal((await fetch(ext.endpoint + "/json/version")).ok, true, "the external browser must survive close");
+    } finally { killLaunched(ext); }
+  });
   it("run-check runs a pack's check.ts", async () => {
     mkdirSync(join(appsDir, "chk"), { recursive: true });
     writeFileSync(join(appsDir, "chk", "check.ts"), `
