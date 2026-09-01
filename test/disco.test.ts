@@ -356,6 +356,37 @@ describe("openmrs run-3 friction", () => {
   });
 });
 
+describe("write-pass friction", () => {
+  it("request predicate with a method distinguishes a POST from a GET on a shared path", async () => {
+    const r = reached(await s.click("#save", { until: { request: "/api/save", method: "POST" } }));
+    assert.match(r.until!.which!, /POST/);
+    const g2 = await s.until({ request: "/api/save", method: "DELETE" }, { timeout: 300 });
+    assert.equal(g2.until?.ok, false);
+    await s.until({ gone: "#toast" }, { timeout: 4000 });
+  });
+  it("a styled checkbox whose input hides under its label's visual is clicked, not diagnosed", async () => {
+    // Carbon-style: the input is sized but transparent, under a visual span in the same label
+    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<label id=\"lbl\" style=\"position:relative;display:inline-block\"><input type=\"checkbox\" id=\"cb\" style=\"position:absolute;opacity:0;left:0;top:0;width:24px;height:24px;margin:0\"><span style=\"position:absolute;left:0;top:0;width:24px;height:24px;background:#ccc\"></span><span style=\"margin-left:30px\">Opt</span></label>')");
+    const r = await s.click("#cb");
+    assert.equal(r.ok, true, r.diagnosis?.message);
+    assert.equal(await s.evaluate("document.getElementById('cb').checked"), true);
+    await s.evaluate("document.getElementById('lbl').remove()");
+    // zero-size input (display-hidden) with a visible label: the label is clicked
+    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<label id=\"lbl2\"><input type=\"checkbox\" id=\"cb2\" style=\"position:absolute;opacity:0;width:0;height:0\"><span style=\"display:inline-block;width:24px;height:24px;background:#ccc;vertical-align:middle\"></span> Opt2</label>')");
+    const r2 = await s.click("#cb2");
+    assert.equal(r2.ok, true, r2.diagnosis?.message);
+    assert.equal(await s.evaluate("document.getElementById('cb2').checked"), true);
+    await s.evaluate("document.getElementById('lbl2').remove()");
+  });
+  it("aria on a miss names the visible controls; latestJson can read a write by method", async () => {
+    await assert.rejects(() => s.aria("#nope"), /Visible controls: role=button/);
+    const r = reached(await s.probe("fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.json()).then(j => j.id)", undefined, { until: { request: "/api/save", method: "POST", landed: true } }));
+    await new Promise((x) => setTimeout(x, 300));
+    const posted = s.store.latestJson<{ id: number }>("/api/save", { action: r.action, method: "POST" });
+    assert.ok(posted && typeof posted.id === "number", JSON.stringify(posted));
+  });
+});
+
 describe("the log without a browser", () => {
   it("openApp reads what was recorded", async () => {
     const st = openApp("t", appsDir);

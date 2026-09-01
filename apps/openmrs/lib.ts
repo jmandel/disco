@@ -1,405 +1,738 @@
-// apps/openmrs/lib.ts — OpenMRS 3.x ("O3") on https://dev3.openmrs.org as workflows.
+// apps/openmrs/lib.ts — OpenMRS 3.x (O3) reference application, driven read-only.
 //
 // Rules kept throughout: anchor in -> anchor out, an `until` on every transition,
-// facts read from the wire (the app is a thin renderer over REST + FHIR), `reached()`
-// on every step that must succeed.
+// facts read from the wire (REST v1 / FHIR R4) rather than off the screen,
+// `reached()` on every step.
 //
-// READ-ONLY PACK. Nothing here submits a form or creates/edits a record. The one
-// unavoidable write is the app's own: opening a chart POSTs the "recently viewed"
-// user property (see README, "Gotchas").
-import { reached, type Session, type Report } from "../../src/index.ts";
+// READ-ONLY STANCE: nothing here submits a form or creates/edits clinical data.
+// One unavoidable write happens anyway: opening a chart makes the app POST the
+// user's `userProperties` to remember "recently viewed patients" (see wire.md).
+import { reached, type Session } from "../../src/index.ts";
+
+// ---------------------------------------------------------------- constants
 
 export const ORIGIN = "https://dev3.openmrs.org";
-export const BASE = `${ORIGIN}/openmrs`;
-export const SPA = `${BASE}/spa`;
-export const LOGIN_URL = `${SPA}/login`;
-export const HOME_URL = `${SPA}/home`;
-export const chartUrl = (uuid: string, tab = "patient-summary") => `${SPA}/patient/${uuid}/chart/${tab}`;
+export const SPA = `${ORIGIN}/openmrs/spa`;
+export const LOGIN = `${SPA}/login`;
+export const HOME = `${SPA}/home`;
+export const REST = "/openmrs/ws/rest/v1";
+export const FHIR = "/openmrs/ws/fhir2/R4";
 
-/** Cheap anchors: a URL fragment + one specific element. */
+/** dev3 is a shared demo box. Chart routes routinely take 3-8 s; 20 s is the budget
+ *  that made every step below deterministic over ~40 runs. Probes stay at 1500. */
+export const SLOW = 20000;
+export const PROBE = 1500;
+
+export const chartUrl = (patientUuid: string, tab = "patient-summary") =>
+  `${SPA}/patient/${patientUuid}/chart/${tab}`;
+
+/** Cheap anchors: URL fragment + one specific element. */
 export const anchors = {
-  login: { url: "/spa/login", el: "role=textbox[name='Username']" },
+  login:    { url: "/spa/login", el: 'role=textbox[name="Username"]' },
   password: { url: "/spa/login", el: "input[type=password]" },
-  shell: { url: "/spa/", el: "nav[aria-label='Left navigation']" },
-  home: { url: "/spa/home", el: "nav[aria-label='Left navigation'] a[href$='/home/appointments']" },
-  chart: { url: "/chart", el: "[aria-label='patient banner']" },
-  search: { url: "/spa/", el: "role=searchbox[name='Search for a patient by name or identifier number']" },
-  workspace: { url: "/spa/", el: "#omrs-workspaces-container [aria-label='Workspace header']" },
-  registration: { url: "/patient-registration", el: "role=button[name='Register patient']" },
+  home:     { url: "/spa/home",  el: 'nav a[href$="/home/service-queues"]' },
+  chart:    { url: "/chart",     el: 'role=banner[name="patient banner"]' },
+  search:   { url: "",           el: 'role=searchbox[name="Search for a patient by name or identifier number"]' },
 };
 
-/** The login form renders a permanently-visible empty Carbon `[role=alert]`; the real
- *  error is this text in a `[role=status]` toast. Never anchor on `[role=alert]`. */
-export const BAD_CREDENTIALS = "Invalid username or password";
+/** The header clock/queue counters redraw on their own; drop them from every ui diff. */
+export const uiIgnore = [/Avg\. wait time/, /recent search results/];
 
-/** Aria noise: the header clock-ish bits and the ever-present empty alert. */
-export const uiIgnore = [/^- alert$/, /Toggle Implementer Tools/];
+// ---------------------------------------------------------------- helpers
 
-// ---------------------------------------------------------------- wire helpers
+type Any = any;
 
-/** Newest 200 response in THIS run whose URL contains every fragment. Parsed JSON, or null.
- *  Scoping by URL fragment (usually the patient uuid) survives react-query cache hits,
- *  where a second visit to a tab issues no request at all. */
-export function wireJson(s: Session, ...contains: string[]): any {
-  const where = contains.map(() => "url LIKE ?").join(" AND ");
-  const rows = s.store.sql(
-    `SELECT body_hash FROM requests WHERE run=? AND status=200 AND body_hash IS NOT NULL AND ${where}` +
-    ` ORDER BY t_start DESC LIMIT 1`, s.run, ...contains.map((c) => `%${c}%`)) as any[];
-  return rows[0] ? s.store.json(rows[0].body_hash) : null;
+const bundleEntries = (b: Any): Any[] => (b?.entry ?? []).map((e: Any) => e.resource);
+
+/** Read the newest body for `family` produced by `act`, falling back to the newest overall.
+ *  The fallback matters because O3 caches aggressively (swr): a second visit to a tab
+ *  can render with nothing on the wire, and then the act-scoped lookup is empty. */
+function wire(s: Session, family: string, act?: string): Any {
+  return (act && s.store.latestJson(family, act)) || s.store.latestJson(family) || null;
 }
 
-/** Every xhr/fetch row that started inside a report's window — the endpoint map, act by act. */
-export function wireOf(s: Session, r: Report) {
-  return s.store.sql(
-    "SELECT method, url, status, body_hash, body_size FROM requests WHERE run=? AND resource_type IN ('xhr','fetch')" +
-    " AND t_start >= ? AND t_start <= ? ORDER BY t_start", s.run, r.window.t0, r.window.t1) as any[];
-}
-
-/** The REST session resource, fetched from inside the page (page cookies, and it lands in the log). */
-export async function session(s: Session): Promise<any> {
-  return await s.evaluate(
-    `fetch('${BASE}/ws/rest/v1/session',{headers:{'Disable-WWW-Authenticate':'true'}}).then(r=>r.json())`);
-}
-
-export async function whoami(s: Session) {
-  const j = await session(s);
-  return {
-    authenticated: !!j?.authenticated,
-    user: j?.user?.display ?? null,
-    roles: (j?.user?.roles ?? []).map((r: any) => r.display),
-    location: j?.sessionLocation?.display ?? null,
-    provider: j?.currentProvider?.display ?? null,
-  };
+/** Where are we? Cheap, never navigates. */
+export async function where(s: Session): Promise<"login" | "home" | "chart" | "unknown"> {
+  const r = await s.until({ any: [
+    { selector: anchors.chart.el, label: "chart" },
+    { selector: anchors.home.el,  label: "home" },
+    { selector: anchors.login.el, label: "login" },
+  ] }, { timeout: PROBE });
+  return (r.until?.ok ? (r.until.which as Any) : "unknown");
 }
 
 // ---------------------------------------------------------------- auth
 
 /**
- * Log in. Two screens: username -> Continue -> password -> Log in.
- * Always navigates to the login URL first: a fresh document is the only way to be sure
- * the previous attempt's "Invalid username or password" toast is not still on screen
- * (it lingers and would satisfy the failure arm instantly). ~4-8 s on a cold browser.
- *
- * Returns `which: "shell" | "bad-credentials"`; it does not throw on bad credentials,
- * so a caller can probe. `reached()` the returned report if you need it to have worked.
- *
- * IMPORTANT: this only tests credentials when you are logged OUT. With a live JSESSIONID
- * the login page redirects itself to the shell after ~1-2 s, so ANY password "succeeds".
- * Call `logout(s)` first when probing. `ensureLoggedIn` is the normal entry point.
+ * Log in. Two-step form: Username -> Continue -> Password -> Log in.
+ * `/openmrs/spa/login` does NOT redirect an already-authenticated session away,
+ * so this is safe to call from anywhere and is idempotent.
+ * Lands on the home shell (Service queues).
  */
-export async function login(s: Session, username = "admin", password = "Admin123") {
+export async function login(s: Session, user = "admin", pass = "Admin123") {
   s.uiIgnore = uiIgnore;
-  reached(await s.navigate(LOGIN_URL, { until: { selector: anchors.login.el, visible: true }, timeout: 30000 }), "login page");
-  reached(await s.fill(anchors.login.el, username));
-  reached(await s.click("role=button[name='Continue']", { until: { selector: anchors.password.el, visible: true }, timeout: 10000 }), "password step");
-  reached(await s.fill(anchors.password.el, password));
-  const r = await s.click("role=button[name='Log in']", {
-    until: { any: [
-      { selector: anchors.home.el, label: "shell" },
-      { text: BAD_CREDENTIALS, label: "bad-credentials" },
-    ] }, timeout: 30000,
-  });
-  return { act: r.action, which: (r.until?.which ?? "none") as "shell" | "bad-credentials" | "none", report: r };
-}
-
-/** Reach the shell, logging in only if the app asks. Cheap when already logged in (~2 s). */
-export async function ensureLoggedIn(s: Session, username = "admin", password = "Admin123") {
-  s.uiIgnore = uiIgnore;
-  const r = await s.navigate(HOME_URL, { until: { any: [
-    { selector: anchors.home.el, label: "shell" },
-    { selector: anchors.login.el, label: "login" },
-  ] }, timeout: 30000 });
-  if (r.until?.which === "shell") return { act: r.action, which: "shell" as const };
-  const l = await login(s, username, password);
-  if (l.which !== "shell") throw new Error(`login failed: ${l.which} (${l.act})`);
-  return { act: l.act, which: "logged-in" as const };
+  reached(await s.navigate(LOGIN, { until: { selector: anchors.login.el }, timeout: SLOW }), "reach login");
+  reached(await s.fill(anchors.login.el, user), "username");
+  reached(await s.click('role=button[name="Continue"]', { until: { selector: anchors.password.el, visible: true } }), "continue");
+  reached(await s.fill(anchors.password.el, pass), "password");
+  const r = await s.click('role=button[name="Log in"]', { until: { any: [
+    { selector: anchors.home.el, label: "home" },
+    { text: "Incorrect username or password", label: "error" },
+  ] }, timeout: SLOW });
+  if (r.until?.which === "error") throw new Error("login: server rejected the credentials");
+  reached(r, "log in");
+  return { act: r.action, session: await sessionInfo(s) };
 }
 
 /**
- * Open the header's user menu panel.
- * The panel's contents (Super User / English / Password / Logout) are ALWAYS in the DOM
- * and always "visible" to Playwright — the panel is parked off the right edge, so
- * `until: { selector: "role=button[name='Logout']" }` is `alreadyTrue` and a click on
- * Logout is diagnosed `occluded`. The honest anchor is the Carbon slide-in class.
- * The aria tree does not change at all when the panel opens (`ui` diff is empty).
+ * The auth oracle. GET /session ALWAYS returns 200 — even with a wrong password —
+ * so never read the status; read `authenticated`. Run from inside the page so it
+ * carries the JSESSIONID cookie and lands in the log.
  */
-export async function openUserMenu(s: Session) {
-  const already = await s.until({ selector: ".cds--header-panel--expanded" }, { timeout: 400 });
-  if (already.until?.ok) return { act: already.action, opened: false };
-  const r = reached(await s.click("role=button[name='My Account']", {
-    until: { selector: ".cds--header-panel--expanded" }, timeout: 8000,
-  }), "open user menu");
-  return { act: r.action, opened: true };
+export async function sessionInfo(s: Session) {
+  const j: Any = await s.evaluate(`fetch('${REST}/session').then(r=>r.json())`);
+  return {
+    authenticated: !!j?.authenticated,
+    user: j?.user?.display ?? null,
+    roles: (j?.user?.roles ?? []).map((r: Any) => r.display),
+    locationUuid: j?.sessionLocation?.uuid ?? null,
+    location: j?.sessionLocation?.display ?? null,
+    provider: j?.currentProvider?.display ?? null,
+    locale: j?.locale ?? null,
+  };
 }
 
-/** Log out. `DELETE /ws/rest/v1/session` -> 204 -> redirect to the login page. */
+/** Documented, deliberately NOT used by check.ts: it destroys the shared session. */
 export async function logout(s: Session) {
-  await openUserMenu(s);
-  const r = reached(await s.click("role=button[name='Logout']", {
-    until: { selector: anchors.login.el, visible: true }, timeout: 20000,
-  }), "logout");
+  reached(await s.click('role=button[name="My Account"]', { until: { selector: 'role=button[name="Logout"]' } }), "open account menu");
+  return reached(await s.click('role=button[name="Logout"]', { until: { selector: anchors.login.el }, timeout: SLOW }), "logout");
+}
+
+// ---------------------------------------------------------------- home shell
+
+/** Reach the home shell from anywhere. Login page is an arm so a refusal costs ms, not SLOW. */
+export async function goHome(s: Session) {
+  s.uiIgnore = uiIgnore;
+  const r = reached(await s.navigate(HOME, { until: { any: [
+    { selector: anchors.home.el,  label: "home" },
+    { selector: anchors.login.el, label: "login" },
+  ] }, timeout: SLOW }), "go home");
+  if (r.until?.which === "login") throw new Error("goHome: bounced to the login page — call login() first");
   return { act: r.action };
 }
 
-// ---------------------------------------------------------------- shell navigation
-
-/** The left-nav apps of the home shell. */
-export const homeApps = {
-  "service-queues": { req: "/ws/rest/v1/queue-entry?", text: "Waiting list" },
-  appointments: { req: "/ws/rest/v1/appointments?forDate=", text: "Appointments for" },
-  "patient-lists": { req: "/ws/rest/v1/cohortm/cohort?", text: "Patient lists" },
-  laboratory: { req: "/ws/rest/v1/order?orderTypes=", text: "Tests ordered" },
-  ward: { req: "/ws/rest/v1/admissionLocation/", text: "" },
-  billing: { req: "/ws/rest/v1/billing/bill?", text: "Bill list" },
+/** The six left-nav dashboards of the home shell, with the request each one lands. */
+export const HOME_APPS = {
+  "Service queues": { path: "/home/service-queues", req: `${REST}/queue-entry?` },
+  "Appointments":   { path: "/home/appointments",   req: `${REST}/appointments?forDate=` },
+  "Laboratory":     { path: "/home/laboratory",     req: `${REST}/order?orderTypes=` },
+  "Patient lists":  { path: "/home/patient-lists",  req: `${REST}/cohortm/cohort?` },
+  "Wards":          { path: "/home/ward",           req: `${REST}/admissionLocation/` },
+  "Billing":        { path: "/home/billing",        req: `${REST}/billing/bill?` },
 } as const;
-export type HomeApp = keyof typeof homeApps;
 
-/**
- * Open one of the home apps by full navigation (a fresh document guarantees the fetch;
- * clicking the left-nav link inside the SPA can be served from the react-query cache).
- */
-export async function openHomeApp(s: Session, app: HomeApp, timeout = 30000) {
-  const spec = homeApps[app];
-  const r = reached(await s.navigate(`${HOME_URL}/${app}`, {
-    until: { all: [{ selector: anchors.home.el }, { request: spec.req, landed: true }] }, timeout,
-  }), `open ${app}`);
-  return { act: r.action, report: r };
+/** Click a left-nav dashboard (a click, not a navigate: it keeps the SPA's caches).
+ *  `/openmrs/spa/home` REDIRECTS to `/home/service-queues`, so when that dashboard is
+ *  already the active route a `{ url }` arm would be `alreadyTrue` and `reached()` would
+ *  (correctly) refuse it. Short-circuit instead: the data landed in the act that got us here. */
+export async function openHomeApp(s: Session, name: keyof typeof HOME_APPS) {
+  const spec = HOME_APPS[name];
+  if (s.page.url().includes(spec.path)) return { act: undefined as string | undefined, which: "already-there" };
+  const r = reached(await s.click(`nav a[href$="${spec.path}"]`, { until: { any: [
+    { request: spec.req, landed: true, label: "wire" },
+    { url: spec.path, label: "route" },
+  ] }, timeout: SLOW }), `open ${name}`);
+  return { act: r.action as string | undefined, which: r.until?.which };
+}
+
+/** Service queues dashboard: who is waiting/attending at the session location, from the wire. */
+export async function serviceQueue(s: Session) {
+  await goHome(s);
+  const { act } = await openHomeApp(s, "Service queues");
+  const body = wire(s, `${REST}/queue-entry?v=`, act);
+  const entries = (body?.results ?? []).map((e: Any) => ({
+    uuid: e.uuid,
+    patient: e.patient?.person?.display ?? e.display,
+    patientUuid: e.patient?.uuid,
+    queue: e.queue?.display ?? e.queue?.name,
+    status: e.status?.display,
+    priority: e.priority?.display,
+  }));
+  return { act, total: body?.totalCount ?? entries.length, entries };
+}
+
+/** Patient lists (OpenMRS "cohorts"). Returns every list the All-lists tab knows about. */
+export async function patientLists(s: Session) {
+  await goHome(s);
+  const { act } = await openHomeApp(s, "Patient lists");
+  const body = wire(s, `${REST}/cohortm/cohort?`, act);
+  const lists = (body?.results ?? []).map((c: Any) => ({
+    uuid: c.uuid, name: c.name ?? c.display, size: c.size, type: c.cohortType?.display ?? null,
+  }));
+  return { act, lists };
+}
+
+/** Open one list and read its members off the wire.
+ *  GOTCHA: this route paints a full skeleton <table> with empty cells and an h1 of "--"
+ *  before the data lands, so `until: { selector: "table" }` resolves on the skeleton.
+ *  Wait on /cohortm/cohortmember instead. */
+export async function openPatientList(s: Session, listUuid: string) {
+  const r = reached(await s.navigate(`${HOME}/patient-lists/${listUuid}`, { until: {
+    request: `${REST}/cohortm/cohortmember?cohort=${listUuid}`, landed: true,
+  }, timeout: SLOW }), "open patient list");
+  const body = wire(s, `${REST}/cohortm/cohortmember?cohort=${listUuid}`, r.action);
+  const members = (body?.results ?? []).map((m: Any) => ({
+    patientUuid: m.patient?.uuid,
+    display: m.patient?.display,
+    startDate: m.startDate,
+  }));
+  return { act: r.action, total: body?.totalCount ?? members.length, members };
 }
 
 // ---------------------------------------------------------------- patient search
 
-/** Header search overlay. Idempotent: opens it only when its box is not already visible. */
-export async function openPatientSearch(s: Session) {
-  const already = await s.until({ selector: anchors.search.el, visible: true }, { timeout: 600 });
-  if (already.until?.ok) return { act: already.action, opened: false };
-  const r = reached(await s.click("role=button[name='Search patient']", {
-    until: { selector: anchors.search.el, visible: true }, timeout: 15000,
-  }), "open patient search");
-  return { act: r.action, opened: true };
-}
-
-export type Hit = { uuid: string; name: string; identifier: string | null; gender: string | null; age: number | null; birthdate: string | null };
-
 /**
- * Search patients by name or identifier. `fill` (not `type`) is enough — the box is a
- * controlled React input and one input event starts the request. The hits come off the
- * wire, not the DOM: `GET /ws/rest/v1/patient?q=<q>&v=custom:(...)`.
- * Queries under ~3 characters return 0 results server-side ("a" -> 0 hits).
+ * Header patient search. The searchbox lives in the app header and only exists after
+ * the "Search patient" button is pressed; on the service-queues dashboard there is a
+ * SECOND searchbox ("Filter table"), so always address this one by its accessible name.
+ * Debounced: one XHR per pause, `GET /ws/rest/v1/patient?q=<term>`.
  */
-export async function searchPatients(s: Session, q: string, timeout = 20000): Promise<{ act: string; hits: Hit[] }> {
-  await openPatientSearch(s);
-  const r = reached(await s.fill(anchors.search.el, q, {
-    until: { request: "/ws/rest/v1/patient?q=", landed: true }, timeout,
+export async function searchPatients(s: Session, q: string) {
+  if (!(await s.until({ selector: anchors.search.el }, { timeout: 400 })).until?.ok) {
+    reached(await s.click('role=button[name="Search patient"]', { until: { selector: anchors.search.el } }), "open search");
+  }
+  reached(await s.fill(anchors.search.el, ""), "clear search");
+  const r = reached(await s.type(anchors.search.el, q, {
+    until: { request: `${REST}/patient?q=`, landed: true }, timeout: SLOW,
   }), `search "${q}"`);
-  const body = s.store.latestJson("/ws/rest/v1/patient?q=", r.action) as any;
-  const hits: Hit[] = (body?.results ?? []).map((p: any) => ({
+  const body = wire(s, `${REST}/patient?q=`, r.action);
+  const results = (body?.results ?? []).map((p: Any) => ({
     uuid: p.uuid,
     name: p.person?.display ?? p.display,
-    identifier: p.identifiers?.[0]?.identifier ?? null,
-    gender: p.person?.gender ?? null,
-    age: p.person?.age ?? null,
-    birthdate: p.person?.birthdate ?? null,
+    gender: p.person?.gender,
+    age: p.person?.age,
+    identifiers: (p.identifiers ?? []).map((i: Any) => i.display),
   }));
-  return { act: r.action, hits };
+  return { act: r.action, results };
 }
 
 // ---------------------------------------------------------------- patient chart
 
-export type Demographics = { uuid: string; name: string | null; gender: string | null; birthDate: string | null; identifiers: string[]; deceased: boolean };
-
-/**
- * Open a patient chart. Navigates (fresh document -> the FHIR Patient read always fires;
- * an in-SPA click can be a cache hit). Demographics come from
- * `GET /ws/fhir2/R4/Patient/<uuid>?_summary=data`, not from the banner text.
- */
-export async function openChart(s: Session, uuid: string, tab = "patient-summary", timeout = 30000) {
-  const r = reached(await s.navigate(chartUrl(uuid, tab), {
-    until: { all: [
-      { selector: anchors.chart.el },
-      { request: `fhir2/R4/Patient/${uuid}`, landed: true },
-    ] }, timeout,
-  }), `open chart ${uuid}`);
-  const p = wireJson(s, `fhir2/R4/Patient/${uuid}`);
-  const demographics: Demographics = {
-    uuid: p?.id ?? uuid,
-    name: p?.name?.[0]?.text ?? null,
-    gender: p?.gender ?? null,
-    birthDate: p?.birthDate ?? null,
-    identifiers: (p?.identifier ?? []).map((i: any) => i.value).filter(Boolean),
-    deceased: !!p?.deceasedDateTime || p?.deceasedBoolean === true,
-  };
-  return { act: r.action, demographics, patient: p };
-}
-
-/**
- * The chart's left-nav tabs. `req` is the fragment an `until: { request }` matches;
- * `owns` is the extra URL fragment (always the patient uuid) that scopes the log read,
- * so a cached second visit still returns the right body.
- */
-export const chartTabs = {
-  "patient-summary": { req: "fhir2/R4/Patient/", text: "Vitals" },
-  "vitals-and-biometrics": { req: "fhir2/R4/Observation", text: "Vitals" },
-  medications: { req: "/ws/rest/v1/order?patient=", text: "medications" },
-  results: { req: "/ws/rest/v1/obstree?patient=", text: "Results" },
-  visits: { req: "ws/rest/v1/visit?patient=", text: "Visits" },
-  allergies: { req: "fhir2/R4/AllergyIntolerance?patient=", text: "Allergies" },
-  conditions: { req: "fhir2/R4/Condition?patient=", text: "Conditions" },
-  immunizations: { req: "fhir2/R4/Immunization?patient=", text: "Immunizations" },
-  procedures: { req: "/ws/rest/v1/procedure?patient=", text: "Procedures" },
-  attachments: { req: "/ws/rest/v1/attachment?patient=", text: "Attachments" },
-  programs: { req: "/ws/rest/v1/programenrollment?patient=", text: "Programs" },
-  appointments: { req: "/ws/rest/v1/appointments/search", text: "Appointments" },
-  "billing-history": { req: "/ws/rest/v1/billing/bill?", text: "" },
+/** Chart tab -> the request that proves it loaded, and the heading that proves it rendered. */
+export const CHART_TABS = {
+  "patient-summary":       { req: `${FHIR}/Patient/`,                heading: "Vitals" },
+  "vitals-and-biometrics": { req: `${FHIR}/Observation?subject`,     heading: "Vitals" },
+  "medications":           { req: `${REST}/order?patient=`,          heading: "Active medications" },
+  "orders":                { req: `${REST}/order?patient=`,          heading: "Orders" },
+  "results":               { req: `${REST}/obstree?patient=`,        heading: "Tests" },
+  "visits":                { req: "ws/rest/v1/visit?patient=",       heading: null },
+  "allergies":             { req: `${FHIR}/AllergyIntolerance?`,     heading: "Allergies" },
+  "conditions":            { req: `${FHIR}/Condition?patient=`,      heading: "Conditions" },
+  "immunizations":         { req: `${FHIR}/Immunization?`,           heading: "Immunizations" },
+  "programs":              { req: `${REST}/programenrollment?`,      heading: "Care Programs" },
+  "attachments":           { req: `${REST}/attachment?`,             heading: "Attachments" },
+  "appointments":          { req: `${REST}/appointments/search`,     heading: "Appointments" },
 } as const;
-export type ChartTab = keyof typeof chartTabs;
+export type ChartTab = keyof typeof CHART_TABS;
 
 /**
- * Click a chart tab from inside the chart and return the body the tab rendered from.
- * Precondition: already on this patient's chart (`openChart`).
- * The `until` is the URL only; the request is then waited for with a SHORT budget,
- * because a tab you already visited in this document is served from the react-query
- * cache and issues nothing. Either way the body is read from the log, scoped to this
- * patient's uuid, so the answer is the same.
+ * Open a patient's chart. Navigates (rather than clicking a result) so it is a usable
+ * entry point from any state; the postcondition is the FHIR Patient read, with the
+ * patient banner as the cache-hit arm.
  */
-export async function chartTab(s: Session, uuid: string, tab: ChartTab, timeout = 20000, cacheGraceMs = 2500) {
-  reached(await s.until({ selector: anchors.chart.el }, { timeout: 3000 }), `on a chart before opening ${tab}`);
-  const r = reached(await s.click(`nav[aria-label='Left navigation'] a[href$="/chart/${tab}"]`, {
-    until: { url: `/chart/${tab}` }, timeout,
-  }), `chart tab ${tab}`);
-  const spec = chartTabs[tab];
-  // Short on purpose: the patient-summary screen already fetched Conditions, Vitals,
-  // Medications and Visits, so those tabs are cache hits and this budget is pure waste
-  // when it expires. 2.5 s is enough for a real fetch on dev3 (observed 200-900 ms).
-  const w = await s.until({ request: spec.req, landed: true }, { timeout: cacheGraceMs });
-  const body = wireJson(s, spec.req.replace(/\?.*$/, "").replace(/=$/, ""), uuid);
-  return { act: r.action, fromCache: !w.until?.ok, body };
-}
-
-/** FHIR Bundle of problem-list Conditions. */
-export const conditions = (s: Session, uuid: string) => chartTab(s, uuid, "conditions");
-/** FHIR Bundle of AllergyIntolerance. */
-export const allergies = (s: Session, uuid: string) => chartTab(s, uuid, "allergies");
-/** FHIR Bundle of vitals/biometrics Observations (BP, pulse, temp, SpO2, height, weight...). */
-export const vitals = (s: Session, uuid: string) => chartTab(s, uuid, "vitals-and-biometrics");
-/** REST page of visits with their encounters, obs and orders (large: ~250 KB). */
-export const visits = (s: Session, uuid: string) => chartTab(s, uuid, "visits");
-
-/** Count the entries of a FHIR searchset Bundle and pull one field per entry. */
-export function bundleEntries(bundle: any, pick: (r: any) => any = (r) => r) {
-  return (bundle?.entry ?? []).map((e: any) => pick(e.resource));
-}
-
-// ---------------------------------------------------------------- workspaces (right side rail)
-
-/** The right side-rail buttons that open a workspace over the chart. */
-export const workspaces = ["Clinical forms", "Order basket", "Visit note", "Task list", "Patient lists"] as const;
-
-/**
- * Open a chart workspace. The container `#omrs-workspaces-container` is always in the
- * DOM; the honest anchor is its `[aria-label='Workspace header']` plus the title text.
- * Workspaces survive SPA route changes — always `closeWorkspace` when done.
- */
-export async function openWorkspace(s: Session, name: (typeof workspaces)[number], timeout = 20000) {
-  const r = reached(await s.click(`role=button[name="${name}"]`, {
-    until: { selector: `#omrs-workspaces-container [aria-label='Workspace header']:has-text("${name}")` }, timeout,
-  }), `open workspace ${name}`);
-  return { act: r.action };
-}
-
-/** Close whatever workspace is open (no-op if none). */
-export async function closeWorkspace(s: Session) {
-  const open = await s.until({ selector: anchors.workspace.el }, { timeout: 600 });
-  if (!open.until?.ok) return { act: open.action, closed: false };
-  const r = reached(await s.click("#omrs-workspaces-container >> role=button[name='Close']", {
-    until: { gone: anchors.workspace.el }, timeout: 10000,
-  }), "close workspace");
-  return { act: r.action, closed: true };
-}
-
-/** The patient's form list, from the "Clinical forms" workspace. Read-only: never opens a form. */
-export async function clinicalForms(s: Session, uuid: string) {
-  reached(await s.until({ selector: anchors.chart.el }, { timeout: 3000 }), "on a chart");
-  const o = await openWorkspace(s, "Clinical forms");
-  const rows = (await s.evaluate(
-    `Array.from(document.querySelectorAll('#omrs-workspaces-container table tbody tr'))` +
-    `.map(tr=>Array.from(tr.cells).map(c=>c.innerText.trim()))`)) as string[][];
-  await closeWorkspace(s);
-  return { act: o.act, forms: rows.map((r) => ({ name: r[0], lastCompleted: r[1] })) };
-}
-
-// ---------------------------------------------------------------- home apps as data
-
-/** Patient lists = "cohorts". Returns every list the user can see. */
-export async function patientLists(s: Session) {
-  const r = await openHomeApp(s, "patient-lists");
-  const body = s.store.latestJson("/ws/rest/v1/cohortm/cohort?", r.act) as any;
-  return {
-    act: r.act,
-    lists: (body?.results ?? []).map((c: any) => ({
-      uuid: c.uuid, name: c.name, size: c.size, type: c.cohortType?.display ?? null,
-    })),
-  };
-}
-
-/** Open one patient list and read its members off the wire. */
-export async function openPatientList(s: Session, uuid: string, timeout = 20000) {
-  const r = reached(await s.navigate(`${HOME_URL}/patient-lists/${uuid}`, {
-    until: { all: [
-      { selector: anchors.home.el },
-      { request: `cohortm/cohortmember?cohort=${uuid}`, landed: true },
-    ] }, timeout,
-  }), `open list ${uuid}`);
-  const body = wireJson(s, `cohortm/cohortmember?cohort=${uuid}`);
+export async function openChart(s: Session, patientUuid: string) {
+  s.uiIgnore = uiIgnore;
+  const r = reached(await s.navigate(chartUrl(patientUuid), { until: { any: [
+    { request: `${FHIR}/Patient/${patientUuid}`, landed: true, label: "wire" },
+    { selector: anchors.chart.el, label: "banner" },
+  ] }, timeout: SLOW }), "open chart");
+  const p: Any = wire(s, `${FHIR}/Patient/${patientUuid}`, r.action);
+  const name = p?.name?.[0];
   return {
     act: r.action,
-    members: (body?.results ?? []).map((m: any) => ({
-      uuid: m.patient?.uuid, name: m.patient?.person?.display ?? m.patient?.display,
-      identifier: m.patient?.identifiers?.[0]?.identifier ?? null, startDate: m.startDate ?? null,
-    })),
+    which: r.until?.which,
+    patient: p ? {
+      uuid: p.id,
+      name: name?.text ?? [(name?.given ?? []).join(" "), name?.family].filter(Boolean).join(" "),
+      gender: p.gender,
+      birthDate: p.birthDate,
+      identifiers: (p.identifier ?? []).map((i: Any) => `${i.type?.text ?? "id"}: ${i.value}`),
+      active: p.active,
+    } : null,
   };
 }
 
 /**
- * Service queues (the default home app): who is waiting / in service at this location.
- * Two `queue-entry` requests fire per load — one per tab of the dashboard — so the
- * *newest* body is not necessarily the one with rows. This reads the largest.
+ * Click a chart left-nav tab and return the body it fetched. Anchor in: the patient banner.
+ *
+ * The postcondition is the WIRE, never a heading: the patient-summary dashboard already
+ * renders cards titled "Conditions", "Vitals", "Allergies"…, so a heading predicate is
+ * `alreadyTrue` before you ever click that tab (this is exactly what `reached()` refused).
+ * A `{ url }` arm is no better — client-side routing flips the URL synchronously, so it
+ * wins the race and you read a stale body.
+ *
+ * O3 caches with SWR: a second visit to a tab can render with nothing on the wire. Then the
+ * request predicate expires (cost: SLOW) and we fall back to the newest body in the log,
+ * which is that same cached response. `which` says which happened.
  */
-export async function serviceQueues(s: Session) {
-  const r = await openHomeApp(s, "service-queues");
-  const rows = s.store.sql(
-    "SELECT body_hash, body_size FROM requests WHERE run=? AND status=200 AND url LIKE '%/ws/rest/v1/queue-entry?%'" +
-    " AND t_start >= ? ORDER BY body_size DESC LIMIT 1", s.run, r.report.window.t0) as any[];
-  const body = rows[0] ? s.store.json(rows[0].body_hash) : null;
+export async function openChartTab(s: Session, patientUuid: string, tab: ChartTab) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  const spec = CHART_TABS[tab];
+  if (s.page.url().includes(`/chart/${tab}`)) return { act: undefined as string | undefined, which: "already-there", body: wire(s, spec.req) };
+  // If this run already has a 200 for that family the tab will very likely render from cache;
+  // spend 4 s on the request arm instead of SLOW, then fall back. (Cold: the full budget.)
+  const seen = s.store.requests({ url: spec.req, status: 200, run: s.run }).length > 0;
+  const r = await s.click(`nav a[href$="/chart/${tab}"]`, { until: { request: spec.req, landed: true }, timeout: seen ? 4000 : SLOW });
+  if (!r.ok) throw new Error(`chart tab ${tab}: ${r.diagnosis?.reason} — ${r.diagnosis?.message}`);
+  const landed = !!r.until?.ok;
+  if (!landed && !s.page.url().includes(`/chart/${tab}`)) throw new Error(`chart tab ${tab}: neither the request nor the route arrived (${s.page.url()})`);
+  return { act: r.action as string | undefined, which: landed ? "wire" : "cache", body: wire(s, spec.req, landed ? r.action : undefined) };
+}
+
+/** Problem list, from FHIR Condition (NOT from the table: the table shows "Active" only). */
+export async function conditions(s: Session, patientUuid: string) {
+  const { act, body } = await openChartTab(s, patientUuid, "conditions");
+  const rows = bundleEntries(body).map((c: Any) => ({
+    id: c.id,
+    text: c.code?.text
+      ?? c.extension?.find((e: Any) => e.url?.endsWith("non-coded-condition"))?.valueString
+      ?? null,
+    clinicalStatus: c.clinicalStatus?.coding?.[0]?.code ?? null,
+    onset: c.onsetDateTime ?? null,
+  }));
+  return { act, total: body?.total ?? rows.length, rows };
+}
+
+/** The concept uuids the vitals widget asks for. The tab fires THREE Observation reads
+ *  (vitals / biometrics / a single MUAC concept), so `latestJson("/Observation?")` is a
+ *  coin flip — pick the family by its `code=` parameter. */
+export const VITALS_CODES = "code=5085AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";   // systolic BP + friends
+export const BIOMETRICS_CODES = "code=5090AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // height + friends
+
+/** Vitals & biometrics, from the FHIR Observation bundle the tab fetches. */
+export async function vitals(s: Session, patientUuid: string) {
+  const { act } = await openChartTab(s, patientUuid, "vitals-and-biometrics");
+  const body = wire(s, VITALS_CODES, act);
+  const obs = bundleEntries(body).map((o: Any) => ({
+    id: o.id,
+    code: o.code?.coding?.find((c: Any) => c.display)?.display ?? o.code?.text ?? null,
+    value: o.valueQuantity ? `${o.valueQuantity.value} ${o.valueQuantity.unit ?? ""}`.trim() : null,
+    when: o.effectiveDateTime ?? null,
+  }));
+  obs.sort((a: Any, b: Any) => String(b.when).localeCompare(String(a.when)));
+  return { act, total: body?.total ?? obs.length, latest: obs.slice(0, 8), all: obs };
+}
+
+/** Visit history + encounters. NOTE the URL the widget builds has a DOUBLE SLASH:
+ *  `/openmrs//ws/rest/v1/visit?...` — match on the tail, not on `/openmrs/ws`. */
+export async function visits(s: Session, patientUuid: string) {
+  const { act, body } = await openChartTab(s, patientUuid, "visits");
+  const rows = (body?.results ?? []).map((v: Any) => ({
+    uuid: v.uuid,
+    type: v.visitType?.display,
+    start: v.startDatetime,
+    stop: v.stopDatetime,
+    location: v.location?.display,
+    encounters: (v.encounters ?? []).length,
+  }));
+  return { act, total: body?.totalCount ?? rows.length, rows };
+}
+
+/** The clinical forms the workspace offers for this patient (read the catalogue, submit nothing). */
+export async function clinicalForms(s: Session) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  const r = reached(await s.click('role=button[name="Clinical forms"]', {
+    until: { request: `${REST}/form?v=`, landed: true }, timeout: SLOW,
+  }), "open clinical forms");
+  const body = wire(s, `${REST}/form?v=`, r.action);
+  const forms = (body?.results ?? []).map((f: Any) => ({ uuid: f.uuid, name: f.display ?? f.name, published: f.published }));
+  // leave the workspace as we found it
+  await s.press("Escape");
+  return { act: r.action, forms };
+}
+
+// ================================================================
+// WRITE WORKFLOWS
+// ================================================================
+//
+// Stance: everything created here is obviously synthetic and carries MARKER so it can be
+// found and cleaned up later (`GET /ws/rest/v1/patient?q=Zzdiscotest`,
+// `GET /ws/rest/v1/cohortm/cohort?q=DISCOTEST`). Nothing edits or deletes a record this
+// pack did not create. Every write is verified by RE-READING the server, never by the toast.
+//
+// The app's write surfaces, and the shape they all share:
+//   a launcher (banner Actions menu / a "Record …" button / the right rail) opens an
+//   overlay, you fill it, and one button POSTs. There are THREE overlay kinds and they
+//   need different anchors (see README §6 "Interstitials and recovery"):
+//     workspace side panel -> role=banner[name="Workspace header"]
+//     Carbon modal         -> role=dialog
+//     snackbar (the toast) -> role=alertdialog   <- never a postcondition
+
+/** Every record this pack creates carries this string somewhere findable. */
+export const MARKER = "DISCOTEST";
+/** Family name for synthetic patients — sorts to the end of any list and greps cleanly. */
+export const MARKER_FAMILY = "Zzdiscotest";
+
+/** yyyymmdd-hhmmss, so two runs never collide and a record can be dated. */
+export const stamp = () =>
+  new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+
+/** The body of the POST/PUT this act issued to `family` — the created record as the SERVER
+ *  returned it. `latestJson` is not enough: the app fires GETs to the same family inside the
+ *  same act window (the chart it navigates to), and the newest of those would win. */
+function written(s: Session, family: string, act?: string, method = "POST"): Any {
+  const rows = s.store.requests({ url: family, method, action: act, run: s.run } as Any);
+  const row = rows[rows.length - 1];
+  return row?.body_hash ? s.store.json(row.body_hash) : null;
+}
+/** Same, but the row itself (status, size) — for asserting "it persisted with 201". */
+function writtenRow(s: Session, family: string, act?: string, method = "POST"): Any {
+  const rows = s.store.requests({ url: family, method, action: act, run: s.run } as Any);
+  return rows[rows.length - 1] ?? null;
+}
+
+/** Carbon hides the real <input> under a styled <span>, so every radio/checkbox in this app
+ *  reports `occluded` to a real mouse click. `js: true` is the whole fix. */
+async function tick(s: Session, target: string, what: string) {
+  return reached(await s.click(target, { js: true }), what);
+}
+
+// ---------------------------------------------------------------- 1. register a patient
+
+export type NewPatient = { given?: string; family?: string; gender?: "Male" | "Female"; dob?: [string, string, string]; city?: string };
+
+/**
+ * **Register a patient.** Precondition: logged in (any screen).
+ * Steps: header "Add patient" → `/spa/patient-registration` → First/Family name, Sex radio
+ * (js), Date of birth (three spinbuttons), optional City → "Register patient".
+ * Postcondition: the URL is the NEW patient's chart and `POST /ws/rest/v1/patient/` returned 201.
+ * Wire: `POST /ws/rest/v1/idgen/identifiersource/<uuid>/identifier` (201, reserves the CR Number)
+ * then `POST /ws/rest/v1/patient/` (201) whose request body carries a **client-generated uuid**.
+ */
+export async function registerPatient(s: Session, p: NewPatient = {}) {
+  // The NAME carries the marker (so a human scanning the demo can spot it); the per-run
+  // handle is the auto-generated identifier, because OpenMRS person-name search does not
+  // like digits and every run would otherwise be indistinguishable by name.
+  const given = p.given ?? "Discotest";
+  const family = p.family ?? MARKER_FAMILY;
+  reached(await s.navigate(`${SPA}/patient-registration`, {
+    until: { selector: 'role=textbox[name="First Name"]' }, timeout: SLOW,
+  }), "reach registration");
+  reached(await s.fill('role=textbox[name="First Name"]', given), "first name");
+  reached(await s.fill('role=textbox[name="Family Name"]', family), "family name");
+  await tick(s, `role=radio[name="${p.gender ?? "Female"}"]`, "sex");
+  const [d, m, y] = p.dob ?? ["01", "01", "1990"];
+  reached(await s.fill('role=spinbutton[name="day, Date of birth"]', d), "dob day");
+  reached(await s.fill('role=spinbutton[name="month, Date of birth"]', m), "dob month");
+  reached(await s.fill('role=spinbutton[name="year, Date of birth"]', y), "dob year");
+  reached(await s.fill('role=textbox[name="City/Village (optional)"]', p.city ?? `${MARKER} ${stamp()}`), "city");
+
+  const r = reached(await s.click('role=button[name="Register patient"]', {
+    until: { request: `${REST}/patient/`, landed: true }, timeout: SLOW,
+  }), "register patient");
+  const row = writtenRow(s, `${REST}/patient/`, r.action);
+  const body = written(s, `${REST}/patient/`, r.action);
+  if (!body?.uuid) throw new Error(`registerPatient: no POST /patient response in ${r.action}`);
   return {
-    act: r.act,
-    entries: (body?.results ?? []).map((e: any) => ({
-      patient: e.patient?.person?.display ?? e.display,
-      patientUuid: e.patient?.uuid,
-      queue: e.queue?.display ?? null,
-      status: e.status?.display ?? null,
-      priority: e.priority?.display ?? null,
-      startedAt: e.startedAt ?? null,
-    })),
+    act: r.action, status: row?.status,
+    uuid: body.uuid as string,
+    display: body.display as string,
+    identifier: (body.identifiers ?? []).map((i: Any) => i.display).join(", "),
+    // "CR Number = 1000KTP" -> "1000KTP"; the unique, greppable handle for this run's patient
+    identifierValue: String((body.identifiers ?? [])[0]?.display ?? "").split(/\s*=\s*/).pop() ?? "",
+    given, family,
   };
 }
 
-/** Appointments for a date (default: whatever date the app opens on — today). */
-export async function appointmentsForDate(s: Session) {
-  const r = await openHomeApp(s, "appointments");
-  const body = s.store.latestJson("/ws/rest/v1/appointments?forDate=", r.act) as any;
-  const list = Array.isArray(body) ? body : (body?.results ?? []);
-  return {
-    act: r.act,
-    appointments: list.map((a: any) => ({
-      uuid: a.uuid, patient: a.patient?.name ?? null, service: a.service?.name ?? null,
-      startDateTime: a.startDateTime ?? null, status: a.status ?? null,
-    })),
-  };
+// ---------------------------------------------------------------- 2. start a visit
+
+/**
+ * **Start a visit.** Precondition: on the patient's chart, no active visit.
+ * Steps: banner "Actions" → menuitem "Add visit" → the *Start a visit* workspace →
+ * visit-type radio (js) → "Start visit".
+ * Postcondition: `POST /ws/rest/v1/visit` 201; the banner grows an "Active Visit" pill.
+ * NOTE the default **visit location is not the session location** — this deployment preselects
+ * "Ubuntu Hospital", which is why the patient then does not appear in the Outpatient Clinic queue
+ * until you add them explicitly (workflow 9).
+ */
+export async function startVisit(s: Session, visitType = "Facility Visit") {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  reached(await s.click('role=button[name="Actions"]', { until: { selector: 'role=menuitem[name="Add visit"]' } }), "actions menu");
+  reached(await s.click('role=menuitem[name="Add visit"]', {
+    until: { selector: `role=radio[name="${visitType}"]` }, timeout: SLOW,
+  }), "open start-visit workspace");
+  await tick(s, `role=radio[name="${visitType}"]`, "visit type");
+  const r = reached(await s.click('role=button[name="Start visit"]', {
+    until: { request: `${REST}/visit`, landed: true }, timeout: SLOW,
+  }), "start visit");
+  const body = written(s, `${REST}/visit`, r.action);
+  if (!body?.uuid) throw new Error(`startVisit: no POST /visit response in ${r.action}`);
+  return { act: r.action, visitUuid: body.uuid as string, visitType: body.visitType?.display, location: body.location?.display };
 }
 
-/** Lab orders worklist. `tab` is one of the dashboard's four tabs; this reads "Tests ordered". */
-export async function laboratory(s: Session) {
-  const r = await openHomeApp(s, "laboratory");
-  const body = s.store.latestJson("/ws/rest/v1/order?orderTypes=", r.act) as any;
-  return { act: r.act, orders: (body?.results ?? []) };
+// ---------------------------------------------------------------- 3. record vitals
+
+export type VitalValues = Partial<Record<"Temperature" | "systolic" | "diastolic" | "Pulse" | "Respiration rate" | "Oxygen saturation" | "Weight" | "Height", string>>;
+
+/**
+ * **Record vitals & biometrics.** Precondition: on the chart (an active visit is not required,
+ * but without one the obs land in a visit-less encounter).
+ * Steps: "Record vital signs" → workspace of `spinbutton`s → Notes → "Save and close".
+ * Postcondition: `POST /ws/rest/v1/encounter` 201 carrying one `obs` per filled field.
+ * The field ids are React-generated (`:r5d:-temperature`) and change on every render — address
+ * them by accessible name only.
+ */
+export async function recordVitals(s: Session, values: VitalValues = {}, note = `${MARKER} synthetic vitals ${stamp()}`) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  reached(await s.click('role=button[name="Record vital signs"]', {
+    until: { selector: 'role=spinbutton[name="Temperature"]' }, timeout: SLOW,
+  }), "open vitals workspace");
+  const v: VitalValues = { Temperature: "37.2", systolic: "118", diastolic: "76", Pulse: "72", "Respiration rate": "16", "Oxygen saturation": "98", Weight: "61", Height: "165", ...values };
+  for (const [name, val] of Object.entries(v)) reached(await s.fill(`role=spinbutton[name="${name}"]`, val!), `vitals ${name}`);
+  reached(await s.fill('role=textbox[name="Notes"]', note), "vitals note");
+  const r = reached(await s.click('role=button[name="Save and close"]', {
+    until: { request: `${REST}/encounter`, landed: true }, timeout: SLOW,
+  }), "save vitals");
+  const body = written(s, `${REST}/encounter`, r.action);
+  if (!body?.uuid) throw new Error(`recordVitals: no POST /encounter response in ${r.action}`);
+  return { act: r.action, encounterUuid: body.uuid as string, obsCount: (body.obs ?? []).length, note };
+}
+
+// ---------------------------------------------------------------- 4. add a condition
+
+/**
+ * **Record a condition.** Precondition: on the chart.
+ * Steps: "Record conditions" → type in the concept typeahead → pick the `menuitem` →
+ * onset date (three spinbuttons) → "Save & close".
+ * The typeahead hits `GET /ws/rest/v1/concept?name=<q>&searchType=fuzzy&class=<Diagnosis class>`.
+ * Postcondition: **`POST /ws/fhir2/R4/Condition` 201** — conditions are written through FHIR,
+ * unlike visits/encounters/allergies which are written through REST.
+ * A condition is a coded concept, so the MARKER cannot live in it; it is identifiable by being
+ * attached to a MARKER patient.
+ */
+export async function addCondition(s: Session, concept = "Headache", onset: [string, string, string] = ["15", "08", "2026"]) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  reached(await s.click('role=button[name="Record conditions"]', {
+    until: { selector: 'role=searchbox[name="Enter condition"]' }, timeout: SLOW,
+  }), "open conditions workspace");
+  reached(await s.type('role=searchbox[name="Enter condition"]', concept, {
+    until: { request: `${REST}/concept?name=`, landed: true }, timeout: SLOW,
+  }), "concept search");
+  reached(await s.click(`role=menuitem[name="${concept}"]`, { until: { gone: `role=menuitem[name="${concept}"]` } }), "pick concept");
+  const [d, m, y] = onset;
+  reached(await s.fill('role=spinbutton[name="day, Onset date"]', d), "onset day");
+  reached(await s.fill('role=spinbutton[name="month, Onset date"]', m), "onset month");
+  reached(await s.fill('role=spinbutton[name="year, Onset date"]', y), "onset year");
+  const r = reached(await s.click('role=button[name="Save & close"]', {
+    until: { request: `${FHIR}/Condition`, landed: true }, timeout: SLOW,
+  }), "save condition");
+  const body = written(s, `${FHIR}/Condition`, r.action);
+  if (!body?.id) throw new Error(`addCondition: no POST FHIR Condition response in ${r.action}`);
+  return { act: r.action, conditionId: body.id as string, text: body.code?.coding?.[0]?.display ?? concept };
+}
+
+// ---------------------------------------------------------------- 5. record an allergy
+
+/**
+ * **Record an allergy.** Precondition: on the chart.
+ * Steps: Allergies tab → "Record allergy intolerances" → Allergen combobox (a Carbon
+ * dropdown: click, then pick a `role=option`) → reaction checkbox (js) → severity radio (js)
+ * → Comments (MARKER) → "Save and close".
+ * Postcondition: **`POST /ws/rest/v1/patient/<uuid>/allergy` 201** — the allergy is READ over
+ * FHIR (`AllergyIntolerance`) but WRITTEN over REST. Asymmetric on purpose; do not assume the
+ * read endpoint accepts writes.
+ */
+export async function recordAllergy(s: Session, patientUuid: string, allergen = "ACE inhibitors", reaction = "Rash", severity: "Mild" | "Moderate" | "Severe" = "Mild", comment = `${MARKER} synthetic allergy ${stamp()}`) {
+  await openChartTab(s, patientUuid, "allergies");
+  reached(await s.click('role=button[name="Record allergy intolerances"]', {
+    until: { selector: 'role=combobox[name="Allergen"]' }, timeout: SLOW,
+  }), "open allergy workspace");
+  reached(await s.click('role=combobox[name="Allergen"]', { until: { selector: `role=option[name="${allergen}"]` }, timeout: SLOW }), "open allergen list");
+  reached(await s.click(`role=option[name="${allergen}"]`, { until: { gone: `role=option[name="${allergen}"]` } }), "pick allergen");
+  await tick(s, `role=checkbox[name="${reaction}"]`, "reaction");
+  await tick(s, `role=radio[name="${severity}"]`, "severity");
+  reached(await s.fill('role=textbox[name="Comments"]', comment), "allergy comment");
+  const r = reached(await s.click('role=button[name="Save and close"]', {
+    until: { request: `/allergy`, landed: true }, timeout: SLOW,
+  }), "save allergy");
+  const body = written(s, `/patient/${patientUuid}/allergy`, r.action);
+  if (!body?.uuid) throw new Error(`recordAllergy: no POST allergy response in ${r.action}`);
+  return { act: r.action, allergyUuid: body.uuid as string, display: body.display, comment };
+}
+
+// ---------------------------------------------------------------- 6/7. patient lists
+
+/**
+ * **Create a patient list (cohort).** Precondition: the Patient lists dashboard.
+ * Steps: "New list" → the *New patient list* **workspace** (not a dialog) → List name →
+ * description → "Create list".
+ * Postcondition: `POST /ws/rest/v1/cohortm/cohort/` 201, response carries the new `uuid`.
+ */
+export async function createPatientList(s: Session, name = `${MARKER} list ${stamp()}`, description = `${MARKER} synthetic list created by an automated characterization run`) {
+  await goHome(s);
+  await openHomeApp(s, "Patient lists");
+  reached(await s.click('role=button[name="New list"]', {
+    until: { selector: 'role=textbox[name="List name"]' }, timeout: SLOW,
+  }), "open new-list workspace");
+  reached(await s.fill('role=textbox[name="List name"]', name), "list name");
+  reached(await s.fill('role=textbox[name="Describe the purpose of this list in a few words"]', description), "list description");
+  const r = reached(await s.click('role=button[name="Create list"]', {
+    until: { request: `${REST}/cohortm/cohort/`, landed: true }, timeout: SLOW,
+  }), "create list");
+  const body = written(s, `${REST}/cohortm/cohort/`, r.action);
+  if (!body?.uuid) throw new Error(`createPatientList: no POST cohort response in ${r.action}`);
+  return { act: r.action, cohortUuid: body.uuid as string, name: body.name as string };
+}
+
+/**
+ * **Add the charted patient to a list.** Precondition: on the patient's chart.
+ * Steps: banner "Actions" → "Add to list" → a **Carbon modal** (`role=dialog`, NOT a
+ * workspace) → filter by name → tick the checkbox (js) → "Save".
+ * Postcondition: `POST /ws/rest/v1/cohortm/cohortmember` 201.
+ */
+export async function addPatientToList(s: Session, listName: string) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  reached(await s.click('role=button[name="Actions"]', { until: { selector: 'role=menuitem[name="Add to list"]' } }), "actions menu");
+  reached(await s.click('role=menuitem[name="Add to list"]', {
+    until: { selector: 'role=searchbox[name="Search for a list"]' }, timeout: SLOW,
+  }), "open add-to-list modal");
+  reached(await s.type('role=searchbox[name="Search for a list"]', listName, {
+    until: { selector: `role=checkbox[name="${listName}"]` }, timeout: SLOW,
+  }), "filter lists");
+  await tick(s, `role=checkbox[name="${listName}"]`, "tick list");
+  const r = reached(await s.click('role=button[name="Save"]', {
+    until: { request: `${REST}/cohortm/cohortmember`, landed: true }, timeout: SLOW,
+  }), "add to list");
+  const body = written(s, `${REST}/cohortm/cohortmember`, r.action);
+  if (!body?.uuid) throw new Error(`addPatientToList: no POST cohortmember response in ${r.action}`);
+  return { act: r.action, memberUuid: body.uuid as string };
+}
+
+// ---------------------------------------------------------------- 8. order a lab test
+
+/**
+ * **Order a lab test through the order basket.** Precondition: on the chart, WITH an active
+ * visit (without one the sign step has no visit to attach the encounter to).
+ * Steps: right rail "Order basket" → the Lab-orders **"Add"** (the second Add on the panel) →
+ * search a test type → its "Order form" → Reference number + instructions (MARKER) →
+ * "Save order" (returns to the basket, item flips *Incomplete* → *New*) → "Sign and close".
+ * Postcondition: **`POST /ws/rest/v1/encounter` 201 whose body carries `orders:[{type:"testorder",…}]`** —
+ * signing the basket creates an *encounter that contains the orders*, there is no POST /order.
+ * GOTCHA: "Sign and close" stays `disabled` while any basket item is *Incomplete*; disco
+ * diagnoses that as `disabled` in ~100 ms, which is how this flow was found.
+ */
+export async function orderLabTest(s: Session, test = "Complete blood count", reference = `${MARKER}-REF-${stamp()}`, instructions = `${MARKER} synthetic lab order — automated characterization run`) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
+  reached(await s.click('role=button[name="Order basket"]', {
+    until: { selector: 'role=button[name="Sign and close"]' }, timeout: SLOW,
+  }), "open order basket");
+  reached(await s.click('role=button[name="Add"] >> nth=1', {
+    until: { selector: 'role=searchbox[name="Search for a test type"]' }, timeout: SLOW,
+  }), "add lab order");
+  reached(await s.type('role=searchbox[name="Search for a test type"]', test, {
+    until: { text: `1 result for "${test}"` }, timeout: SLOW,
+  }), "search test type");
+  reached(await s.click('role=button[name="Order form"]', {
+    until: { selector: 'role=textbox[name="Reference number"]' }, timeout: SLOW,
+  }), "open order form");
+  reached(await s.fill('role=textbox[name="Reference number"]', reference), "reference");
+  reached(await s.fill('role=textbox[name="Additional instructions"]', instructions), "instructions");
+  // "Sign and close" is NOT a postcondition here: the basket panel stays mounted behind the
+  // order form, so that button is visible the whole time (already-true). The order form
+  // going away is the thing that is false before and true after.
+  reached(await s.click('role=button[name="Save order"]', {
+    until: { gone: 'role=button[name="Save order"]' }, timeout: SLOW,
+  }), "save order to basket");
+  const r = reached(await s.click('role=button[name="Sign and close"]', {
+    until: { request: `${REST}/encounter`, landed: true }, timeout: SLOW,
+  }), "sign orders");
+  const body = written(s, `${REST}/encounter`, r.action);
+  const order = (body?.orders ?? [])[0];
+  if (!order) throw new Error(`orderLabTest: no order in the POST /encounter response of ${r.action}`);
+  // NOTE the POST response's `orders[]` is a REF representation — uuid/display/type only.
+  // There is no `orderNumber` here; re-read /ws/rest/v1/order to get it (see readOrders).
+  return { act: r.action, encounterUuid: body.uuid as string, orderUuid: order.uuid as string, display: order.display as string };
+}
+
+// ---------------------------------------------------------------- 9. add to a service queue
+
+/**
+ * **Put a patient in a service queue.** Precondition: the patient has an ACTIVE VISIT
+ * (the queue entry hangs off the visit). Start anywhere.
+ * Steps: Service queues dashboard → "Add a patient to this list" → workspace search →
+ * pick the patient card → Queue Location `<select>` (defaults to the session location) →
+ * Service `<select>` → Priority radios (default "Not Urgent") → "Add patient to queue".
+ * Postcondition: **`POST /ws/rest/v1/visit-queue-entry` 201** — one call creates the queue
+ * entry *and* links it to the visit; the request body nests `{visit:{uuid}, queueEntry:{…}}`.
+ * The patient then appears on the Service queues dashboard for that location.
+ */
+export async function addToQueue(s: Session, patientNameOrId: string, service = "Outpatient Triage") {
+  await goHome(s);
+  await openHomeApp(s, "Service queues");
+  reached(await s.click('role=button[name="Add a patient to this list"]', {
+    until: { selector: 'role=searchbox[name="Search for a patient by name or identifier number"]' }, timeout: SLOW,
+  }), "open add-to-queue workspace");
+  reached(await s.type('role=searchbox[name="Search for a patient by name or identifier number"] >> nth=0', patientNameOrId, {
+    until: { request: `${REST}/patient?q=`, landed: true }, timeout: SLOW,
+  }), "queue patient search");
+  reached(await s.click(`role=button[name*="${patientNameOrId}"]`, {
+    until: { selector: `select:has(option:text-is("${service}"))` }, timeout: SLOW,
+  }), "pick patient");
+  reached(await s.select(`select:has(option:text-is("${service}"))`, service, {
+    until: { selector: 'role=radio[name="Not Urgent"]' }, timeout: SLOW,
+  }), "pick service");
+  const r = reached(await s.click('role=button[name="Add patient to queue"]', {
+    until: { request: `${REST}/visit-queue-entry`, landed: true }, timeout: SLOW,
+  }), "add to queue");
+  const row = writtenRow(s, `${REST}/visit-queue-entry`, r.action);
+  if (row?.status !== 201) throw new Error(`addToQueue: POST visit-queue-entry status ${row?.status} in ${r.action}`);
+  return { act: r.action, status: row.status };
+}
+
+// ---------------------------------------------------------------- verification helpers
+// A write step must prove itself by re-reading the SERVER, never by the toast.
+
+/** Re-read one patient's allergies over FHIR, from inside the page (cookie + logged). */
+export async function readAllergies(s: Session, patientUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${FHIR}/AllergyIntolerance?patient=${patientUuid}&_summary=data').then(r=>r.json())`);
+  return (b?.entry ?? []).map((e: Any) => ({ id: e.resource?.id, code: e.resource?.code?.text ?? e.resource?.code?.coding?.[0]?.display, note: e.resource?.note?.[0]?.text }));
+}
+/** Re-read one patient's orders over REST. */
+export async function readOrders(s: Session, patientUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${REST}/order?patient=${patientUuid}&careSetting=6f0c9a92-6f24-11e3-af88-005056821db0&v=custom:(uuid,orderNumber,display,fulfillerStatus,instructions,orderType:(display))').then(r=>r.json())`);
+  return (b?.results ?? []).map((o: Any) => ({ uuid: o.uuid, orderNumber: o.orderNumber, display: o.display, type: o.orderType?.display, instructions: o.instructions }));
+}
+/** Re-read one patient's queue entries over REST. */
+export async function readQueueEntries(s: Session, patientUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${REST}/queue-entry?patient=${patientUuid}&v=custom:(uuid,queue:(display),status:(display),priority:(display),endedAt)').then(r=>r.json())`);
+  return (b?.results ?? []).map((q: Any) => ({ uuid: q.uuid, queue: q.queue?.display, status: q.status?.display, priority: q.priority?.display, endedAt: q.endedAt }));
+}
+/** Re-read a patient's visits over REST. */
+export async function readVisits(s: Session, patientUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${REST}/visit?patient=${patientUuid}&v=custom:(uuid,visitType:(display),startDatetime,stopDatetime,location:(display))').then(r=>r.json())`);
+  return (b?.results ?? []).map((v: Any) => ({ uuid: v.uuid, type: v.visitType?.display, start: v.startDatetime, stop: v.stopDatetime, location: v.location?.display }));
+}
+/** Re-read one encounter's obs over REST (proves the vitals persisted with their values). */
+export async function readEncounterObs(s: Session, encounterUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${REST}/encounter/${encounterUuid}?v=custom:(uuid,encounterDatetime,obs:(uuid,display,concept:(uuid,display),value))').then(r=>r.json())`);
+  return (b?.obs ?? []).map((o: Any) => ({ concept: o.concept?.display, value: o.value, display: o.display }));
+}
+/** Re-read a patient's conditions over FHIR. */
+export async function readConditions(s: Session, patientUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${FHIR}/Condition?patient=${patientUuid}&_count=100&_summary=data').then(r=>r.json())`);
+  return (b?.entry ?? []).map((e: Any) => ({ id: e.resource?.id, text: e.resource?.code?.text ?? e.resource?.code?.coding?.[0]?.display, status: e.resource?.clinicalStatus?.coding?.[0]?.code }));
+}
+/** Re-read a cohort's members over REST. */
+export async function readListMembers(s: Session, cohortUuid: string) {
+  const b: Any = await s.evaluate(`fetch('${REST}/cohortm/cohortmember?cohort=${cohortUuid}&v=full').then(r=>r.json())`);
+  return (b?.results ?? []).map((m: Any) => ({ uuid: m.uuid, patientUuid: m.patient?.uuid, display: m.patient?.display }));
+}
+/** Find every record this pack has ever created on this server (for cleanup). */
+export async function findMarkedRecords(s: Session) {
+  const patients: Any = await s.evaluate(`fetch('${REST}/patient?q=${MARKER_FAMILY}&v=custom:(uuid,display)').then(r=>r.json())`);
+  const cohorts: Any = await s.evaluate(`fetch('${REST}/cohortm/cohort?v=custom:(uuid,name,size)').then(r=>r.json())`);
+  return {
+    patients: (patients?.results ?? []).map((p: Any) => ({ uuid: p.uuid, display: p.display })),
+    lists: (cohorts?.results ?? []).filter((c: Any) => String(c.name).includes(MARKER)).map((c: Any) => ({ uuid: c.uuid, name: c.name, size: c.size })),
+  };
 }

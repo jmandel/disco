@@ -32,6 +32,8 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
   disco screenshot [--out file.jpg]
   disco sql <query> [--json | --wide]          the log (disco schema for the tables); cells clip at 200 chars unless --wide/--json
   disco body <hash-or-prefix>                  a captured body / screenshot blob
+  disco req <request-id>                       one request in full: method, url, status, headers, request body, response body hash
+  disco writes [--run N]                       every non-GET app request of the run (the write inventory)
   disco note <text>                            append to apps/<app>/NOTES.md
   disco record                                 record in the foreground (open already runs one in the background)
   disco pages [--close N | --close-others]     list open pages (* = driven); --page N picks one for any command
@@ -223,6 +225,31 @@ async function main() { switch (cmd) {
     const bytes = st.bytes(h);
     if (bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8) console.log(p);
     else process.stdout.write(st.body(h) + "\n");
+    st.close();
+    break;
+  }
+  case "req": {
+    const id = args._[1]; if (!id) fail("usage: disco req <request-id>  (ids look like r3-41)");
+    const st = openStore(appStoreDir(currentApp()));
+    const r = st.one<any>("SELECT * FROM requests WHERE id=?", id); if (!r) fail(`no request ${id}`);
+    if (json) console.log(JSON.stringify(r, null, 2));
+    else {
+      console.log(`${r.id}  ${r.method} ${r.url}\nstatus ${r.status ?? "—"}  ${r.mime ?? ""}  t_start ${Math.round(r.t_start)}  action ${r.action_id ?? "—"}  body ${r.body_hash ? r.body_hash.slice(0, 16) + " [" + r.body_state + "]" : "(" + r.body_state + ")"}`);
+      console.log("request headers: " + (r.req_headers ?? ""));
+      console.log("request body: " + (r.req_body ?? "(none)"));
+      console.log("response headers: " + (r.resp_headers ?? ""));
+      if (r.body_hash && r.error) console.log("error: " + r.error);
+    }
+    st.close();
+    break;
+  }
+  case "writes": {
+    const st = openStore(appStoreDir(currentApp()));
+    const run = num(args.run) ?? st.one<{ m: number }>("SELECT max(run) m FROM runs")?.m;
+    const rows = st.sql<any>("SELECT id, action_id, method, url, status, substr(req_body,1,120) body FROM requests WHERE run=? AND method NOT IN ('GET','HEAD','OPTIONS') AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", run);
+    if (json) console.log(JSON.stringify(rows, null, 2));
+    else if (!rows.length) console.log(`run ${run}: no writes`);
+    else for (const r of rows) console.log(`${r.id}\t${r.action_id ?? "—"}\t${r.method} ${r.url} ${r.status ?? "…"}${r.body ? "\t" + r.body : ""}`);
     st.close();
     break;
   }

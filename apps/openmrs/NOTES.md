@@ -1,22 +1,134 @@
-# openmrs — notes
+# openmrs — NOTES
 
-Appended by `disco note` / `s.note()`. Distill into README.md when it settles.
+Raw observations in the order they were made, with the act id (run 1) that shows each.
+Distilled into README.md / wire.md; kept here because the act ids are the evidence.
 
-- [run 2 · 77718ms] SHAPE — OpenMRS 3.x (O3) single-page app. Document /openmrs/spa/login is a 3.3 KB shell; everything else is ES-module microfrontends served from /openmrs/spa/openmrs-esm-*-app-<version>/ and configured by GET /openmrs/spa/config-core_demo.json (act:1, body 8fb130b78d5b). All facts travel on two JSON APIs under the same origin: the OpenMRS REST API /openmrs/ws/rest/v1/* and a FHIR R4 facade /openmrs/ws/fhir2/R4/*.
-- [run 2 · 77736ms] AUTH — login is GET /openmrs/ws/rest/v1/session with `Authorization: Basic base64(user:pass)` and `Disable-WWW-Authenticate: true` (that header suppresses the browser's native basic-auth dialog). Response sets `JSESSIONID=...; Path=/openmrs; HttpOnly` (act:5, body 24cd60f44e47). Logout is DELETE on the same URL -> 204 (act:79). Wrong credentials still return HTTP 200 with `authenticated:false` — status code is NOT the signal.
-- [run 2 · 77736ms] LOGIN UI — two screens: textbox 'Username' -> button 'Continue' -> input[type=password] -> button 'Log in' (act:2..act:5). A failed attempt resets the form back to the username screen and raises a [role=status] toast 'Error Invalid username or password' (act:83) which LINGERS; the [role=alert] node on that page is a Carbon text-input counter, permanently present and empty — never anchor on it.
-- [run 2 · 77736ms] LOGIN IS NOT A CREDENTIAL TEST WHEN A COOKIE EXISTS — with a live JSESSIONID the /spa/login page redirects itself to /spa/home after ~1-2 s, so a deliberately wrong password reached the shell (check step 'reject bad credentials' failed with which=shell). Log out first.
-- [run 2 · 77736ms] SHELL — after login the URL is /openmrs/spa/home and immediately becomes /openmrs/spa/home/service-queues. Anchor: nav[aria-label='Left navigation'] a[href$='/home/appointments'] (act:42). Left nav apps: Service queues, Appointments, Patient lists, Laboratory, Wards, Billing. Header: 'Change location' (Outpatient Clinic), 'Search patient', 'Add patient', 'My Account', 'App Menu'.
-- [run 2 · 77736ms] USER MENU LIES — the user-menu panel's contents (Super User / English / Password / Logout) are always in the DOM and always 'visible' to Playwright; the panel is parked off the right edge. until:{selector:"role=button[name='Logout']"} is alreadyTrue and clicking Logout is diagnosed `occluded`. The honest anchor for the open panel is the Carbon class .cds--header-panel--expanded, and the aria diff after clicking 'My Account' is EMPTY (act:130).
-- [run 2 · 77736ms] PATIENT SEARCH — header button 'Search patient' opens an overlay with searchbox 'Search for a patient by name or identifier number' (act:6). Typing hits GET /openmrs/ws/rest/v1/patient?q=<q>&v=custom:(patientId,uuid,identifiers,display,person:(...)) (act:7 / act:91). s.fill is enough (controlled React input). q='1000' -> 10 hits (CR Numbers start 1000), q='Miller' -> 2, q='a' -> 0 (server needs a longer term).
-- [run 2 · 77736ms] PATIENT CHART — /openmrs/spa/patient/<uuid>/chart/<tab>. Anchor: [aria-label='patient banner']. Left nav tabs: patient-summary, vitals-and-biometrics, medications, orders, results, visits, allergies, conditions, immunizations, procedures, attachments, programs, appointments, billing-history, growth-chart (act:9).
-- [run 2 · 77737ms] CHART DATA IS SPLIT ACROSS TWO APIs — FHIR R4 for Patient, Observation (vitals/biometrics), Condition (problem list), AllergyIntolerance, Immunization; REST for order (medications), obstree (results tree), visit/encounter, programenrollment, procedure, attachment, appointments/search, billing/bill (act:30..act:41).
-- [run 2 · 77737ms] CACHE — react-query. patient-summary already fetches Conditions, Vitals, Medications and Visits, so clicking those tabs afterwards issues NO request and an until:{request} expires for its whole budget. Read the body from the log scoped by the patient uuid instead, and keep the request budget short (2.5 s).
-- [run 2 · 77737ms] VISITS TAB issues GET /openmrs//ws/rest/v1/visit?... — note the DOUBLE SLASH after /openmrs (act:33). A path-prefix predicate that assumes one slash will miss it.
-- [run 2 · 77737ms] SERVICE QUEUES — GET /openmrs/ws/rest/v1/queue-entry?... fires TWICE per load (one per dashboard section); the newer response is the empty 'waiting' one, so store.latestJson returns [] while the rows on screen came from the earlier, larger body (act:61: 29 271 B vs 29 B). Pick by body_size, not by recency.
-- [run 2 · 77737ms] PATIENT LISTS = COHORTS — GET /openmrs/ws/rest/v1/cohortm/cohort?v=custom:(uuid,name,description,display,size,...) (act:55). Opening one: /home/patient-lists/<uuid> -> GET cohortm/cohortmember?cohort=<uuid>&startIndex=0&limit=10&v=full (act:57).
-- [run 2 · 77737ms] APPOINTMENTS — GET /openmrs/ws/rest/v1/appointments?forDate=<ISO> for the day view, POST /openmrs/ws/rest/v1/appointments/search for a patient's chart tab, GET /openmrs/ws/rest/v1/appointmentService/all/default for the service list (act:59, act:40).
-- [run 2 · 77737ms] WORKSPACES — the right side rail (Order basket, Visit note, Clinical forms, Task list, Patient lists) opens a panel inside #omrs-workspaces-container. Anchor: '#omrs-workspaces-container [aria-label=\'Workspace header\']' plus the title text. They SURVIVE SPA route changes and stack: four clicks left four containers in the DOM and the aria diff went empty (act:65..act:69). Always close.
-- [run 2 · 77737ms] CHART VIEW WRITES — opening a chart POSTs /openmrs/ws/rest/v1/user/<uuid> to append the patient to the `patientsVisited` user property (act:8). Unavoidable side effect of reading; no clinical record is touched.
-- [run 2 · 77737ms] REGISTRATION — header 'Add patient' -> /openmrs/spa/patient-registration, heading 'Create new patient', button 'Register patient' [disabled] until required fields are filled (act:92). Safe to open, never submitted.
-- [run 2 · 77737ms] SELECTOR — mixing engines in one target needs '>>': "#omrs-workspaces-container role=button[name='Close']" throws 'Unexpected token "=" while parsing css selector'; "#omrs-workspaces-container >> role=button[name='Close']" works.
+- **act:1** `open openmrs https://dev3.openmrs.org/openmrs/spa/login`. The document is an empty shell;
+  `aria` shows only `img "OpenMRS logo"`, `textbox "Username"`, an empty `alert`, `button "Continue"`.
+  Two fetches on load: `config-core_demo.json` and `ws/rest/v1/session` (`authenticated:false`, 129 B,
+  `f4aea521735410bd`). The anonymous session response already sets `JSESSIONID`.
+- **act:2–act:5** Login is two-step: Username → **Continue** (postcondition `input[type=password]`
+  visible, 219 ms) → password → **Log in**. The click lands `GET /ws/rest/v1/session` 200 in 209 ms with
+  `Authorization: Basic YWRtaW46QWRtaW4xMjM=` and the URL becomes `/openmrs/spa/home`.
+  **No login-location picker on this deployment** — the session already had `Outpatient Clinic`.
+- **act:6** `until --until-text "Login Location"` expired (3 s, my probe) — confirms the picker is absent.
+  The URL had meanwhile become `/openmrs/spa/home/service-queues`: **`/spa/home` redirects**.
+- **act:6 aria** Home shell: left nav *Service queues · Appointments · Laboratory · Patient lists ·
+  Wards · Billing*; header *Change location (Outpatient Clinic) · Search patient · Implementer Tools ·
+  Add patient · My Account · App Menu*. Main pane = the service-queues dashboard (Avg. wait time,
+  Waiting 0, Attending 14, then patient cards linking to `/patient/<uuid>/chart`).
+- **act:7** `click "Search patient"` — opens a header searchbox named *"Search for a patient by name or
+  identifier number"* plus "10 recent search results". The 19-request wire block is **ambient**: the
+  queue table lazily fetching `patient/<uuid>`, `obs?patient=…` per row.
+- **act:8** `type "Miller"` into `role=searchbox` — **matched 2 elements** (the header box and the
+  table's "Filter table" box); disco used the first and said so (`report.matches`). Debounced:
+  one `GET /ws/rest/v1/patient?q=Miller&v=custom:(…)` 200, 7.1 K, `744d661942874dd9` → 2 hits
+  (Barbara Miller `32351061-…`, Emmawas Miller `e22dd80b-…`).
+- **act:9** click the result link → `/patient/<uuid>/chart/`, which self-redirects to
+  `/chart/patient-summary`. The click also fires **`POST /ws/rest/v1/user/<uuid>?v=custom:(userProperties)`** —
+  the app persisting "recently viewed patients". The only write this pack causes.
+- **act:10 aria** Chart left nav (15 tabs): Patient summary, Vitals & Biometrics, Medications, Orders,
+  Results, Visits, Allergies, Conditions, Immunizations, Procedures, Attachments, Programs,
+  Appointments, Billing history, Growth chart. Right rail = workspace launchers: Order basket,
+  Visit note, Clinical forms, Task list, Patient lists. `banner "patient banner"` is the chart anchor.
+- **act:11–act:21** One click per chart tab; each tab has exactly one endpoint family (table in
+  README §4 / wire.md). Highlights:
+  - vitals fires **three** `fhir2/R4/Observation?subject:Patient=…` reads with different `code=` sets;
+  - visits builds `https://dev3.openmrs.org/openmrs**//**ws/rest/v1/visit?...` (double slash) and pulls
+    259 K + 227 K of encounters;
+  - appointments is **`POST /ws/rest/v1/appointments/search`** — a read as a POST;
+  - medications/allergies/immunizations/programs/attachments are all empty for this patient and all
+    return the same 14-byte body `{"results":[]}` (`5021e624e752b001`).
+- **act:23–act:28** The six home dashboards, one endpoint family each (wire.md). Laboratory issues the
+  same `order?orderTypes=52a447d3…` **seven times** (one per tab/filter) on a single route change.
+- **act:29** App Menu → four more apps: Dispensing `/spa/dispensing`, System Administration
+  `/spa/system-administration`, Fast Data Entry `/spa/forms`, Queue screen `/spa/home/service-queues/screen`.
+- **act:31–act:33** Patient lists = OpenMRS *cohorts*. `cohortm/cohort` for the lists, tabs
+  (Starred/System/My/All) are a client-side filter. Opening a list navigates to
+  `/home/patient-lists/<uuid>` and fetches `cohortm/cohort/<uuid>` + `cohortm/cohortmember?cohort=…`.
+  **Gotcha found here:** `until: { selector: "table" }` resolved in ~1 s on a *loading skeleton* — a real
+  `<table>` with empty cells and `<h1>--`. The data arrived seconds later.
+- **act:35** `navigate` straight to `/chart/patient-summary` with
+  `until: { request: "/fhir2/R4/Patient/", landed: true }` — clean, 1.4 K FHIR Patient, `b4fa32d17bce1b9a`.
+- **act:36** `click "Clinical forms"` opens the workspace side panel; fetches
+  `rest/v1/form?v=custom:(…)` → **17 forms** (Covid 19, ERU Intake Form, Fit to Fly Certificate,
+  Laboratory Test Results, Mental Health Assessment Form, …) and `rest/v1/encounter?v=…`.
+- **act:37** patient-banner **Actions** menu = the write surface: Add to list · Edit patient details ·
+  Add visit · End active visit · Mark patient deceased · Delete active visit. Not used.
+- **`disco eval` probes (requests `r1-981`, `r1-982`, `action_id IS NULL`)**
+  `fetch('/openmrs/ws/rest/v1/session', {headers:{Authorization:'Basic '+btoa('admin:definitely-wrong')}})`
+  → **200**, and the body still says `authenticated:true, user:admin`: with a valid `JSESSIONID` the
+  server ignores the bad header entirely. **`/session` is never a status-code check.**
+- **Navigating to `/openmrs/spa/login` while authenticated does NOT redirect to home** — the form is
+  shown again. That is what makes `login()` idempotent from any state.
+- **Cold `run-check` failures that taught the real predicates** (both correctly refused by `reached()`):
+  1. `openHomeApp("Service queues")` with a `{ url: "/home/service-queues" }` arm → *"until route was
+     already true before the action"*, because `/spa/home` had already redirected there.
+  2. `openChartTab("conditions")` with a `role=heading[name="Conditions"]` arm → *already true*, because
+     the patient-summary dashboard renders a card with that heading.
+- **SWR caching, measured:** with the Condition bundle already fetched by patient-summary, clicking the
+  Conditions tab issues **no request**, and a `{ request }` predicate burned its whole 20 s budget
+  (step time 20 957 ms). Probing the log first and dropping the budget to 4 s took it to 4 588 ms.
+
+---
+
+# Pass 2 — the write side (run 6)
+
+Stance changed: the demo's synthetic data may be written to. Everything created carries the marker
+`DISCOTEST` / family name `Zzdiscotest`. The patient created while exploring is
+**`ba9fe922-75a1-4037-bc45-161b2825efec` — "Discotest Zzdiscotest", CR Number `1000KTP`**; the list is
+**`3d34c597-69c1-4f91-80ed-be481b190948` — "DISCOTEST list 2026-09-01"**. Every `run-check` since adds
+one more of each.
+
+- **act:246** header "Add patient" → `/openmrs/spa/patient-registration`. A three-section form
+  (Basic Info / Contact Details / Relationships) with a sticky "Register patient". Required: First
+  Name, Family Name, Sex, Date of birth. The identifier is *Auto-generated*.
+- **act:249 — the single most useful failure of the pass.**
+  `reached(s.click('role=radio[name="Female"]'))` →
+  `occluded — role=radio[name="Female"] is covered by span.cds--radio-button__appearance`.
+  That is **Carbon Design System**, not a modal: the real `<input>` is hidden under a styled span.
+  `{ js: true }` fixes every radio and checkbox in the app (act:250, 260, 285, 286, 298).
+  disco named the covering element, which is what turned a guess into a rule.
+- **act:255 register.** Two POSTs: `idgen/identifiersource/<uuid>/identifier` (201, body `{}`, returns
+  `{"identifier":"1000KTP"}`) then `patient/` (201). **The client mints the patient/person uuid** and
+  posts it. Lands on the new chart with a snackbar "New Patient Created".
+- **act:258–261 start a visit.** Actions → Add visit → a workspace with `New / Ongoing / In the past`
+  tabs, a Visit location combobox **pre-set to "Ubuntu Hospital"** (not the session's Outpatient
+  Clinic), five visit types as radios, and a Billing details section.
+  `POST /ws/rest/v1/visit` 201 with `{visitType, location, startDatetime:null, patient}`.
+- **act:262–272 vitals.** "Record vital signs" → a workspace of `spinbutton`s whose input ids are
+  React-generated (`:r5d:-temperature`) — accessible names only. `POST /encounter` 201 with **one obs
+  per filled field keyed by concept uuid**; the free-text Notes field is concept `165095AAAA…` and is
+  where the marker lives.
+- **act:273–279 condition.** Typeahead → `GET /ws/rest/v1/concept?name=Headache&searchType=fuzzy&class=8d4918b0-…`
+  (Diagnosis class). Save posts a **FHIR resource**: `POST /ws/fhir2/R4/Condition` 201.
+- **act:281–288 allergy.** Read is FHIR, **write is REST**: `POST /ws/rest/v1/patient/<uuid>/allergy` 201.
+  Allergen is a Carbon combobox (click → `role=option` → click); reactions are checkboxes; severity radios.
+- **act:290–293 new patient list.** "New list" opens a **workspace**, not a dialog — my `role=dialog`
+  predicate burned 10 s. `POST /ws/rest/v1/cohortm/cohort/` 201; `cohortType:""` is accepted and comes
+  back `null`.
+- **act:296–299 add to list.** "Add to list" opens a **Carbon modal** (`role=dialog`) — my
+  `role=banner[name="Workspace header"]` predicate burned 15 s. So the app has *both* overlay kinds and
+  they are not interchangeable. The picker paginates at 5; filter by name instead.
+  `POST /ws/rest/v1/cohortm/cohortmember` 201.
+- **act:300–309 order basket.** Right rail → basket with two sections (Drug orders, Lab orders), each
+  with its own "Add" (`role=button[name="Add"] >> nth=1` is Lab). Search → "Order form" → Reference
+  number + instructions → "Save order" → "Sign and close".
+  **act:304 taught the flow:** clicking "Sign and close" with an *Incomplete* basket item returned
+  `disabled — role=button[name="Sign and close"] is disabled` in ~100 ms. Filling the order form flips
+  the item to *New* and enables it.
+  Signing POSTs an **encounter that contains the orders** — there is no `POST /order`. The response's
+  `orders[]` is a ref (no `orderNumber`); the number needs a re-read of `/ws/rest/v1/order`.
+- **act:311–315 service queue.** "Add a patient to this list" → workspace search (the patient did NOT
+  appear under "Checked in patients" because their visit is at Ubuntu Hospital) → pick the card →
+  Queue Location `<select>` (defaults to the session location) → Service `<select>` → Priority radios
+  → "Add patient to queue". `POST /ws/rest/v1/visit-queue-entry` 201, body nesting
+  `{visit:{uuid}, queueEntry:{…}}`.
+- **All ten writes returned 201**, first time, no retries:
+  `SELECT action_id, method, path, status FROM requests WHERE run=6 AND method='POST'`.
+- **Two `alreadyTrue` refusals in the write pass**, both correct and both about a control that never
+  goes away: `role=button[name="Sign and close"]` is visible behind the order form for the whole flow.
+  `{ gone: role=button[name="Save order"] }` is the predicate that actually changes.
+- **`latestJson` is the wrong reader for a write.** After a successful POST the app navigates, and the
+  GETs it fires land in the same act window — so the "newest body for this family" is a read.
+  `lib.ts` reads the POST row explicitly: `s.store.requests({ url, method: "POST", action, run })`.

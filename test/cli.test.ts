@@ -50,8 +50,17 @@ describe("cli", () => {
     assert.equal(ev.code, 0, ev.out); assert.match(ev.out, /^200\n/); assert.match(ev.out, /act:\d+ evaluate/); assert.match(ev.out, /GET \/api\/chart\/a 200/);
     const wide = disco("sql", "SELECT body_hash || body_hash || body_hash || body_hash h FROM requests WHERE body_hash IS NOT NULL LIMIT 1", "--wide");
     assert.ok(wide.stdout.trim().split("\n").at(-1)!.length >= 256, wide.out);
+    const w = disco("writes");
+    assert.match(w.out, /run 1: no writes|POST/);
+    const ev2 = disco("eval", "fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.status)", "--until-request", "/api/save");
+    assert.equal(ev2.code, 0, ev2.out);
+    const w2 = disco("writes");
+    assert.match(w2.out, /r1-\d+\tact:\d+\tPOST .*\/api\/save 202/);
+    const rid = w2.stdout.match(/^(r1-\d+)/m)![1];
+    const rq = disco("req", rid);
+    assert.match(rq.out, /POST http.*\/api\/save/); assert.match(rq.out, /request body: \{\}/);
     const q = disco("sql", "SELECT count(*) n FROM actions");
-    assert.match(q.out, /\n6/);
+    assert.match(q.out, /\n7/);
     const n = disco("note", "hello from the cli");
     assert.equal(n.code, 0, n.out);
     assert.ok(existsSync(join(appsDir, "c", "NOTES.md")));

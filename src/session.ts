@@ -38,7 +38,7 @@ export type Pred =
   | { gone: string; frame?: string; label?: string }                          // an element is hidden or detached
   | { text: string; label?: string }                                          // visible text anywhere on the page
   | { url: string | RegExp; label?: string }                                  // string: URL without its query contains it (with it, if the string has a '?'); RegExp: whole href
-  | { request: string | RegExp; landed?: boolean; label?: string }            // a response whose URL contains / matches arrives (landed: its body finished too — bounded at 1 s past the headers)
+  | { request: string | RegExp; method?: string; landed?: boolean; label?: string }   // a response whose URL contains / matches (and whose method matches, if given) arrives; landed: its body finished too — bounded at 1 s past the headers
   | { fn: string | ((arg: any) => unknown); arg?: unknown; label?: string }   // page.waitForFunction
   | { page: string | RegExp; label?: string }                                 // a new page (popup) opens whose URL contains / matches
   | { ws: string | RegExp; dir?: "in" | "out"; label?: string }               // a WebSocket frame (received by default) whose payload contains / matches
@@ -159,6 +159,12 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
   return s;
 }
 
+/** open → fn → close, whatever happens. A script that forgets `close()` never exits; this one cannot forget. */
+export async function withApp<T>(app: string, opts: OpenOptions, fn: (s: Session) => Promise<T>): Promise<T> {
+  const s = await open(app, opts);
+  try { return await fn(s); } finally { await s.close(); }
+}
+
 export class Session {
   private currentAction: string | null = null;
   private recorder: Recorder;
@@ -240,7 +246,7 @@ export class Session {
     let loc = base.locator(selector ?? "body").first();
     // a bare word that is an ARIA role ("banner", "navigation", "dialog") — the words aria itself prints — means role=
     if (selector && /^[a-z]+$/.test(selector) && (await loc.count()) === 0) { const byRole = base.locator(`role=${selector}`).first(); if ((await byRole.count()) > 0) loc = byRole; }
-    if (selector && (await loc.count()) === 0) throw new Error(`aria: no element matches ${selector}${o.frame ? ` in ${o.frame}` : ""} (a css/role selector, or a bare role name such as "banner")`);
+    if (selector && (await loc.count()) === 0) { const c = await this.candidates(o.frame); throw new Error(`aria: no element matches ${selector}${o.frame ? ` in ${o.frame}` : ""} (a css/role selector, or a bare role name such as "banner"). Visible controls: ${c.slice(0, 10).join(", ")}${c.length > 10 ? ", …" : ""}`); }
     return loc.ariaSnapshot({ timeout: this.timeouts.action });
   }
 
@@ -299,7 +305,7 @@ export class Session {
       else if (spec.kind !== "noop" && spec.kind !== "navigate" && spec.kind !== "scroll" && !(spec.kind === "press" && !spec.target)) {
         const r = await this.resolve(spec);
         if ("diagnosis" in r) { ok = false; diagnosis = r.diagnosis; }
-        else { matches = r.matches; await this.perform(spec, r.locator); }
+        else { matches = r.matches; await this.perform(spec, r.locator, r.force); }
       } else await this.perform(spec, null);
       if (armLate && spec.until) armed = this.arm(spec.until, untilBudget);
     } catch (e) {
@@ -353,7 +359,7 @@ export class Session {
     return { requests, static: { count, types } };
   }
 
-  private async resolve(spec: ActSpec): Promise<{ locator: Locator; matches: number } | { diagnosis: Diagnosis }> {
+  private async resolve(spec: ActSpec): Promise<{ locator: Locator; matches: number; force?: boolean } | { diagnosis: Diagnosis }> {
     const base = this.base(spec.frame);
     const loc = typeof spec.target === "string" ? base.locator(spec.target) : spec.target!;
     const targetText = typeof spec.target === "string" ? spec.target : String(spec.target);
@@ -368,6 +374,17 @@ export class Session {
     const detached = () => this.finish({ reason: "detached", message: `${targetText} was replaced while being checked — the app re-renders it continuously; try { js: true } (a dispatched click event)`, target: targetText, matches: count });
     if (!(await el.isVisible())) {
       if (!(await el.evaluate((n: Element) => n.isConnected).catch(() => false))) return { diagnosis: await detached() };
+      // a visually-hidden checkbox/radio with a visible <label> is a styled control: the label is what a user clicks
+      if (spec.kind === "click") {
+        const labelSel = await el.evaluate((n: Element) => {
+          if (!(n instanceof HTMLInputElement) || !["checkbox", "radio"].includes(n.type)) return null;
+          const lbl = n.closest("label") || (n.id ? document.querySelector(`label[for="${CSS.escape(n.id)}"]`) : null);
+          if (!lbl) return null;
+          if (!lbl.id) lbl.setAttribute("data-disco-label", String(Date.now()));
+          return lbl.id ? `#${CSS.escape(lbl.id)}` : `label[data-disco-label="${lbl.getAttribute("data-disco-label")}"]`;
+        }).catch(() => null);
+        if (labelSel) { const lbl = this.base(spec.frame).locator(labelSel).first(); if (await lbl.isVisible()) return { locator: lbl, matches: count, force: true }; }
+      }
       return { diagnosis: await this.finish({ reason: "hidden", message: `${targetText} exists but is not visible`, target: targetText, matches: count }) };
     }
     if ((spec.kind === "click" || spec.kind === "dblclick" || spec.kind === "fill" || spec.kind === "type" || spec.kind === "select") && !(await el.isEnabled()))
@@ -387,20 +404,24 @@ export class Session {
         let h = document.elementFromPoint(x, y);
         while (h && h.shadowRoot) { const inner = h.shadowRoot.elementFromPoint(x, y); if (!inner || inner === h) break; h = inner; }
         if (!h || node.contains(h) || h.contains(node)) return null;
+        // a styled checkbox/radio/switch: the real input is hidden under a visual that lives in the same <label> (or a label[for]) — that is the control, not an occluder
+        const label = node.closest("label") || (node.id ? document.querySelector(`label[for="${CSS.escape(node.id)}"]`) : null);
+        if (label && (label.contains(h) || h === label)) return { styled: d(h) };
         return { over: d(h) };
       }, spec.position ?? null).catch((e: Error) => (/detached|not attached|not connected/i.test(String(e?.message)) ? { detached: true } : null));
       if (hit && "detached" in hit) return { diagnosis: await detached() };
       if (hit?.offscreen) return { diagnosis: await this.finish({ reason: "offscreen", message: `${targetText} is outside the viewport ${hit.offscreen} — scroll the page so it is visible, or click with { js: true } if its handler is delegated`, target: targetText, matches: count }) };
       if (hit?.noPointer) return { diagnosis: await this.finish({ reason: "unclickable", message: `${targetText} ignores the mouse (pointer-events: none on ${hit.noPointer}) — the app wants the keyboard (type / ArrowDown / Enter), or { js: true }`, target: targetText, matches: count }) };
+      if (hit?.styled) return { locator: el, matches: count, force: true };
       if (hit?.over) return { diagnosis: await this.finish({ reason: "occluded", message: `${targetText} is covered by ${hit.over}`, target: targetText, matches: count, over: hit.over }) };
     }
     return { locator: el, matches: count };
   }
 
-  private async perform(spec: ActSpec, el: Locator | null): Promise<void> {
+  private async perform(spec: ActSpec, el: Locator | null, force = false): Promise<void> {
     const T = this.timeouts;
     switch (spec.kind) {
-      case "click": if (spec.js) await el!.dispatchEvent("click", undefined, { timeout: T.action }); else await el!.click({ timeout: T.action, button: spec.button, position: spec.position }); break;
+      case "click": if (spec.js) await el!.dispatchEvent("click", undefined, { timeout: T.action }); else await el!.click({ timeout: T.action, button: spec.button, position: spec.position, force }); break;
       case "drag": {
         const to = spec.to;
         if (to && typeof to === "object" && "dx" in to) {
@@ -460,8 +481,8 @@ export class Session {
     const walk = (p: Pred) => {
       if ("any" in p) p.any.forEach(walk); else if ("all" in p) p.all.forEach(walk);
       else if ("request" in p) {
-        const rows = this.log.all<any>("SELECT id, t_start, status, url FROM requests WHERE run=? AND t_start>=? ORDER BY t_start", this.log.run, t0 - 1)
-          .filter((r) => typeof p.request === "string" ? r.url.includes(p.request) : p.request.test(r.url));
+        const rows = this.log.all<any>("SELECT id, t_start, status, url, method FROM requests WHERE run=? AND t_start>=? ORDER BY t_start", this.log.run, t0 - 1)
+          .filter((r) => (typeof p.request === "string" ? r.url.includes(p.request) : p.request.test(r.url)) && (!p.method || r.method.toUpperCase() === p.method.toUpperCase()));
         notes.push(rows.length === 0 ? `no request matching ${String(p.request)} was issued during the wait` : `${rows.length} matching request(s) issued (${rows.map((r) => `${r.id} status ${r.status ?? "none yet"}`).join(", ")})`);
         if (rows.length === 0) {
           const arrived = this.log.all<any>("SELECT method, url, status, resource_type FROM requests WHERE run=? AND t_start>=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start LIMIT 9", this.log.run, t0 - 1);
@@ -553,7 +574,8 @@ export class Session {
     if ("url" in pred) { const u = pred.url; return done(this.page.waitForURL((x) => urlMatches(u, x.href), { timeout, waitUntil: "commit" })); }
     if ("request" in pred) {
       const r = pred.request; const match = (url: string) => (typeof r === "string" ? url.includes(r) : r.test(url));
-      return done(this.page.waitForResponse((res) => match(res.url()), { timeout }).then(async (res) => {
+      const wantMethod = pred.method?.toUpperCase();
+      return done(this.page.waitForResponse((res) => match(res.url()) && (!wantMethod || res.request().method().toUpperCase() === wantMethod), { timeout }).then(async (res) => {
         ctx.request = this.recorder.idOf(res.request());
         // a body the page never reads never "finishes" in Chromium (and cannot be fetched at all), so landed waits at most 1 s past the headers
         if (pred.landed) await Promise.race([res.finished(), new Promise((r) => setTimeout(r, LANDED_BOUND_MS))]);
@@ -590,7 +612,7 @@ export function describe(p: Pred): string {
   if ("gone" in p) return "gone " + p.gone;
   if ("text" in p) return `text "${p.text}"`;
   if ("url" in p) return "url " + String(p.url);
-  if ("request" in p) return "request " + String(p.request) + (p.landed ? " landed" : "");
+  if ("request" in p) return "request " + (p.method ? p.method.toUpperCase() + " " : "") + String(p.request) + (p.landed ? " landed" : "");
   if ("fn" in p) return "fn " + (typeof p.fn === "string" ? p.fn : p.fn.name || "…").slice(0, 60);
   if ("page" in p) return "page " + String(p.page);
   if ("ws" in p) return "ws " + (p.dir === "out" ? "sent " : "") + String(p.ws);

@@ -89,6 +89,9 @@ console.log(me.name);
 await s.close();                                     // disconnect; the browser stays up
 ```
 
+A script that never reaches `close()` never exits (the browser connection keeps Node alive). Wrap probes
+in `withApp(app, opts, async (s) => { … })`, which closes whatever happens.
+
 `reached(report)` throws with the diagnosis unless the action was performed *and* its `until` held.
 Everything else is the report, returned as data; `formatReport(report)` renders it as the text the CLI prints —
 log it while exploring. When either outcome is fine — an interstitial that may or may not appear — don't
@@ -232,7 +235,7 @@ that fires during your window is in your report; you will recognise it because i
 | `not-found` | nothing matched, even after 1 s | read `candidates` — visible controls as selectors that paste, `role=button[name="Search patient"] (#id)`; `:has-text()` cannot match an icon button's accessible name, `role=…[name=…]` can. If the element appears later, act with an `until` on the *previous* step; if you don't recognise the screen, `s.aria()` |
 | `hidden` | matched, not visible | it is rendered but collapsed/off-screen/`display:none`; open the thing that reveals it |
 | `disabled` | matched, disabled | the form is not ready; wait for what enables it (`until: { fn }` on `!el.disabled` is fine) |
-| `occluded` | another element is under the pointer (`over`) | usually a dialog — `dialogs` lists open ones; dismiss it, then retry |
+| `occluded` | another element is under the pointer (`over`) | a dialog (`dialogs` lists open ones — dismiss it), a toast, a sticky header. A styled checkbox/radio whose real input hides under a visual in its own `<label>` is *not* occluded — disco clicks through those |
 | `offscreen` | the element is outside the viewport and cannot be scrolled to: fixed menus opened near the bottom, slide-out panels parked at `left: 100vw` — such elements still count as *visible* | open whatever slides it in and wait for that; scroll the page; or `{ js: true }` when its handler is delegated |
 | `unclickable` | the element or an ancestor has `pointer-events: none` | it is a keyboard widget: `type` / `press("ArrowDown")` / `press("Enter")`; or `{ js: true }` |
 | `detached` | the element was replaced while Playwright was clicking it | the app re-renders it continuously (on hover, on a timer): `s.click(target, { js: true })` |
@@ -250,7 +253,7 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 | `{ gone: selector, frame? }` | no visible match | a spinner, a modal, a "loading" row |
 | `{ text }` | visible text anywhere | when you only know the words |
 | `{ url }` | a string: the URL *without its query string* contains it (a string containing `?` matches the whole href); a RegExp: tests the whole href | navigations, logins, route changes. The query-string rule exists because `login?next=/account` contains `/account`. `{ url: "/" }` is always true — for "back to the shell", wait on the shell's element |
-| `{ request, landed? }` | a response arrives whose URL contains / matches — i.e. the status is known. `landed`: its body finished too, so `latestJson` is safe; waits at most 1 s past the headers | the fact you need travels on the wire; API-first apps; anything a spinner lies about |
+| `{ request, method?, landed? }` | a response arrives whose URL contains / matches (and whose method is `method`, when one path serves both a read and a write) — i.e. the status is known. `landed`: its body finished too, so `latestJson` is safe; waits at most 1 s past the headers | the fact you need travels on the wire; API-first apps; anything a spinner lies about |
 | `{ fn, arg? }` | `page.waitForFunction` returns truthy | everything else: `"document.querySelector('#x')?.dataset.state === 'ready'"` |
 | `{ any: [...] }` | the first arm that holds; `until.which` names it (`label` or its description) | success **or** the app's own failure: `any: [ok, errorBanner]` |
 | `{ page }` | a new page (popup, `window.open`) opens whose URL contains / matches | child windows, print views, documents |
@@ -293,6 +296,7 @@ Wrap every step of a workflow in it and failures explain themselves.
 | `s.closeOtherPages()` | close every page but the driven one (popups left by earlier scripts) |
 | `s.uiIgnore` | strings/RegExps; aria-diff lines containing them are dropped from every report (live counters, clocks). Also `open(app, { uiIgnore })` |
 | `s.close({ browser? })` | disconnect; `browser: true` also kills a browser disco launched (an attached one is only forgotten) |
+| `withApp(app, opts, fn)` | `open` → `fn(s)` → `close` in a `finally` |
 | `formatReport(report)` | the report as the CLI prints it |
 
 ### The log
@@ -305,6 +309,7 @@ const st = openApp("shop");                       // read-only; same object as s
 st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[] — every requests column: id, run, t_start, t_response, t_end, method, url, host, path, resource_type, frame_url, req_headers, req_body, status, mime, resp_headers, body_hash, body_size, body_state, error, action_id
 st.latestJson("/api/me", "act:9");                 // parsed body of the newest matching response — scope it to the act whose report showed it
 st.jsonAll("/api/queue-entry", "act:9");         // every body for that family in that act — when a screen calls one endpoint twice, pick by shape
+st.latestJson("/encounter", { action: "act:12", method: "POST" });   // read back a WRITE: the app fires newer GETs after a save, so filter by method
 st.json(hash) · st.body(hash) · st.bytes(hash)     // a body by hash or 16-char prefix
 st.action("act:9")                                 // the stored row, report parsed
 st.sql("SELECT … WHERE path=? AND status=?", "/api/me", 200)   // anything, with bind arguments
@@ -362,7 +367,7 @@ open, or `./disco open` first.
 ./disco until [until…]           until…: --until-selector S [--visible] | --until-gone S | --until-text T
                                          --until-url U | --until-request R [--landed] | --until-fn JS   (repeat → any-of)  --timeout MS
 ./disco aria [<selector> | <role>]  ./disco eval <js>   (an act)        ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json | --wide]
-./disco body <hash>   (text bodies print; a screenshot prints its file path)
+./disco body <hash>   (text bodies print; a screenshot prints its file path)   ./disco req <request-id>   ./disco writes [--run N]
 ./disco note <text>              ./disco record   (foreground; open already runs one)
 ```
 
@@ -424,6 +429,13 @@ of each screen (URL + one specific element) into the README as you find it, and 
 postcondition as an `until`. Facts come from the wire whenever they travel on it: the list behind a
 virtualised table, the record behind a form, the outcome behind an optimistic "Saved ✓" (`{ request:
 "/api/save/status" }`, then the status on the wire line — the body only if the page reads it).
+
+**Writing.** Under a read-only stance the `writes:` line of every report is the tripwire; `./disco writes`
+lists the run's write inventory. When writes are allowed: a form may open as a side panel, a modal, or
+inline — anchor the postcondition on a *field of the form*, never on the chrome around it; a save is a
+`{ request, method: "POST" }`; verify the effect with an independent read (`s.probe("fetch(…)")` of the
+record you just wrote, which also shows fields the save's echo omits); read the request body back with
+`./disco req <id>`; mark everything you create so it can be found and removed.
 
 **Interstitials.** Dialogs that appear for some records and not others are normal (allergy reviews,
 "what's new", session warnings). Make them optional both ways: `until: { any: [{ selector: nextScreen,

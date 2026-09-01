@@ -262,14 +262,16 @@ export function openStore(dir: string, opts: { readonly?: boolean } = {}) {
       if (f.since !== undefined) { w.push("t_start>=?"); a.push(f.since); }
       return sql<RequestRow>(`SELECT * FROM requests ${w.length ? "WHERE " + w.join(" AND ") : ""} ORDER BY run, t_start`, ...a);
     },
-    /** The latest JSON body whose URL contains `urlPart` (optionally within an action). */
-    latestJson<T = any>(urlPart: string, action?: string): T | null {
-      const r = api.requests({ url: urlPart, action }).filter((x) => x.body_hash).at(-1);
+    /** The latest JSON body whose URL contains `urlPart` — within an action and/or of one method: `latestJson("/encounter", { action, method: "POST" })` reads back a write even when the app fired newer GETs afterwards. */
+    latestJson<T = any>(urlPart: string, scope?: string | { action?: string; method?: string }): T | null {
+      const f = typeof scope === "string" ? { action: scope } : (scope ?? {});
+      const r = api.requests({ url: urlPart, action: f.action, method: f.method }).filter((x) => x.body_hash).at(-1);
       return r ? api.json<T>(r.body_hash!) : null;
     },
     /** Every JSON body whose URL contains `urlPart` (optionally within an action), oldest first — when one screen calls one endpoint twice, pick by shape, not by recency. */
-    jsonAll<T = any>(urlPart: string, action?: string): T[] {
-      return api.requests({ url: urlPart, action }).filter((x) => x.body_hash).map((x) => { try { return api.json<T>(x.body_hash!); } catch { return null as any; } }).filter((x) => x !== null);
+    jsonAll<T = any>(urlPart: string, scope?: string | { action?: string; method?: string }): T[] {
+      const f = typeof scope === "string" ? { action: scope } : (scope ?? {});
+      return api.requests({ url: urlPart, action: f.action, method: f.method }).filter((x) => x.body_hash).map((x) => { try { return api.json<T>(x.body_hash!); } catch { return null as any; } }).filter((x) => x !== null);
     },
     /** The stored action row with its report parsed. */
     action(id: string): any | null { const r = one<any>("SELECT * FROM actions WHERE id=?", id); if (r?.report) r.report = JSON.parse(r.report); return r; },
