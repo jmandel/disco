@@ -150,8 +150,17 @@ export class Session {
   constructor(app: string, dir: string, store: Store, browser: Browser, context: BrowserContext, page: Page, info: BrowserInfo, recording: boolean) {
     this.app = app; this.dir = dir; this.#store = store; this.browser = browser; this.context = context; this.page = page; this.#info = info; this.#recording = recording; this.run = store.run;
     page.setDefaultTimeout(DEFAULT_MAX);
-    if (recording) store.update("requests", { body_state: "missing", error: "body not read by the page" }, "body_state='pending' AND status IS NOT NULL AND t_response < ?", [store.now() - 1500]);
     this.#recorder = attachRecorder(context, store, () => this.#current, "accept", { silent: !recording });
+    if (recording) this.#claimRecorder();
+  }
+  /** Exactly one process records a browser (two would collide on request ids): claim it in browser.json, or go silent if another process won. */
+  #claimRecorder(): void {
+    const dir = this.#store.dir;
+    const cur = readBrowserInfo(dir) ?? this.#info;
+    if (pidAlive(cur.recorderPid) && cur.recorderPid !== process.pid) { this.#recording = false; this.#recorder.setSilent(true); return; }
+    writeBrowserInfo(dir, { ...cur, recorderPid: process.pid });
+    this.#recording = true; this.#recorder.setSilent(false);
+    this.#store.update("requests", { body_state: "missing", error: "body not read by the page" }, "body_state='pending' AND status IS NOT NULL AND t_response < ?", [this.#store.now() - 1500]);
   }
   /** @internal */ static _ready(s: Session): Promise<void> { return s.#recorder.ready; }
 
@@ -159,8 +168,13 @@ export class Session {
   async close(o: { browser?: boolean } = {}): Promise<void> {
     await this.#recorder.flush(500);
     this.#recorder.detach();
-    if (this.#recording) this.#store.update("requests", { body_state: "missing", error: "body not read by the page (session closed)" }, "run=? AND body_state='pending' AND status IS NOT NULL", [this.#store.run]);
+    if (this.#recording) {
+      this.#store.update("requests", { body_state: "missing", error: "body not read by the page (session closed)" }, "run=? AND body_state='pending' AND status IS NOT NULL", [this.#store.run]);
+      // a request still unanswered when the recording session ends can never be completed by anyone: say so instead of "pending"
+      this.#store.update("requests", { body_state: "error", error: "recording ended before the response arrived" }, "run=? AND body_state='pending' AND status IS NULL", [this.#store.run]);
+    }
     if (o.browser) { this.#store.endRun(); killLaunched(this.#info); writeBrowserInfo(this.#store.dir, null); }
+    else if (this.#recording) { const cur = readBrowserInfo(this.#store.dir); if (cur?.recorderPid === process.pid) writeBrowserInfo(this.#store.dir, { ...cur, recorderPid: undefined }); }
     try { await this.browser.close(); } catch {}
     this.#reader?.close(); this.#store.close();
   }
@@ -174,6 +188,7 @@ export class Session {
     const store = this.#store, rec = this.#recorder, page = this.page;
     const n = store.nextActionN(); const id = `act:${n}`;
     const tStart = performance.now();
+    if (!this.#recording && !pidAlive(readBrowserInfo(store.dir)?.recorderPid)) this.#claimRecorder();   // the recorder died: this session records from here on
     page.setDefaultTimeout(max); page.setDefaultNavigationTimeout(max); this.#max = max;
     // The until is armed first, before the pre-snapshots — a response that lands during them still counts; one that already
     // held resolves during them and is flagged. A navigation is the one case where "already true" is legitimate: arm late there? No —

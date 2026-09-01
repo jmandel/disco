@@ -416,6 +416,29 @@ describe("exam A fold-backs", () => {
 });
 
 describe("the log", () => {
+  it("one recorder per browser: a second script session is silent, stamps its windows, and does not duplicate rows", async () => {
+    const s2 = await open("t", { appsDir });
+    try {
+      const r = reached(await s2.act("chart via s2", (p) => p.click("#load-chart"), { until: () => s2.page.waitForResponse((x) => x.url().includes("/api/slow")) }));
+      await sleep(300);
+      assert.equal(s.sql<{ n: number }>("SELECT count(*) n FROM requests WHERE url LIKE '%/api/chart/a%' AND action_id=?", r.action)[0].n, 1);
+      assert.equal(s.sql<{ n: number }>("SELECT count(*) n FROM requests WHERE url LIKE '%/api/slow%' AND t_start BETWEEN ? AND ?", r.window.t0 - 1, r.window.t1 + 1)[0].n, 1);
+    } finally { await s2.close(); }
+  });
+  it("a request still unanswered when its recording session closes is marked, not left pending", async () => {
+    await g.ctl.set({ slowMs: 2500 });
+    const { openStore, appStoreDir } = await import("../src/store.ts");
+    try {
+      const s3 = await open("t2", { url: g.origin, appsDir });          // its own browser, so it is the recorder
+      const r = await s3.act("slow", (p) => p.click("#load-chart"), { max: 300 });
+      assert.equal(r.returned, "max");
+      await s3.close({ browser: true });
+      const st = openStore(appStoreDir("t2", appsDir));
+      const row = st.sql<{ body_state: string; error: string }>("SELECT body_state, error FROM requests WHERE action_id=? AND url LIKE '%/api/slow%'", r.action)[0];
+      st.close();
+      assert.equal(row?.body_state, "error", JSON.stringify(row)); assert.match(row?.error ?? "", /recording ended/);
+    } finally { await g.ctl.reset(); }
+  });
   it("sql errors name the columns; body returns a blob by prefix", async () => {
     assert.throws(() => s.sql("SELECT id FROM ws_frames"), /no such column: id — ws_frames\(run, seq, t, url, dir, payload, action_id\)/);
     const row = s.sql<{ body_hash: string }>("SELECT body_hash FROM requests WHERE url LIKE '%/api/record/5%' AND body_hash IS NOT NULL LIMIT 1")[0];

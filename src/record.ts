@@ -33,6 +33,8 @@ export interface Recorder {
   flowing(url: string, withinMs: number): boolean;
   /** A scratch page of ours (look's overlay): record nothing from it. */
   ignore(page: Page): void;
+  /** Start (or stop) writing rows — a silent session takes over when the browser's recorder is gone. */
+  setSilent(silent: boolean): void;
   /** Resolves once the initial listeners (including the CDP sessions of existing pages) are in place. */
   ready: Promise<void>;
 }
@@ -47,7 +49,7 @@ function warn(where: string, e: unknown): void {
 
 /** `silent`: handle dialogs and feed the event stream but write nothing — another process is recording this browser. */
 export function attachRecorder(context: BrowserContext, store: Store, current: () => string | null, dialogs: DialogPolicy, opts: { silent?: boolean } = {}): Recorder {
-  const silent = opts.silent === true;
+  let silent = opts.silent === true;
   const ids = new WeakMap<Request, string>();
   let counter = store.get<{ n: number }>("SELECT COUNT(*) n FROM requests")?.n ?? 0;
   const pending = new Set<Promise<unknown>>();
@@ -199,6 +201,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     lastActivity: () => last,
     flowing,
     ignore: (page) => { ignored.add(page); },
+    setSilent: (v) => { if (silent && !v) counter = store.get<{ n: number }>("SELECT COUNT(*) n FROM requests")?.n ?? counter; silent = v; },
     detach() {
       for (const c of cdpSessions) c.detach().catch(() => {});
       cdpSessions.clear();

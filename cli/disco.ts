@@ -150,8 +150,7 @@ async function main() { switch (cmd) {
     const info = readBrowserInfo(appStoreDir(app));
     if (!info) fail(`no browser for app ${app}`);
     if (pidAlive(info.recorderPid) && info.recorderPid !== process.pid) fail(`a recorder is already running for ${app} (pid ${info.recorderPid})`);
-    const s = await open(app, { recorder: true });
-    writeBrowserInfo(appStoreDir(app), { ...(readBrowserInfo(appStoreDir(app)) ?? info), recorderPid: process.pid });
+    const s = await open(app, { recorder: true });   // the Session claims recorderPid in browser.json
     await new Promise<void>((resolve) => { process.on("SIGINT", () => resolve()); process.on("SIGTERM", () => resolve()); s.browser.on("disconnected", () => resolve()); });
     await s.close();
     const cur = readBrowserInfo(appStoreDir(app)); if (cur?.recorderPid === process.pid) writeBrowserInfo(appStoreDir(app), { ...cur, recorderPid: undefined });
