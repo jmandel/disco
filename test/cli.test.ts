@@ -34,6 +34,8 @@ describe("cli", () => {
     assert.equal(t.code, 0, t.out);
     assert.match(t.out, /until: ✓ request \/api\/slow landed/);
     assert.match(t.out, /GET \/api\/chart\/a 200/);
+    const a = disco("aria", "#s-13");
+    assert.match(a.out, /button "Do nothing"/);
     const q = disco("sql", "SELECT count(*) n FROM actions");
     assert.match(q.out, /\n4/);
     const n = disco("note", "hello from the cli");

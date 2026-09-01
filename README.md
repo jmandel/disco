@@ -212,7 +212,8 @@ act:6 click #record-2  ok  299ms (act 78 · until 200 · report 10)  http://loca
 | `until` | `{ ok, elapsedMs, which?, error?, diagnosis?, alreadyTrue? }` |
 | `url` | the page URL after the window |
 | `ui` | `{ added, removed }` lines of the aria snapshot (the page's accessibility tree) that changed. The main frame only — iframes appear as nodes, their contents do not |
-| `requests` | every request started in the window — plus any that started *earlier* and answered inside it (`(started earlier)`: the long-poll that just delivered). `← until` marks the response a `request` predicate matched (`until.request` is its id). `[pending]` = still in flight at report time; `[body pending]` = headers in, body not yet |
+| `requests` | the app's own traffic started in the window — documents, xhr/fetch, streams, sockets — plus any request that started *earlier* and answered inside it (`(started earlier)`: the long-poll that just delivered). `← until` marks the response a `request` predicate matched (`until.request` is its id). `[pending]` = still in flight at report time; `[body pending]` = headers in, body not yet |
+| `static` | scripts, stylesheets, images, fonts started in the window, folded out of `requests` as a count by type (a chunk-loading SPA issues hundreds per route). `wire: "all"` (CLI `--wire all`) lists them |
 | `console` | errors, exceptions and warnings inside the window |
 | `dialogs` | native dialogs inside the window and how they were handled |
 | `pages` | URLs of pages opened inside the window (popups, `window.open`) |
@@ -227,7 +228,7 @@ that fires during your window is in your report; you will recognise it because i
 
 | `reason` | Meaning | What to do |
 |---|---|---|
-| `not-found` | nothing matched, even after 1 s | read `candidates` (visible controls: `tag#id "name"`); fix the selector; if the element appears later, act with an `until` on the *previous* step |
+| `not-found` | nothing matched, even after 1 s | read `candidates` — visible controls as selectors that paste, `role=button[name="Search patient"] (#id)`; `:has-text()` cannot match an icon button's accessible name, `role=…[name=…]` can. If the element appears later, act with an `until` on the *previous* step; if you don't recognise the screen, `s.aria()` |
 | `hidden` | matched, not visible | it is rendered but collapsed/off-screen/`display:none`; open the thing that reveals it |
 | `disabled` | matched, disabled | the form is not ready; wait for what enables it (`until: { fn }` on `!el.disabled` is fine) |
 | `occluded` | another element is under the pointer (`over`) | usually a dialog — `dialogs` lists open ones; dismiss it, then retry |
@@ -281,6 +282,7 @@ Wrap every step of a workflow in it and failures explain themselves.
 
 | | |
 |---|---|
+| `s.aria(selector?)` | the page (or one element) as the accessibility tree sees it — Playwright's aria snapshot, the same text the `ui` diff is made of. **Look before you guess a selector**; on a SPA whose HTML is an empty shell this is the only way to see the screen |
 | `s.evaluate(fnOrSource, arg)` | run in the page's main world, return JSON-able values |
 | `s.screenshot(reason?)` | `{ hash, path }` — JPEG in the blob store, row in `shots` |
 | `s.note(text)` | append a timestamped line to `apps/<app>/NOTES.md` (and the `notes` table) |
@@ -307,8 +309,8 @@ st.sql("SELECT … WHERE path=? AND status=?", "/api/me", 200)   // anything, wi
 Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (headers as JSON, `req_body`,
 `body_hash`, `body_state` = `ok | truncated | missing | streaming | error | pending`, `action_id`) ·
 `bodies` (text under 512 KB, FTS5 as `bodies_fts`) · `ws_frames` · `console` · `dialogs` · `nav` ·
-`shots` · `notes`. `requests` is keyed by `id` (`r<run>-<n>`); every other table by `seq`. A screenshot's
-hash is content-addressed — two identical screens give the same hash. Every row has `run`; time is `t` (ms since the run started) — except `requests`, which has
+`shots` · `notes`. `requests` is keyed by `id` (`r<run>-<n>`) and ordered by `t_start`; every other table has
+`seq`. A screenshot's hash is content-addressed — two identical screens give the same hash. Every row has `run`; time is `t` (ms since the run started) — except `requests`, which has
 `t_start`, `t_response`, `t_end`. The report's wire line prints `body_size` as "size". Useful one-liners:
 
 ```sql
@@ -350,12 +352,13 @@ Ctrl-C; run it in a second terminal when the app's background traffic matters.
 ./disco select <target> <value>  ./disco scroll [<target>|--dy N]  ./disco navigate <url>
 ./disco until [until…]           until…: --until-selector S [--visible] | --until-gone S | --until-text T
                                          --until-url U | --until-request R [--landed] | --until-fn JS   (repeat → any-of)  --timeout MS
-./disco eval <js>                ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json]
+./disco aria [<selector>]        ./disco eval <js>                   ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json]
 ./disco body <hash>              ./disco note <text>                 ./disco record
 ```
 
-`--app <name>` on any command (default: the last `open`, kept in `apps/.current`); `--json` prints the
-report as data. Exit code 1 when the action failed or its `until` did not hold.
+`--app <name>` on any command (default: the last `open`, kept in `apps/.current`; `close` clears it, so
+`sql`/`body`/`schema` on a closed app need `--app`); `--json` prints the report as data; `--wire all` lists
+static resources too. Exit code 1 when the action failed or its `until` did not hold.
 
 ### `check.ts` and `run-check`
 
@@ -398,7 +401,8 @@ whose outcome you are unsure of — an expired 5 s budget is the most expensive 
 
 ## Working an unfamiliar app
 
-**Recon first (10 minutes).** Open it, look at the log: `SELECT method, path, resource_type FROM requests
+**Recon first (10 minutes).** Open it, look at the screen (`./disco aria` — on a SPA the HTML document is an
+empty shell and the accessibility tree is the only honest picture), then at the log: `SELECT method, path, resource_type FROM requests
 WHERE run=<n>` — is it an SPA with a JSON API, server-rendered pages, iframes (`./disco pages` shows
 popups; `frame:` handles iframes), a WebSocket? Where is auth (cookie → `resp_headers`; token →
 `req_headers`)? What fires on its own (`action_id IS NULL`)?
@@ -443,6 +447,15 @@ use `:text-is("armed")` or `text="armed"` for whole strings. A lingering toast f
 makes `[role=status]:has-text("Saved")` already true — wait for it to be `gone` first. When a report's
 `ui` line reads `text: "status: idle Chart loaded (3 responses)"`, that is two adjacent elements glued
 into one aria line; anchor on the element you mean (`#chart`), not on the line.
+
+**A second visit may issue no request.** Apps cache: opening a tab you opened a minute ago can render from a
+client-side cache with nothing on the wire, so a `{ request }` predicate expires and `latestJson` returns the
+*earlier* body (or `null` if there never was one). When a screen can be served from cache, wait on the DOM
+and read the body from the log by `action` of the visit that fetched it.
+
+**Slow servers and wrong guesses.** Raising `timeouts.until` for a slow server also raises the price of
+every wrong predicate: a guessed anchor on a screen you have not looked at costs the whole budget. Look
+first (`aria`), guess second, and keep probe budgets short even when the app is slow.
 
 **Effects that arrive on the next event.** Setting `scrollTop` or dispatching an event returns before the
 handler runs; a synchronous read right after sees the old DOM. Wait on the effect (`until: { fn }` on the

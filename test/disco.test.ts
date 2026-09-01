@@ -28,7 +28,8 @@ describe("act + report", () => {
     const r = await s.click("#nope");
     assert.equal(r.ok, false);
     assert.equal(r.diagnosis?.reason, "not-found");
-    assert.ok(r.diagnosis!.candidates!.some((c) => c.includes("button#load-chart")), JSON.stringify(r.diagnosis!.candidates));
+    assert.ok(r.diagnosis!.candidates!.some((c) => c === 'role=button[name="Load Chart"] (#load-chart)'), JSON.stringify(r.diagnosis!.candidates));
+    assert.equal(await s.page.locator(r.diagnosis!.candidates![0].split(" (")[0]).count(), 1, "the first candidate pastes as a selector");
     assert.equal(r.diagnosis!.shot!.length, 64);
     assert.ok(r.timing.totalMs < 1700, `total ${r.timing.totalMs}`);
     assert.throws(() => reached(r), /not-found/);
@@ -285,6 +286,23 @@ describe("round-3 friction", () => {
       st.close();
       reached(await s.click("#modal-ack", { until: { gone: "#record-modal" } }));
     } finally { await g.ctl.reset(); }
+  });
+});
+
+describe("openmrs friction", () => {
+  it("aria: the page as the accessibility tree sees it; one element; the CLI prints it", async () => {
+    const body = await s.aria();
+    assert.match(body, /button "Load Chart"/);
+    assert.match(await s.aria("#s-13"), /button "Do nothing"/);
+  });
+  it("static resources are folded out of the wire section unless wire: 'all'", async () => {
+    const r = reached(await s.navigate(g.origin, { until: { selector: "#load-chart" } }));
+    assert.ok(r.static.count >= 2, JSON.stringify(r.static));
+    assert.ok(!r.requests.some((w) => w.type === "script" || w.type === "stylesheet"), JSON.stringify(r.requests.map((w) => w.type)));
+    assert.ok(r.requests.some((w) => w.type === "document"));
+    const all = reached(await s.navigate(g.origin, { until: { selector: "#load-chart" }, wire: "all" }));
+    assert.ok(all.requests.some((w) => w.type === "script"));
+    assert.equal(all.static.count, 0);
   });
 });
 

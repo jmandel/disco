@@ -64,6 +64,7 @@ export interface ActSpec {
   timeout?: number;            // budget for `until` (default timeouts.until)
   window?: number;             // observation window when there is no `until` (default timeouts.window)
   shot?: boolean;              // take a screenshot at the end of the window
+  wire?: "app" | "all";        // report: "app" (default) lists documents/xhr/fetch/streams and folds scripts, styles, images, fonts into `static`; "all" lists everything
 }
 
 export interface Diagnosis {
@@ -90,6 +91,8 @@ export interface Report {
   url: string;
   ui: { added: string[]; removed: string[]; more?: number };
   requests: WireLine[];
+  /** Static resources (script, stylesheet, image, font, media…) started in the window, folded out of `requests` unless `wire: "all"`. */
+  static: { count: number; types: Record<string, number> };
   console: Array<{ level: string; text: string }>;
   dialogs: Array<{ type: string; message: string | null; handled: string | null }>;
   pages: string[];
@@ -215,6 +218,11 @@ export class Session {
 
   evaluate<T = unknown>(fn: string | ((arg: any) => T | Promise<T>), arg?: unknown): Promise<T> { return this.page.evaluate(fn as any, arg) as Promise<T>; }
 
+  /** The page as the accessibility tree sees it (Playwright's aria snapshot) — the whole body, or one element. Read this when the diff is not enough. */
+  aria(selector?: string, o: { frame?: string } = {}): Promise<string> {
+    return this.base(o.frame).locator(selector ?? "body").first().ariaSnapshot({ timeout: this.timeouts.action });
+  }
+
   async screenshot(reason = "shot"): Promise<{ hash: string; path: string }> {
     const buf = await this.page.screenshot({ type: "jpeg", quality: 60 });
     const hash = this.log.writeBlob(new Uint8Array(buf));
@@ -292,7 +300,7 @@ export class Session {
       action: id, kind: spec.kind === "noop" ? "until" : spec.kind, target: targetText, matches, ok, diagnosis, until: untilRes,
       url: safe(() => this.page.url(), ""),
       ui: diffAria(preAria, postAria, 40, this.uiIgnore),
-      requests: this.wire(t0, t1, untilRes?.request),
+      ...this.wire(t0, t1, untilRes?.request, spec.wire ?? "app"),
       console: this.log.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", this.log.run, t0, t1 + 1),
       dialogs: this.log.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1),
       pages: this.log.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1).map((x) => x.url),
@@ -307,9 +315,12 @@ export class Session {
     return report;
   }
 
-  private wire(t0: number, t1: number, matched?: string): WireLine[] {
-    return this.log.all<any>("SELECT id, method, path, url, status, t_start, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?)) OR id=?) ORDER BY t_start", this.log.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1, matched ?? "")
+  private wire(t0: number, t1: number, matched: string | undefined, mode: "app" | "all"): { requests: WireLine[]; static: Report["static"] } {
+    const all = this.log.all<any>("SELECT id, method, path, url, status, t_start, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?)) OR id=?) ORDER BY t_start", this.log.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1, matched ?? "")
       .map((r) => ({ id: r.id, method: r.method, path: pathOf(r.url, r.path), status: r.status, ms: r.t_end != null ? Math.round(r.t_end - r.t_start) : null, mime: shortMime(r.mime), body: r.body_hash ? r.body_hash.slice(0, 16) : null, size: r.body_size, state: r.body_state, type: r.resource_type, ...(r.t_start < t0 - 1 ? { earlier: true } : {}), ...(matched && r.id === matched ? { until: true } : {}) }));
+    const types: Record<string, number> = {}; let count = 0;
+    const requests = all.filter((w) => { const isStatic = mode === "app" && STATIC_TYPES.has(w.type ?? "") && !w.until; if (isStatic) { count++; types[w.type!] = (types[w.type!] ?? 0) + 1; } return !isStatic; });
+    return { requests, static: { count, types } };
   }
 
   private async resolve(spec: ActSpec): Promise<{ locator: Locator; matches: number } | { diagnosis: Diagnosis }> {
@@ -448,8 +459,11 @@ export class Session {
         const r = h.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) continue;
         const name = (h.getAttribute("aria-label") || h.innerText || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || "").trim().replace(/\s+/g, " ").slice(0, 40);
-        const d = h.tagName.toLowerCase() + (h.id ? "#" + h.id : "") + (h.getAttribute("role") ? `[role=${h.getAttribute("role")}]` : "");
-        out.push(name ? `${d} "${name}"` : d);
+        const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase();
+        const role = h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" ? "button" : "textbox") : tag);
+        // a selector that pastes: role=…[name="…"] matches icon buttons and inputs that :has-text() cannot
+        const sel = name ? `role=${role}[name="${name.replace(/"/g, '\\"')}"]` : h.id ? `#${h.id}` : tag;
+        out.push(h.id && name ? `${sel} (#${h.id})` : sel);
         if (out.length >= 25) break;
       }
       return out;
@@ -550,6 +564,8 @@ export function reached(r: Report, what?: string): Report {
 }
 
 interface ArmContext { request?: string }
+/** Playwright resource types that are the page's own assets, not the app talking to its server. */
+const STATIC_TYPES = new Set(["script", "stylesheet", "image", "font", "media", "texttrack", "manifest"]);
 
 /** Rows whose headers arrived but whose body never finished are bodies the page never read: no recorder will ever complete them. */
 export function sweepUnread(log: Store): void {

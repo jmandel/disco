@@ -9,9 +9,10 @@ export function formatReport(r: Report): string {
   L.push(`${head}  ${r.ok ? "ok" : "FAILED"}  ${tm.totalMs}ms (${parts.join(" · ")})  ${r.url}${r.openPages > 1 ? `  (+${r.openPages - 1} other page${r.openPages > 2 ? "s" : ""} open)` : ""}`);
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
   if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.which ?? ""} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action — proves nothing; pick a predicate that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}${r.until.diagnosis ? "\n    " + fmtDiag(r.until.diagnosis) : ""}`);
-  if (r.requests.length) {
+  if (r.requests.length || r.static?.count) {
     const lines = r.requests.map((w) => `${w.earlier ? "(started earlier) " : ""}${w.method} ${w.path.length > 70 ? w.path.slice(0, 67) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state === "missing" ? "body missing" : w.state === "pending" && w.status != null ? "body pending" : w.state}]` : ""}${w.until ? "  ← until" : ""}`);
-    L.push("  wire (" + r.requests.length + "):"); for (const l of lines.slice(0, 25)) L.push("    " + l);
+    const st = r.static?.count ? ` + ${r.static.count} static (${Object.entries(r.static.types).map(([k, v]) => `${v} ${k}`).join(", ")}; wire: "all" to list)` : "";
+    L.push(`  wire (${r.requests.length}${st}):`); for (const l of lines.slice(0, 25)) L.push("    " + l);
     if (lines.length > 25) L.push(`    … ${lines.length - 25} more (sql: SELECT * FROM requests WHERE action_id='${r.action}')`);
   }
   if (r.ui.added.length || r.ui.removed.length) {
@@ -32,7 +33,7 @@ export function fmtDiag(d: Diagnosis): string {
   const bits = [`${d.reason} — ${d.message}`];
   if (d.over) bits.push(`over: ${d.over}`);
   if (d.dialogs?.length) bits.push(`open dialogs: ${d.dialogs.join("; ")}`);
-  if (d.candidates?.length) bits.push(`visible controls: ${d.candidates.slice(0, 12).join(", ")}${d.candidates.length > 12 ? ", …" : ""}`);
+  if (d.candidates?.length) bits.push(`visible controls (selectors that paste): ${d.candidates.slice(0, 12).join(", ")}${d.candidates.length > 12 ? ", …" : ""}`);
   if (d.shot) bits.push(`shot ${d.shot.slice(0, 16)}`);
   return bits.join("\n    ");
 }

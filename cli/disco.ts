@@ -22,8 +22,9 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
   disco act <kind> [<target>] [--text T] [--key K] [--value V] [--url U] [--button right] …
   disco until [until…]                         wait for a state without acting
     until…: --until-selector S [--visible] | --until-gone S | --until-text T | --until-url U
-            --until-request R [--landed] | --until-fn JS   (repeat flags → any-of)   --timeout MS  --window MS  --shot
+            --until-request R [--landed] | --until-fn JS   (repeat flags → any-of)   --timeout MS  --window MS  --shot  --wire all
 
+  disco aria [<selector>] [--frame F]          the page (or one element) as the accessibility tree sees it — look before you guess a selector
   disco eval <js-expression>                   run in the page (main world), print JSON
   disco screenshot [--out file.jpg]
   disco sql <query> [--json]                   the log (disco schema for the tables)
@@ -132,7 +133,7 @@ async function main() { switch (cmd) {
   case "click": case "dblclick": case "rightclick": case "hover": case "fill": case "type": case "press": case "select": case "scroll": case "drag": case "navigate": case "act": case "until": {
     let spec: ActSpec;
     const until = untilFromArgs();
-    const common = { until, timeout: num(args.timeout), window: num(args.window), shot: args.shot === true, frame: args.frame as string | undefined };
+    const common = { until, timeout: num(args.timeout), window: num(args.window), shot: args.shot === true, frame: args.frame as string | undefined, wire: (args.wire === "all" ? "all" : undefined) as "all" | undefined };
     if (cmd === "until") { if (!until) fail("until needs at least one --until-* flag"); spec = { kind: "noop", ...common }; }
     else if (cmd === "act") {
       const kind = args._[1] as Kind; if (!kind || !(kind in KINDS) || (kind as string) === "act") fail("usage: disco act <kind> [target] …");
@@ -154,6 +155,11 @@ async function main() { switch (cmd) {
     const r = await withSession((s) => s.act(spec));
     printReport(r);
     if (!r.ok || (r.until && !r.until.ok)) process.exit(1);
+    break;
+  }
+  case "aria": {
+    const text = await withSession((s) => s.aria(args._[1], { frame: args.frame as string | undefined }));
+    console.log(text);
     break;
   }
   case "eval": {
