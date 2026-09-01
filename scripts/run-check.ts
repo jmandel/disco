@@ -1,5 +1,5 @@
 // node scripts/run-check.ts <app> [--headed] [--close] [--bail]
-// Runs apps/<app>/check.ts: `export const target = { url }` and `export async function check(s, step)`.
+// Runs apps/<app>/check.ts: `export const target = { url, attach?, timeouts?, dialogs? }` and `export async function check(s, step)`.
 import { join } from "node:path";
 import { open, type Session } from "../src/session.ts";
 import { appDir } from "../src/store.ts";
@@ -12,7 +12,7 @@ if (!app) { console.error("usage: node scripts/run-check.ts <app> [--headed] [--
 const mod = await import(join(appDir(app), "check.ts"));
 if (!mod.target?.url || typeof mod.check !== "function") { console.error(`apps/${app}/check.ts must export target = { url } and check(s, step)`); process.exit(2); }
 
-const s: Session = await open(app, { url: mod.target.url, headed: argv.includes("--headed"), attach: mod.target.attach });
+const s: Session = await open(app, { url: mod.target.url, headed: argv.includes("--headed"), attach: mod.target.attach, timeouts: mod.target.timeouts, dialogs: mod.target.dialogs });
 console.log(`${app}: run ${s.run}, page ${s.page.url()}${s.context.pages().length > 1 ? ` (+${s.context.pages().length - 1} other pages open)` : ""}`);
 const results: Array<{ name: string; ok: boolean; ms: number; error?: string }> = [];
 const bail = argv.includes("--bail");

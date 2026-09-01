@@ -24,7 +24,7 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
   disco select <target> <value>  |  disco scroll [<target>|--dy N]  |  disco navigate <url>
   disco act <kind> [<target>] [--text T] [--key K] [--value V] [--url U] [--button right] …
   disco until [until…]                         wait for a state without acting
-    until…: --until-selector S [--visible] | --until-gone S | --until-text T | --until-url U
+    until…: --until-selector S [--attached] | --until-gone S | --until-text T | --until-url U   (selector = visible unless --attached)
             --until-request R [--landed] | --until-fn JS   (repeat flags → any-of)   --timeout MS  --window MS  --shot  --wire all
 
   disco aria [<selector>] [--frame F]          the page (or one element) as the accessibility tree sees it — look before you guess a selector
@@ -72,7 +72,7 @@ function num(v: unknown): number | undefined { return v === undefined || v === t
 
 function untilFromArgs(): Pred | undefined {
   const preds: Pred[] = [];
-  for (const s of (args["until-selector"] as string[]) ?? []) preds.push({ selector: s, visible: args.visible === true });
+  for (const s of (args["until-selector"] as string[]) ?? []) preds.push({ selector: s, ...(args.attached === true ? { visible: false } : {}) });
   for (const s of (args["until-gone"] as string[]) ?? []) preds.push({ gone: s });
   for (const s of (args["until-text"] as string[]) ?? []) preds.push({ text: s });
   for (const s of (args["until-url"] as string[]) ?? []) preds.push({ url: s });

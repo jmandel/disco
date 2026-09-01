@@ -247,7 +247,9 @@ export function openStore(dir: string, opts: { readonly?: boolean } = {}) {
     /** Text of a body by hash or prefix — bodies.text when present, else the decoded blob. */
     body(hash: string): string {
       const full = fullHash(hash);
-      return one<{ text: string | null }>("SELECT text FROM bodies WHERE hash=?", full)?.text ?? new TextDecoder().decode(api.bytes(full));
+      const row = one<{ text: string | null; truncated: number }>("SELECT text, truncated FROM bodies WHERE hash=?", full);
+      // bodies.text keeps the first 512 KB; the blob is always complete
+      return row?.text != null && !row.truncated ? row.text : new TextDecoder().decode(api.bytes(full));
     },
     json<T = any>(hash: string): T { return JSON.parse(api.body(hash)); },
     blobPath: (hash: string) => blobPath(dir, fullHash(hash)),

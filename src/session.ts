@@ -101,6 +101,10 @@ export interface Report {
   writes: string[];
   /** evaluate: what the expression returned */
   value?: unknown;
+  /** something worth knowing that is not a failure (e.g. the click landed but the page blocked past the action budget) */
+  note?: string;
+  /** cookie and localStorage changes in the window — the wire of an app that has no wire */
+  storage: { cookies: string[]; local: string[] };
   /** Pages open in the browser after this act (popups included). More than 1 means the driven page can be throttled in the background. */
   openPages: number;
   shot?: string;
@@ -293,10 +297,11 @@ export class Session {
     let armed = spec.until && !armLate ? this.arm(spec.until, untilBudget) : null;
     const alreadyTrue = spec.until && spec.kind !== "noop" && !armLate ? await this.holdsNow(spec.until) : false;
     const preAria = await this.ariaSafe();
+    const preStorage = await this.storageSnapshot();
     const t0 = this.log.now();
     this.log.insert("actions", { id, n, t0, kind: spec.kind, target: targetText });
     this.currentAction = id;
-    let ok = true; let diagnosis: Diagnosis | undefined; let matches: number | undefined; let value: unknown;
+    let ok = true; let diagnosis: Diagnosis | undefined; let matches: number | undefined; let value: unknown; let note: string | undefined;
     let untilRes: UntilResult | undefined;
     const tAct0 = performance.now();
     if (this.context.pages().length > 1) await this.page.bringToFront().catch(() => {});
@@ -309,7 +314,13 @@ export class Session {
       } else await this.perform(spec, null);
       if (armLate && spec.until) armed = this.arm(spec.until, untilBudget);
     } catch (e) {
-      ok = false; diagnosis = await this.diagnose(e as Error, spec);
+      const msg = String((e as Error)?.message ?? e);
+      // Playwright's click can time out AFTER the click was performed: a handler that blocks the main thread past the action
+      // budget. The click landed; say so, keep the armed until, and let the postcondition decide.
+      const lastLog = msg.replace(/\x1b\[\d+m/g, "").split("\n").map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
+      if ((spec.kind === "click" || spec.kind === "dblclick") && /Timeout/.test(msg) && /^- (performing click action|click action done|waiting for scheduled navigations|navigations have finished)/.test(lastLog)) {
+        note = `the click landed but the page did not respond within the action budget (${T.action} ms) — a handler blocked the main thread; the until still ran`;
+      } else { ok = false; diagnosis = await this.diagnose(e as Error, spec); }
     }
     const tAct1 = performance.now();
     if (armed) {
@@ -326,6 +337,7 @@ export class Session {
     const t1 = this.log.now();
     this.currentAction = null;
     const postAria = await this.ariaSafe();
+    const postStorage = await this.storageSnapshot();
     const shot = spec.shot ? (await this.screenshot("shot")).hash : undefined;
     const report: Report = {
       action: id, kind: spec.kind === "noop" ? "until" : spec.kind, target: targetText, matches, ok, diagnosis, until: untilRes,
@@ -337,6 +349,8 @@ export class Session {
       pages: this.log.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1).map((x) => x.url),
       openPages: this.context.pages().length,
       writes: [],
+      storage: diffStorage(preStorage, postStorage),
+      ...(note ? { note } : {}),
       ...(spec.kind === "evaluate" ? { value } : {}),
       shot,
       window: { t0: Math.round(t0), t1: Math.round(t1) },
@@ -403,7 +417,8 @@ export class Session {
         for (let e: Element | null = node; e; e = e.parentElement) if (getComputedStyle(e).pointerEvents === "none") return { noPointer: d(e) };
         let h = document.elementFromPoint(x, y);
         while (h && h.shadowRoot) { const inner = h.shadowRoot.elementFromPoint(x, y); if (!inner || inner === h) break; h = inner; }
-        if (!h || node.contains(h) || h.contains(node)) return null;
+        if (!h || node.contains(h)) return null;
+        if (h.contains(node)) return { ancestor: d(h) };   // the parent receives the pointer (pointer-events: none on the child): click there
         // a styled checkbox/radio/switch: the real input is hidden under a visual that lives in the same <label> (or a label[for]) — that is the control, not an occluder
         const label = node.closest("label") || (node.id ? document.querySelector(`label[for="${CSS.escape(node.id)}"]`) : null);
         if (label && (label.contains(h) || h === label)) return { styled: d(h) };
@@ -412,7 +427,7 @@ export class Session {
       if (hit && "detached" in hit) return { diagnosis: await detached() };
       if (hit?.offscreen) return { diagnosis: await this.finish({ reason: "offscreen", message: `${targetText} is outside the viewport ${hit.offscreen} — scroll the page so it is visible, or click with { js: true } if its handler is delegated`, target: targetText, matches: count }) };
       if (hit?.noPointer) return { diagnosis: await this.finish({ reason: "unclickable", message: `${targetText} ignores the mouse (pointer-events: none on ${hit.noPointer}) — the app wants the keyboard (type / ArrowDown / Enter), or { js: true }`, target: targetText, matches: count }) };
-      if (hit?.styled) return { locator: el, matches: count, force: true };
+      if (hit?.styled || hit?.ancestor) return { locator: el, matches: count, force: true };
       if (hit?.over) return { diagnosis: await this.finish({ reason: "occluded", message: `${targetText} is covered by ${hit.over}`, target: targetText, matches: count, over: hit.over }) };
     }
     return { locator: el, matches: count };
@@ -531,6 +546,15 @@ export class Session {
     }).catch(() => []);
   }
 
+  private async storageSnapshot(): Promise<Record<string, string>> {
+    return this.page.evaluate(() => {
+      const out: Record<string, string> = {};
+      for (const c of document.cookie.split(";")) { const t = c.trim(); if (!t) continue; const i = t.indexOf("="); out["cookie:" + (i < 0 ? t : t.slice(0, i))] = i < 0 ? "" : t.slice(i + 1, i + 81); }
+      try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i)!; out["local:" + k] = (localStorage.getItem(k) ?? "").slice(0, 80); } } catch {}
+      return out;
+    }).catch(() => ({}));
+  }
+
   private async ariaSafe(): Promise<string> {
     try { return await this.page.locator("body").ariaSnapshot({ timeout: 1500 }); } catch { return ""; }
   }
@@ -628,6 +652,14 @@ export function reached(r: Report, what?: string): Report {
 }
 
 interface ArmContext { request?: string }
+function diffStorage(a: Record<string, string>, b: Record<string, string>): Report["storage"] {
+  const lines: Record<"cookies" | "local", string[]> = { cookies: [], local: [] };
+  const bucket = (k: string) => (k.startsWith("cookie:") ? "cookies" : "local");
+  const name = (k: string) => k.slice(k.indexOf(":") + 1);
+  for (const k of Object.keys(b)) { if (!(k in a)) lines[bucket(k)].push(`+${name(k)}=${b[k]}`); else if (a[k] !== b[k]) lines[bucket(k)].push(`${name(k)}: ${a[k]} → ${b[k]}`); }
+  for (const k of Object.keys(a)) if (!(k in b)) lines[bucket(k)].push(`-${name(k)}`);
+  return lines;
+}
 /** Labels of the arms that describe a STATE (element, text, url, fn) — the ones that can be true before an action. Event arms (request, ws, page) only ever see the future. */
 function stateArms(p: Pred, out = new Set<string>()): Set<string> {
   if ("any" in p) { p.any.forEach((x) => stateArms(x, out)); return out; }

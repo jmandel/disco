@@ -217,10 +217,12 @@ act:6 click #record-2  ok  299ms (act 78 · until 200 · report 10)  http://loca
 | `ui` | `{ added, removed }` lines of the aria snapshot (the page's accessibility tree) that changed. The main frame only — iframes appear as nodes, their contents do not |
 | `requests` | `{ id, method, path, status, ms, mime, body, size, state, type, earlier?, until? }` — the app's own traffic started in the window — documents, xhr/fetch, streams, sockets — plus any request that started *earlier* and answered inside it (`(started earlier)`: the long-poll that just delivered). `← until` marks the response a `request` predicate matched (`until.request` is its id). `[pending]` = still in flight at report time; `[body pending]` = headers in, body not yet |
 | `static` | scripts, stylesheets, images, fonts started in the window, folded out of `requests` as a count by type (a chunk-loading SPA issues hundreds per route). `wire: "all"` (CLI `--wire all`) lists them |
-| `console` | errors, exceptions and warnings inside the window |
 | `dialogs` | native dialogs inside the window and how they were handled |
 | `pages` | URLs of pages opened inside the window (popups, `window.open`) |
 | `openPages` | pages open in the browser afterwards; printed as `(+N other pages open)` — leftover popups throttle the driven page |
+| `storage` | cookie and `localStorage` changes in the window (`+session-username=…`, `cart-contents: [4] → [4,0]`, `-token`) — the wire of an app that has no wire |
+| `note` | something worth knowing that is not a failure: e.g. the click landed but the page blocked past the action budget, so the `until` still ran |
+| `console` | `{ level, text }` — errors, exceptions and warnings inside the window |
 | `writes` | the non-GET app requests in the window (`POST /api/save 202`) — printed as `writes:`; under a read-only stance, a non-empty line is the signal to stop and read |
 | `window` | `{ t0, t1 }` in the run's clock — `SELECT … WHERE t BETWEEN t0 AND t1` |
 | `timing` | `actMs` (checks + the Playwright action) · `untilMs` · `windowMs` · `reportMs` · `totalMs` |
@@ -249,7 +251,7 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 
 | Predicate | Holds when | Use it for |
 |---|---|---|
-| `{ selector, visible?, frame? }` | a matching element is **visible** (`visible: false`: merely attached, hidden or not) | the landmark of the next screen: a heading, a specific row, a status text — `#status:has-text("idle")` |
+| `{ selector, visible?, frame? }` | a matching element is **visible** (`visible: false`: merely attached, hidden or not). Visible means rendered with a box — a drawer parked off-canvas *is* visible, so a menu's own open state (`aria-hidden`, `aria-expanded`, a class) is the anchor, not its contents | the landmark of the next screen: a heading, a specific row, a status text — `#status:has-text("idle")` |
 | `{ gone: selector, frame? }` | no visible match | a spinner, a modal, a "loading" row |
 | `{ text }` | visible text anywhere | when you only know the words |
 | `{ url }` | a string: the URL *without its query string* contains it (a string containing `?` matches the whole href); a RegExp: tests the whole href | navigations, logins, route changes. The query-string rule exists because `login?next=/account` contains `/account`. `{ url: "/" }` is always true — for "back to the shell", wait on the shell's element |
@@ -278,7 +280,9 @@ status, or on the element the outcome renders (`any` of the success and failure 
 
 Throws unless `report.ok` and (`report.until` absent or `until.ok`), **and** throws when the `until` was
 `alreadyTrue` — a predicate that held before the action is not a postcondition, whatever `which` says.
-`act` and `until` themselves never throw; they return reports. The message carries the diagnosis:
+A standalone `s.until(pred)` is never `alreadyTrue`: there is no action, so "already" has no meaning —
+that is what makes it the right way to assert an anchor. `act` and `until` themselves never throw; they
+return reports. The message carries the diagnosis:
 `act:7: occluded — #record-3 is covered by div#record-modal.overlay (open: div#record-modal "Allergy Review Required") [shot afc670dce369]`.
 Wrap every step of a workflow in it and failures explain themselves.
 
@@ -315,6 +319,7 @@ st.action("act:9")                                 // the stored row, report par
 st.sql("SELECT … WHERE path=? AND status=?", "/api/me", 200)   // anything, with bind arguments
 ```
 
+`actions` columns: `id, n, t0, t1, kind, target, ok, report` (the report as JSON — `json_extract(report, '$.until.elapsedMs')`).
 `resource_type` is Playwright's: `document | xhr | fetch | eventsource | websocket | script | stylesheet |
 image | font | media | manifest | other`. Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (headers as JSON, `req_body`,
 `body_hash`, `body_state` = `ok | truncated | missing | streaming | error | pending`, `action_id`) ·
@@ -364,7 +369,7 @@ open, or `./disco open` first.
 ./disco drag <target> <to>
 ./disco fill <target> <text>     ./disco type <target> <text>     ./disco press <key> [--target T]
 ./disco select <target> <value>  ./disco scroll [<target>|--dy N]  ./disco navigate <url>
-./disco until [until…]           until…: --until-selector S [--visible] | --until-gone S | --until-text T
+./disco until [until…]           until…: --until-selector S [--attached] | --until-gone S | --until-text T
                                          --until-url U | --until-request R [--landed] | --until-fn JS   (repeat → any-of)  --timeout MS
 ./disco aria [<selector> | <role>]  ./disco eval <js>   (an act)        ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json | --wide]
 ./disco body <hash>   (text bodies print; a screenshot prints its file path)   ./disco req <request-id>   ./disco writes [--run N]
@@ -388,6 +393,7 @@ export async function check(s, step) {
 }
 ```
 
+`target` may also carry `attach`, `timeouts` and `dialogs`, passed straight to `open`.
 `node scripts/run-check.ts shop` (or `npm run check -- shop`) prints `PASS/FAIL name (ms)` per step and
 exits non-zero on any failure. A pack is done when it passes **warm and cold** — once on the browser you
 explored with, once after `./disco close shop` on a fresh one; the cold run is what catches predicates
@@ -402,7 +408,7 @@ you found it.
 
 | Name | Default | Governs |
 |---|---|---|
-| `action` | 3000 | Playwright's actionability wait inside click/fill/… |
+| `action` | 3000 | Playwright's actionability wait inside click/fill/… — and how long a click may take to *return*; a handler that blocks the main thread longer trips it, but the click has landed: the report says so in `note` and the `until` still runs. `s.timeouts.action = 8000` raises it for a session |
 | `until` | 5000 | an `until` without its own `timeout` |
 | `window` | 700 | the observation window of a bare act |
 | `navigate` | 15000 | `goto` to commit |
@@ -425,12 +431,22 @@ arrives, however large the budget. So the rule for budgets is short:
 While *exploring*, the opposite: pass a short `timeout` (1000–1500) to probes whose outcome you are
 unsure of — an expired 5 s budget is the most expensive thing in a session.
 
+The **window** is a different thing from a budget: a bare act always waits its window (700 ms) to see
+what the app does. A run of form fills does not need one each — `window: 0` on all but the last, or
+`open(app, { timeouts: { window: 200 } })` for a form-heavy app. When an app's failure mode is *silence*
+(the click does nothing, no error appears), a bare act with its window followed by an assertion on the
+report (`ui` unchanged, `storage` unchanged, `writes` empty) is the honest wait.
+
 ---
 
 ## Working an unfamiliar app
 
 **Recon first (10 minutes).** Open it, look at the screen (`./disco aria` — on a SPA the HTML document is an
-empty shell and the accessibility tree is the only honest picture), then at the log: `SELECT method, path, resource_type FROM requests
+empty shell and the accessibility tree is the only honest picture), then at the log. If the log shows no
+API at all — no xhr/fetch of the app's own — the state lives in the browser: the report's `storage` line
+(cookies, `localStorage`) is that app's wire, and the bundle (`body_state: truncated` only affects the
+text column; `./disco body` prints the whole blob) holds the constants. Enumerate the axes the app itself
+advertises — accounts, roles, locations — before the features; on some apps the axis *is* the app. Then: `SELECT method, path, resource_type FROM requests
 WHERE run=<n>` — is it an SPA with a JSON API, server-rendered pages, iframes (`./disco pages` shows
 popups; `frame:` handles iframes), a WebSocket? Where is auth (cookie → `resp_headers`; token →
 `req_headers`)? What fires on its own (`action_id IS NULL`)?

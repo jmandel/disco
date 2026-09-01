@@ -22,7 +22,9 @@ export function formatReport(r: Report): string {
     const hidden = Math.max(0, r.ui.added.length - 25) + Math.max(0, r.ui.removed.length - 10) + (r.ui.more ?? 0);
     if (hidden) L.push(`    … ${hidden} more (${r.ui.added.length + (r.ui.more ?? 0)} added, ${r.ui.removed.length} removed; report.ui has them all)`);
   }
+  if (r.note) L.push("  note: " + r.note);
   if (r.writes?.length) L.push("  writes: " + r.writes.join(" · "));
+  if (r.storage?.cookies?.length || r.storage?.local?.length) L.push("  storage: " + [...r.storage.cookies.map((x) => "cookie " + x), ...r.storage.local.map((x) => "local " + x)].join(" · ").slice(0, 400));
   if (r.kind === "evaluate" && "value" in r) L.push("  value: " + (typeof r.value === "string" ? r.value : JSON.stringify(r.value))?.slice(0, 400));
   for (const c of r.console.slice(0, 5)) L.push(`  console ${c.level}: ${c.text.slice(0, 160)}`);
   for (const d of r.dialogs) L.push(`  dialog ${d.type} "${(d.message ?? "").slice(0, 100)}" → ${d.handled}`);

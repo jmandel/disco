@@ -387,6 +387,39 @@ describe("write-pass friction", () => {
   });
 });
 
+describe("saucedemo friction", () => {
+  it("a click whose handler blocks the main thread past the action budget still counts, and its until still runs", async () => {
+    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"blk\">block</button>'); document.getElementById('blk').onclick = () => { const t = Date.now(); while (Date.now() - t < 3600) {} document.body.dataset.blk = '1'; }");
+    const r = await s.click("#blk", { until: { fn: "document.body.dataset.blk === '1'" }, timeout: 8000 });
+    assert.equal(r.ok, true, r.diagnosis?.message);
+    assert.match(r.note ?? "", /blocked the main thread/);
+    assert.equal(r.until?.ok, true);
+    await s.evaluate("document.getElementById('blk').remove()");
+  });
+  it("a child whose parent receives the pointer is clicked through the parent", async () => {
+    // a visually-hidden child (clip pattern) inside a button: it has a box, but the pointer lands on the parent
+    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"pb\" onclick=\"this.dataset.hit=1\" style=\"position:relative;padding:12px\"><span id=\"ps\" style=\"position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);left:4px;top:4px\">menu</span>≡</button>')");
+    const r = await s.click("#ps");
+    assert.equal(r.ok, true, r.diagnosis?.message);
+    assert.equal(await s.evaluate("document.getElementById('pb').dataset.hit"), "1");
+    await s.evaluate("document.getElementById('pb').remove()");
+  });
+  it("storage changes in the window are reported: cookies and localStorage", async () => {
+    const r = reached(await s.probe("localStorage.setItem('cart', '[4]'); document.cookie = 'who=ada'; 1"));
+    assert.ok(r.storage.local.some((x) => x.startsWith("+cart=[4]")), JSON.stringify(r.storage));
+    assert.ok(r.storage.cookies.some((x) => x.startsWith("+who=ada")), JSON.stringify(r.storage));
+    const r2 = reached(await s.probe("localStorage.setItem('cart', '[4,0]'); localStorage.removeItem('nothing'); 1"));
+    assert.ok(r2.storage.local.some((x) => x.includes("cart: [4] → [4,0]")), JSON.stringify(r2.storage));
+    await s.evaluate("localStorage.clear(); document.cookie = 'who=; max-age=0'");
+  });
+  it("body() returns the whole blob even when the text column was truncated", async () => {
+    const big = "x".repeat(600 * 1024);
+    const hash = s.log.storeBody(new TextEncoder().encode(big), "text/plain").hash;
+    assert.equal(s.store.sql("SELECT truncated FROM bodies WHERE hash=?", hash)[0].truncated, 1);
+    assert.equal(s.store.body(hash).length, big.length);
+  });
+});
+
 describe("the log without a browser", () => {
   it("openApp reads what was recorded", async () => {
     const st = openApp("t", appsDir);

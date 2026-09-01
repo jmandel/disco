@@ -34,6 +34,10 @@ describe("cli", () => {
     assert.equal(c.code, 0, c.out);
     const rep = JSON.parse(c.stdout);
     assert.equal(rep.ok, true); assert.equal(rep.action, "act:3");
+    const hidden = disco("until", "--until-selector", "#ctx-menu", "--timeout", "300");
+    assert.equal(hidden.code, 1, "selector means visible in the CLI too");
+    const att = disco("until", "--until-selector", "#ctx-menu", "--attached", "--timeout", "300");
+    assert.equal(att.code, 0, att.out);
     const u = disco("until", "--until-selector", "#never", "--timeout", "300", "--json");
     assert.equal(u.code, 1);
     assert.equal(JSON.parse(u.stdout).until.ok, false);
@@ -41,7 +45,7 @@ describe("cli", () => {
     assert.equal(t.code, 0, t.out);
     assert.match(t.out, /until: ✓ request \/api\/slow landed/);
     assert.match(t.out, /GET \/api\/chart\/a 200/);
-    const stamped = disco("sql", "SELECT count(*) n FROM requests WHERE action_id='act:5' AND path LIKE '/api/chart/%'");
+    const stamped = disco("sql", "SELECT count(*) n FROM requests WHERE action_id='act:7' AND path LIKE '/api/chart/%'");
     assert.match(stamped.out, /\n2/, "stamped: " + stamped.out);
     assert.match(disco("ls").out, /c\t.*alive recording/);
     const a = disco("aria", "#s-13");
@@ -60,7 +64,7 @@ describe("cli", () => {
     const rq = disco("req", rid);
     assert.match(rq.out, /POST http.*\/api\/save/); assert.match(rq.out, /request body: \{\}/);
     const q = disco("sql", "SELECT count(*) n FROM actions");
-    assert.match(q.out, /\n7/);
+    assert.match(q.out, /\n9/);
     const n = disco("note", "hello from the cli");
     assert.equal(n.code, 0, n.out);
     assert.ok(existsSync(join(appsDir, "c", "NOTES.md")));
