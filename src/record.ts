@@ -4,6 +4,8 @@ import type { BrowserContext, Page, Request, Response, WebSocket } from "playwri
 import { Store, REQ_BODY_CAP, WS_PAYLOAD_CAP } from "./store.ts";
 
 export type DialogPolicy = "accept" | "dismiss";
+/** How long after the headers a body may stay `pending` before it is marked missing (the page never read it). */
+export const UNREAD_BODY_MS = 1500;
 
 export interface Recorder {
   /** Wait (bounded) for in-flight async writes — response headers and bodies — so a report sees them. */
@@ -15,6 +17,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   const ids = new WeakMap<Request, string>();
   let counter = store.get<{ n: number }>("SELECT COUNT(*) n FROM requests")?.n ?? 0;
   const pending = new Set<Promise<unknown>>();
+  const timers = new Set<ReturnType<typeof setTimeout>>();
   const track = (p: Promise<unknown>) => { pending.add(p); p.catch(() => {}).finally(() => pending.delete(p)); };
   const idOf = (r: Request) => { let id = ids.get(r); if (!id) { id = `r${store.run}-${++counter}`; ids.set(r, id); } return id; };
   const cap = (s: string | null | undefined, n: number) => (s == null ? null : s.length > n ? s.slice(0, n) : s);
@@ -33,6 +36,8 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     const mime = res.headers()["content-type"] ?? null;
     const streaming = /event-stream/i.test(mime ?? "");
     store.update("requests", { t_response: store.now(), status: res.status(), mime, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
+    // a body the page never reads never finishes and cannot be fetched; stop calling it pending
+    if (!streaming) { const timer = setTimeout(() => { store.update("requests", { body_state: "missing", error: "body not read by the page" }, "id=? AND body_state='pending'", [id]); }, UNREAD_BODY_MS); timers.add(timer); }
     track(res.allHeaders().then((h) => store.update("requests", { resp_headers: h }, "id=?", [id])));
   };
   const onFinished = (r: Request) => {
@@ -101,6 +106,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       context.off("request", onRequest); context.off("response", onResponse); context.off("requestfinished", onFinished); context.off("requestfailed", onFailed);
       context.off("page", onNewPage);
       for (const c of pageCleanups.values()) c();
+      for (const t of timers) clearTimeout(t);
     },
   };
 }

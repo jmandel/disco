@@ -10,7 +10,7 @@ export function formatReport(r: Report): string {
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
   if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.which ?? ""} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action — proves nothing; pick a predicate that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}${r.until.diagnosis ? "\n    " + fmtDiag(r.until.diagnosis) : ""}`);
   if (r.requests.length) {
-    const lines = r.requests.map((w) => `${w.method} ${w.path.length > 70 ? w.path.slice(0, 67) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state}]` : ""}`);
+    const lines = r.requests.map((w) => `${w.method} ${w.path.length > 70 ? w.path.slice(0, 67) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state === "missing" ? "body missing" : w.state}]` : ""}`);
     L.push("  wire (" + r.requests.length + "):"); for (const l of lines.slice(0, 25)) L.push("    " + l);
     if (lines.length > 25) L.push(`    … ${lines.length - 25} more (sql: SELECT * FROM requests WHERE action_id='${r.action}')`);
   }

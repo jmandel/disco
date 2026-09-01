@@ -15,7 +15,8 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
   disco close [<app>]                          kill the launched browser (forget an attached one)
   disco ls                                     apps with a store, and whether their browser is alive
 
-  disco click|dblclick|rightclick|hover <target> [until…] [--frame F]
+  disco click|dblclick|rightclick|hover <target> [until…] [--frame F] [--js]   (--js: dispatch a click event, for re-rendering widgets)
+  disco drag <target> <to>
   disco fill <target> <text>  |  disco type <target> <text>  |  disco press <key> [--target T]
   disco select <target> <value>  |  disco scroll [<target>|--dy N]  |  disco navigate <url>
   disco act <kind> [<target>] [--text T] [--key K] [--value V] [--url U] [--button right] …
@@ -86,9 +87,14 @@ async function withSession<T>(fn: (s: Awaited<ReturnType<typeof open>>) => Promi
 
 function printReport(r: any) { console.log(json ? JSON.stringify(r, null, 2) : formatReport(r)); }
 
-const KINDS: Record<string, Kind> = { click: "click", dblclick: "dblclick", rightclick: "click", hover: "hover", fill: "fill", type: "type", press: "press", select: "select", scroll: "scroll", navigate: "navigate", act: "noop" };
+const KINDS: Record<string, Kind> = { click: "click", dblclick: "dblclick", rightclick: "click", hover: "hover", fill: "fill", type: "type", press: "press", select: "select", scroll: "scroll", drag: "drag", navigate: "navigate", act: "noop" };
 
-switch (cmd) {
+try { await main(); } catch (e) {
+  const msg = String((e as Error)?.message ?? e).split("\n")[0];
+  console.error("error: " + msg + (/no such column|no such table/.test(msg) ? "  (./disco schema lists the tables and columns; requests uses t_start/t_end, other tables t)" : ""));
+  process.exit(2);
+}
+async function main() { switch (cmd) {
   case undefined: case "help": case "--help": console.log(HELP); break;
 
   case "open": {
@@ -123,7 +129,7 @@ switch (cmd) {
   }
   case "schema": console.log(SCHEMA.trim()); break;
 
-  case "click": case "dblclick": case "rightclick": case "hover": case "fill": case "type": case "press": case "select": case "scroll": case "navigate": case "act": case "until": {
+  case "click": case "dblclick": case "rightclick": case "hover": case "fill": case "type": case "press": case "select": case "scroll": case "drag": case "navigate": case "act": case "until": {
     let spec: ActSpec;
     const until = untilFromArgs();
     const common = { until, timeout: num(args.timeout), window: num(args.window), shot: args.shot === true, frame: args.frame as string | undefined };
@@ -136,10 +142,12 @@ switch (cmd) {
       const t = args._[1];
       spec = { kind, ...common };
       if (cmd === "rightclick") spec.button = "right";
+      if (cmd === "click" && args.js === true) spec.js = true;
+      if (cmd === "drag") { spec.target = t; spec.to = args._[2]; if (!spec.to) fail("usage: disco drag <target> <to>"); }
       if (cmd === "press") { spec.key = t; spec.target = args.target as string | undefined; }
       else if (cmd === "navigate") spec.url = t;
       else if (cmd === "scroll") { if (t) spec.target = t; spec.deltaY = num(args.dy); }
-      else { spec.target = t; if (cmd === "fill" || cmd === "type") spec.text = args._[2] ?? (args.text as string) ?? ""; if (cmd === "select") spec.value = args._[2] ?? (args.value as string); }
+      else if (cmd !== "drag") { spec.target = t; if (cmd === "fill" || cmd === "type") spec.text = args._[2] ?? (args.text as string) ?? ""; if (cmd === "select") spec.value = args._[2] ?? (args.value as string); }
       if (kind !== "scroll" && kind !== "navigate" && !spec.target && cmd !== "press") fail(`usage: disco ${cmd} <target>`);
       if (cmd === "navigate" && !spec.url) fail("usage: disco navigate <url>");
     }
@@ -202,4 +210,4 @@ switch (cmd) {
     break;
   }
   default: fail(`unknown command ${cmd}\n\n${HELP}`);
-}
+} }

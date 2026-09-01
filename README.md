@@ -27,6 +27,7 @@ waiting for, or you get the next 700 ms.
 | You act with `until` | the same report, returned the moment the state arrives | as long as the app takes |
 | The state never arrives | `until.ok: false` after *your* budget (default 5 s), with a diagnosis and a screenshot | your budget |
 | Your predicate was already true before you acted | `until.alreadyTrue: true` — flagged, so you notice | 0 |
+| The page never read a response body | the row says `missing — body not read by the page`; the status is still there | 1.5 s after the headers |
 | The app did something you did not ask about | it is in the log with a timestamp; the report shows the parts inside the window | — |
 
 No wait is longer than the number you wrote. Nothing in disco sleeps for you. Nothing in disco guesses
@@ -127,7 +128,7 @@ const s = await open("shop", {
   page: 0,                     // which open page to drive
   fresh: false,                // launch: wipe the profile first
   timeouts: { action: 3000, until: 5000, window: 700, navigate: 15000 },
-  appsDir: "./apps",           // where apps/<app>/ lives (default: ./apps, or $DISCO_APPS_DIR)
+  appsDir: "/abs/path/apps",   // where apps/<app>/ lives (default: apps/ next to this checkout, or $DISCO_APPS_DIR)
 });
 ```
 
@@ -149,6 +150,7 @@ way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s
 | `s.press(key, { target?, ...o })` | `Enter`, `ArrowDown`, `Control+a` … on the target or the focused element |
 | `s.select(target, value, o)` | `<select>` by value/label |
 | `s.hover(target, o)` | |
+| `s.drag(target, to, o)` | mouse down on the target, move to `to`, release (Playwright `dragTo`). For sliders and reorderable lists; use `s.page.mouse` for custom paths |
 | `s.scroll(target \| deltaY, o)` | scroll an element into view, or wheel the page |
 | `s.navigate(url, o)` | `goto`, waits for commit only |
 | `s.until(pred, { timeout })` | wait without acting (`kind: "noop"`) |
@@ -166,7 +168,8 @@ way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s
 | `window` | observation window when there is no `until` (default 700) |
 | `frame` | resolve the target inside an iframe: `"#frame"`, nested with `"#outer >> #inner"` |
 | `shot` | take a screenshot at the end (hash in `report.shot`) |
-| `button`, `deltaY`, `text`, `key`, `value`, `url` | per kind |
+| `js: true` | click: dispatch a DOM `click` event instead of moving the mouse — for widgets the app replaces faster than a real click can land (the handler is usually delegated to a parent that survives) |
+| `button`, `deltaY`, `to`, `text`, `key`, `value`, `url` | per kind |
 
 Before performing a click, disco checks the element exists (waiting up to 1 s for it to attach), is
 visible, is enabled, and is the element under its own centre — and returns a diagnosis instead of
@@ -214,6 +217,7 @@ that fires during your window is in your report; you will recognise it because i
 | `hidden` | matched, not visible | it is rendered but collapsed/off-screen/`display:none`; open the thing that reveals it |
 | `disabled` | matched, disabled | the form is not ready; wait for what enables it (`until: { fn }` on `!el.disabled` is fine) |
 | `occluded` | another element is under the pointer (`over`) | usually a dialog — `dialogs` lists open ones; dismiss it, then retry |
+| `detached` | the element was replaced while Playwright was clicking it | the app re-renders it continuously (on hover, on a timer): `s.click(target, { js: true })` |
 | `timeout` | Playwright's actionability wait or your `until` expired | read `message` and the `shot` |
 | `error` | anything else (navigation mid-click, detached frame…) | `message` is Playwright's |
 
@@ -227,8 +231,8 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 | `{ selector, visible?, frame? }` | an element matches (and is visible) | the landmark of the next screen: a heading, a specific row, a status text — `#status:has-text("idle")` |
 | `{ gone: selector, frame? }` | no visible match | a spinner, a modal, a "loading" row |
 | `{ text }` | visible text anywhere | when you only know the words |
-| `{ url }` | page URL contains the string / matches the RegExp | navigations, logins, route changes |
-| `{ request, landed? }` | a response arrives whose URL contains / matches; `landed` = body finished | the fact you need travels on the wire; API-first apps; anything a spinner lies about |
+| `{ url }` | a string: the URL *without its query string* contains it (a string containing `?` matches the whole href); a RegExp: tests the whole href | navigations, logins, route changes. The query-string rule exists because `login?next=/account` contains `/account` |
+| `{ request, landed? }` | a response arrives whose URL contains / matches — i.e. the status is known. `landed`: its body finished too, so `latestJson` is safe; waits at most 1 s past the headers | the fact you need travels on the wire; API-first apps; anything a spinner lies about |
 | `{ fn, arg? }` | `page.waitForFunction` returns truthy | everything else: `"document.querySelector('#x')?.dataset.state === 'ready'"` |
 | `{ any: [...] }` | the first arm that holds; `until.which` names it (`label` or its description) | success **or** the app's own failure: `any: [ok, errorBanner]` |
 | `{ all: [...] }` | every arm holds | the screen *and* the request |
@@ -237,6 +241,13 @@ Give arms a `label` and `until.which` reads well. The budget is `timeout` (defau
 predicate. A predicate that is already true when you act is flagged `alreadyTrue` — choose one that is
 false beforehand (the *new* record's heading, not "a heading"; `request` predicates only see responses
 that arrive after arming, so they are never already true).
+
+**A body the page never reads has no body.** When an app does `const r = await fetch(url); if (r.ok) …`
+without reading the body, Chromium never finishes the response and cannot hand the body over — not to
+Playwright, not to raw CDP. disco marks such rows `body_state: missing` ("body not read by the page") after
+1.5 s, and `landed` resolves after its 1 s bound. What you *do* get is the status code: the report's wire line
+and `requests.status`. For an optimistic "Saved ✓", wait on `{ request: "/api/save/status" }` and read the
+status, or on the element the outcome renders (`any` of the success and failure toasts).
 
 ### `reached(report, what?) → report`
 
@@ -271,13 +282,14 @@ st.sql("SELECT …")                                 // anything
 Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (headers as JSON, `req_body`,
 `body_hash`, `body_state` = `ok | truncated | missing | streaming | error | pending`, `action_id`) ·
 `bodies` (text under 512 KB, FTS5 as `bodies_fts`) · `ws_frames` · `console` · `dialogs` · `nav` ·
-`shots` · `notes`. Every row has `run` and `t` (ms since the run started). Useful one-liners:
+`shots` · `notes`. Every row has `run`; time is `t` (ms since the run started) — except `requests`, which has
+`t_start`, `t_response`, `t_end`. Useful one-liners:
 
 ```sql
 -- where does a string on the screen come from?
 SELECT r.method, r.path, r.status FROM bodies_fts f JOIN bodies b ON b.rowid=f.rowid JOIN requests r ON r.body_hash=b.hash WHERE bodies_fts MATCH '"Alan Turing"';
 -- what did the app do while I was not acting?
-SELECT t, method, path, status FROM requests WHERE action_id IS NULL AND run=2 ORDER BY t_start;
+SELECT t_start, method, path, status FROM requests WHERE action_id IS NULL AND run=2 ORDER BY t_start;
 -- the endpoint map so far
 SELECT method, path, count(*) n, min(status), max(status) FROM requests WHERE resource_type IN ('xhr','fetch') GROUP BY 1,2 ORDER BY n DESC;
 -- cookies set during login
@@ -298,7 +310,8 @@ Ctrl-C; run it in a second terminal when the app's background traffic matters.
 ./disco open <app> <url> [--headed] [--dialogs accept|dismiss] [--fresh]
 ./disco open <app> --attach <port|host:port|ws://…> [--url <substring>]
 ./disco close [<app>]            ./disco ls            ./disco pages            ./disco schema
-./disco click|dblclick|rightclick|hover <target> [until…] [--frame F] [--window MS] [--shot]
+./disco click|dblclick|rightclick|hover <target> [until…] [--frame F] [--window MS] [--shot] [--js]
+./disco drag <target> <to>
 ./disco fill <target> <text>     ./disco type <target> <text>     ./disco press <key> [--target T]
 ./disco select <target> <value>  ./disco scroll [<target>|--dy N]  ./disco navigate <url>
 ./disco until [until…]           until…: --until-selector S [--visible] | --until-gone S | --until-text T
@@ -356,7 +369,7 @@ popups; `frame:` handles iframes), a WebSocket? Where is auth (cookie → `resp_
 of each screen (URL + one specific element) into the README as you find it, and the transition's
 postcondition as an `until`. Facts come from the wire whenever they travel on it: the list behind a
 virtualised table, the record behind a form, the outcome behind an optimistic "Saved ✓" (`{ request:
-"/api/save/status", landed: true }` then `latestJson`).
+"/api/save/status" }`, then the status on the wire line — the body only if the page reads it).
 
 **Interstitials.** Dialogs that appear for some records and not others are normal (allergy reviews,
 "what's new", session warnings). Make them optional both ways: `until: { any: [{ selector: nextScreen,
@@ -379,6 +392,20 @@ action_id='act:n'` for headers and bodies, `SELECT * FROM console WHERE t BETWEE
 
 **Never:** `sleep`; raise a timeout to hide a wrong predicate; assert a fact off the screen when the
 response that carried it is in the log; retry a diagnosis without reading it.
+
+**Selector gotchas.** `:has-text("armed")` is a case-sensitive *substring* match — it matches "unarmed";
+use `:text-is("armed")` or `text="armed"` for whole strings. A lingering toast from the previous step
+makes `[role=status]:has-text("Saved")` already true — wait for it to be `gone` first. When a report's
+`ui` line reads `text: "status: idle Chart loaded (3 responses)"`, that is two adjacent elements glued
+into one aria line; anchor on the element you mean (`#chart`), not on the line.
+
+**Effects that arrive on the next event.** Setting `scrollTop` or dispatching an event returns before the
+handler runs; a synchronous read right after sees the old DOM. Wait on the effect (`until: { fn }` on the
+first row's id changing), never on the cause.
+
+**The app's own code is on the wire.** `SELECT body_hash FROM requests WHERE resource_type='script'` then
+`./disco body <hash>` — reading the client that issues a request is legitimate, fast, and often the only way
+to learn why a channel is silent or a body is never read.
 
 ---
 

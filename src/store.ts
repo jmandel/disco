@@ -275,7 +275,8 @@ export function openStore(dir: string, opts: { readonly?: boolean } = {}) {
 }
 export type StoreReader = ReturnType<typeof openStore>;
 
-export function appsRoot(root?: string): string { return root ?? process.env.DISCO_APPS_DIR ?? join(process.cwd(), "apps"); }
+/** apps/ next to this checkout (not the process cwd), unless DISCO_APPS_DIR or an explicit root says otherwise. */
+export function appsRoot(root?: string): string { return root ?? process.env.DISCO_APPS_DIR ?? join(import.meta.dirname, "..", "apps"); }
 export function appDir(app: string, root?: string): string { return join(appsRoot(root), app); }
 export function appStoreDir(app: string, root?: string): string { return join(appDir(app, root), "store"); }
 /** Open an app's store read-only, no browser needed: `openApp("gauntlet").requests({ url: "/api/record" })`. */

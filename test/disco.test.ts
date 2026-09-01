@@ -154,6 +154,40 @@ describe("act + report", () => {
   });
 });
 
+describe("round-1 friction", () => {
+  it("url predicate ignores the query string: '?next=/secure.html' on the login page is not alreadyTrue", async () => {
+    reached(await s.navigate(g.origin + "/login.html?next=/secure.html"));
+    reached(await s.fill("#user", "ada"));
+    reached(await s.fill("#pass", "x"));
+    const r = reached(await s.click("#login", { until: { url: "/secure.html" } }));
+    assert.notEqual(r.until?.alreadyTrue, true);
+    assert.match(r.url, /\/secure\.html$/);
+    reached(await s.navigate(g.origin, { until: { selector: "#load-chart", visible: true } }));
+  });
+  it("landed on a body the page never reads: bounded at ~1 s, status known, body marked missing", async () => {
+    const r = reached(await s.click("#save", { until: { request: "/api/save/status", landed: true } }));
+    assert.ok(r.until!.elapsedMs >= 500 && r.until!.elapsedMs <= 2200, `elapsed ${r.until!.elapsedMs}`);
+    const w = r.requests.find((x) => x.path.includes("/api/save/status"))!;
+    assert.equal(w.status, 200);
+    await sleep(1700);
+    assert.equal(s.store.requests({ url: "/api/save/status", action: r.action })[0]?.body_state, "missing");
+    reached(await s.until({ gone: "#toast" }, { timeout: 4000 }));
+  });
+  it("a widget the app re-renders every 100 ms: mouse click → detached diagnosis with the hint; js: true lands", async () => {
+    const before = await s.evaluate<string>("document.getElementById('rerender-count').textContent");
+    const r1 = await s.click("#rerender");
+    assert.equal(r1.ok, false);
+    assert.equal(r1.diagnosis?.reason, "detached", r1.diagnosis?.message);
+    assert.match(r1.diagnosis!.message, /js: true/);
+    const r2 = reached(await s.click("#rerender", { js: true, until: { fn: `document.getElementById('rerender-count').textContent !== ${JSON.stringify(before)}` } }));
+    assert.equal(r2.until?.ok, true);
+  });
+  it("drag: the slider thumb moves and the drag report is posted", async () => {
+    const r = reached(await s.drag("#slider-thumb", "#slider-track", { until: { request: "/api/drag-report" } }));
+    assert.ok(r.requests.some((w) => w.path.includes("/api/drag-report") && w.method === "POST"));
+  });
+});
+
 describe("the log without a browser", () => {
   it("openApp reads what was recorded", async () => {
     const st = openApp("t", appsDir);

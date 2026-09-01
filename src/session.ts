@@ -22,18 +22,26 @@ export interface Timeouts {
   navigate: number;
 }
 export const DEFAULT_TIMEOUTS: Timeouts = { action: 3000, until: 5000, window: 700, navigate: 15000 };
+/** `landed` waits this long past the response headers for the body to finish; a body the page never reads never does. */
+export const LANDED_BOUND_MS = 1000;
+/** A string url predicate matches the href without its query string (unless the string itself contains '?'); a RegExp sees the whole href. */
+export function urlMatches(u: string | RegExp, href: string): boolean {
+  if (typeof u !== "string") return u.test(href);
+  if (u.includes("?")) return href.includes(u);
+  const q = href.indexOf("?"); return (q >= 0 ? href.slice(0, q) : href).includes(u);
+}
 
 export type Pred =
   | { selector: string; visible?: boolean; frame?: string; label?: string }   // an element exists (visible: true → is visible)
   | { gone: string; frame?: string; label?: string }                          // an element is hidden or detached
   | { text: string; label?: string }                                          // visible text anywhere on the page
-  | { url: string | RegExp; label?: string }                                  // page URL contains / matches
-  | { request: string | RegExp; landed?: boolean; label?: string }            // a response whose URL contains / matches arrives (landed: body finished)
+  | { url: string | RegExp; label?: string }                                  // string: URL without its query contains it (with it, if the string has a '?'); RegExp: whole href
+  | { request: string | RegExp; landed?: boolean; label?: string }            // a response whose URL contains / matches arrives (landed: its body finished too — bounded at 1 s past the headers)
   | { fn: string | ((arg: any) => unknown); arg?: unknown; label?: string }   // page.waitForFunction
   | { any: Pred[]; label?: string }
   | { all: Pred[]; label?: string };
 
-export type Kind = "click" | "dblclick" | "fill" | "type" | "press" | "select" | "hover" | "scroll" | "navigate" | "noop";
+export type Kind = "click" | "dblclick" | "fill" | "type" | "press" | "select" | "hover" | "scroll" | "drag" | "navigate" | "noop";
 
 export interface ActSpec {
   kind: Kind;
@@ -44,6 +52,8 @@ export interface ActSpec {
   url?: string;                // navigate
   frame?: string;              // iframe selector(s), `>>`-chained for nesting; the target is resolved inside
   button?: "left" | "right" | "middle";
+  js?: boolean;                // click: dispatch a DOM click event instead of moving the mouse (widgets the app re-renders under you)
+  to?: string | Locator;       // drag: the drop target
   deltaY?: number;             // scroll without a target
   until?: Pred;
   timeout?: number;            // budget for `until` (default timeouts.until)
@@ -52,7 +62,7 @@ export interface ActSpec {
 }
 
 export interface Diagnosis {
-  reason: "not-found" | "hidden" | "disabled" | "occluded" | "timeout" | "error";
+  reason: "not-found" | "hidden" | "disabled" | "occluded" | "detached" | "timeout" | "error";
   message: string;
   target?: string;
   matches?: number;
@@ -163,6 +173,7 @@ export class Session {
   scroll(targetOrDeltaY: string | Locator | number, o: Partial<ActSpec> = {}) {
     return typeof targetOrDeltaY === "number" ? this.act({ kind: "scroll", deltaY: targetOrDeltaY, ...o }) : this.act({ kind: "scroll", target: targetOrDeltaY, ...o });
   }
+  drag(target: string | Locator, to: string | Locator, o: Partial<ActSpec> = {}) { return this.act({ kind: "drag", target, to, ...o }); }
   navigate(url: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "navigate", url, ...o }); }
   /** Wait for a state without acting. Same report shape; `report.until` says whether it arrived. */
   until(pred: Pred, o: { timeout?: number } = {}) { return this.act({ kind: "noop", until: pred, timeout: o.timeout }); }
@@ -282,7 +293,7 @@ export class Session {
     if (!(await el.isVisible())) return { diagnosis: await this.finish({ reason: "hidden", message: `${targetText} exists but is not visible`, target: targetText, matches: count }) };
     if ((spec.kind === "click" || spec.kind === "dblclick" || spec.kind === "fill" || spec.kind === "type" || spec.kind === "select") && !(await el.isEnabled()))
       return { diagnosis: await this.finish({ reason: "disabled", message: `${targetText} is disabled`, target: targetText, matches: count }) };
-    if (spec.kind === "click" || spec.kind === "dblclick") {
+    if ((spec.kind === "click" || spec.kind === "dblclick") && !spec.js) {
       try { await el.scrollIntoViewIfNeeded({ timeout: 1000 }); } catch {}
       const over = await el.evaluate((node: Element) => {
         const r = node.getBoundingClientRect();
@@ -301,7 +312,8 @@ export class Session {
   private async perform(spec: ActSpec, el: Locator | null): Promise<void> {
     const T = this.timeouts;
     switch (spec.kind) {
-      case "click": await el!.click({ timeout: T.action, button: spec.button }); break;
+      case "click": if (spec.js) await el!.dispatchEvent("click", undefined, { timeout: T.action }); else await el!.click({ timeout: T.action, button: spec.button }); break;
+      case "drag": { const base = this.base(spec.frame); const to = typeof spec.to === "string" ? base.locator(spec.to).first() : spec.to!; await el!.dragTo(to, { timeout: T.action }); break; }
       case "dblclick": await el!.dblclick({ timeout: T.action }); break;
       case "fill": await el!.fill(spec.text ?? "", { timeout: T.action }); break;
       case "type": await el!.pressSequentially(spec.text ?? "", { timeout: T.action, delay: 15 }); break;
@@ -318,15 +330,18 @@ export class Session {
   }
 
   private async diagnose(e: Error, spec: ActSpec): Promise<Diagnosis> {
-    const msg = String(e?.message ?? e).split("\n").filter((l) => l.trim() && !/^\s*[-=]+\s*$/.test(l)).slice(0, 8).join(" | ");
+    const full = String(e?.message ?? e);
+    const msg = full.split("\n").filter((l) => l.trim() && !/^\s*[-=]+\s*$/.test(l)).slice(0, 8).join(" | ");
     const targetText = spec.target === undefined ? undefined : String(spec.target);
     let reason: Diagnosis["reason"] = "error"; let over: string | undefined;
-    const m = msg.match(/<([a-z][^>]*)>[^|]*intercepts pointer events/i);
-    if (m) { reason = "occluded"; over = "<" + m[1] + ">"; }
-    else if (/not enabled|disabled/i.test(msg)) reason = "disabled";
-    else if (/not visible|hidden/i.test(msg)) reason = "hidden";
-    else if (/Timeout/i.test(msg)) reason = "timeout";
-    return this.finish({ reason, message: msg, target: targetText, over });
+    const m = full.match(/<([a-z][^>]*)>[^\n]*intercepts pointer events/i);
+    // a detach-retry loop (often with <html> "intercepting" because the node vanished) is the re-render signature
+    if (/detached from the DOM|not attached/i.test(full)) reason = "detached";
+    else if (m) { reason = "occluded"; over = "<" + m[1] + ">"; }
+    else if (/not enabled|is disabled/i.test(full)) reason = "disabled";
+    else if (/not visible|is hidden/i.test(full)) reason = "hidden";
+    else if (/Timeout/i.test(full)) reason = "timeout";
+    return this.finish({ reason, message: reason === "detached" ? msg + " — the app replaces this element faster than a mouse click; try { js: true } (a dispatched click event)" : msg, target: targetText, over });
   }
 
   private async finish(d: Diagnosis): Promise<Diagnosis> {
@@ -395,7 +410,7 @@ export class Session {
       if ("selector" in pred) { const l = this.base(pred.frame).locator(pred.selector).first(); return pred.visible ? l.isVisible() : (await l.count()) > 0; }
       if ("gone" in pred) return !(await this.base(pred.frame).locator(pred.gone).first().isVisible());
       if ("text" in pred) return this.page.getByText(pred.text).first().isVisible();
-      if ("url" in pred) { const u = pred.url, h = this.page.url(); return typeof u === "string" ? h.includes(u) : u.test(h); }
+      if ("url" in pred) return urlMatches(pred.url, this.page.url());
     } catch {}
     return false;
   }
@@ -408,11 +423,12 @@ export class Session {
     if ("selector" in pred) return done(this.base(pred.frame).locator(pred.selector).first().waitFor({ state: pred.visible ? "visible" : "attached", timeout }));
     if ("gone" in pred) return done(this.base(pred.frame).locator(pred.gone).first().waitFor({ state: "hidden", timeout }));
     if ("text" in pred) return done(this.page.getByText(pred.text).first().waitFor({ state: "visible", timeout }));
-    if ("url" in pred) { const u = pred.url; return done(this.page.waitForURL(typeof u === "string" ? (x) => x.href.includes(u) : u, { timeout, waitUntil: "commit" })); }
+    if ("url" in pred) { const u = pred.url; return done(this.page.waitForURL((x) => urlMatches(u, x.href), { timeout, waitUntil: "commit" })); }
     if ("request" in pred) {
       const r = pred.request; const match = (url: string) => (typeof r === "string" ? url.includes(r) : r.test(url));
       return done(this.page.waitForResponse((res) => match(res.url()), { timeout }).then(async (res) => {
-        if (pred.landed) await Promise.race([res.finished(), new Promise((_, rej) => setTimeout(() => rej(new Error(`response to ${label} did not finish within ${timeout}ms`)), timeout))]);
+        // a body the page never reads never "finishes" in Chromium (and cannot be fetched at all), so landed waits at most 1 s past the headers
+        if (pred.landed) await Promise.race([res.finished(), new Promise((r) => setTimeout(r, LANDED_BOUND_MS))]);
         return res;
       }));
     }
