@@ -1,7 +1,7 @@
-// The CLI and the check runner, as a stranger would run them.
+// The CLI and the pack convention, as a stranger would run them.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -19,93 +19,87 @@ before(async () => { g = await startGauntlet(); });
 after(async () => { disco("close", "c"); g.stop(); });
 
 describe("cli", () => {
-  it("open → click --json → until (exit 1) → sql → note → close", async () => {
+  it("open → act → act --until → look → sql → close", async () => {
     const o = disco("open", "c", g.origin);
     assert.equal(o.code, 0, o.out);
-    assert.match(o.out, /launch http:\/\/127\.0\.0\.1:\d+ run 1/);
-    assert.match(o.out, /recording: pid \d+/);
-    // the recorder captures what the page does BETWEEN commands
-    const e = disco("eval", "setTimeout(() => fetch('/api/chart/b'), 700); 'armed'");
-    assert.equal(e.code, 0, e.out);
+    assert.match(o.out, /run 1/); assert.match(o.out, /recording: pid \d+/);
+    // the detached recorder captures what the page does BETWEEN commands
+    const armed = disco("act", 'page.evaluate(() => { setTimeout(() => fetch("/api/chart/b"), 700); return "armed"; })', "--quiet", "50");
+    assert.equal(armed.code, 0, armed.out); assert.match(armed.out, /value: armed/);
     await new Promise((r) => setTimeout(r, 1800));
     const between = disco("sql", "SELECT count(*) n FROM requests WHERE path='/api/chart/b' AND action_id IS NULL");
     assert.match(between.out, /\n1/, "between: " + between.out);
-    const c = disco("click", "#noop", "--json");
+    const c = disco("act", 'page.click("#noop")', "--json");
     assert.equal(c.code, 0, c.out);
     const rep = JSON.parse(c.stdout);
-    assert.equal(rep.ok, true); assert.equal(rep.action, "act:3");
-    const hidden = disco("until", "--until-selector", "#ctx-menu", "--timeout", "300");
-    assert.equal(hidden.code, 1, "selector means visible in the CLI too");
-    const att = disco("until", "--until-selector", "#ctx-menu", "--attached", "--timeout", "300");
-    assert.equal(att.code, 0, att.out);
-    const u = disco("until", "--until-selector", "#never", "--timeout", "300", "--json");
-    assert.equal(u.code, 1);
-    assert.equal(JSON.parse(u.stdout).until.ok, false);
-    const t = disco("click", "#load-chart", "--until-request", "/api/slow", "--landed");
+    assert.equal(rep.ok, true); assert.equal(rep.returned, "quiet"); assert.match(rep.action, /^act:\d+$/);
+    const t = disco("act", 'page.click("#load-chart")', "--until", 'page.waitForResponse(r => r.url().includes("/api/slow"))', "--label", "load chart");
     assert.equal(t.code, 0, t.out);
-    assert.match(t.out, /until: ✓ request \/api\/slow landed/);
-    assert.match(t.out, /GET \/api\/chart\/a 200/);
-    const stamped = disco("sql", "SELECT count(*) n FROM requests WHERE action_id='act:7' AND path LIKE '/api/chart/%'");
+    assert.match(t.out, /"load chart"  ok/); assert.match(t.out, /until: ✓/); assert.match(t.out, /GET \/api\/chart\/a 200/); assert.match(t.out, /proposed until/);
+    const stamped = disco("sql", `SELECT count(*) n FROM requests WHERE action_id='${t.out.match(/^(act:\d+)/m)![1]}' AND path LIKE '/api/chart/%'`);
     assert.match(stamped.out, /\n2/, "stamped: " + stamped.out);
-    assert.match(disco("ls").out, /c\t.*alive recording/);
-    const a = disco("aria", "#s-13");
-    assert.match(a.out, /button "Do nothing"/);
-    const ev = disco("eval", "fetch('/api/chart/a').then(r => r.status)");
-    assert.equal(ev.code, 0, ev.out); assert.match(ev.out, /^200\n/); assert.match(ev.out, /act:\d+ evaluate/); assert.match(ev.out, /GET \/api\/chart\/a 200/);
-    const wide = disco("sql", "SELECT body_hash || body_hash || body_hash || body_hash h FROM requests WHERE body_hash IS NOT NULL LIMIT 1", "--wide");
-    assert.ok(wide.stdout.trim().split("\n").at(-1)!.length >= 256, wide.out);
-    const w = disco("writes");
-    assert.match(w.out, /run 1: no writes|POST/);
-    const ev2 = disco("eval", "fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.status)", "--until-request", "/api/save");
-    assert.equal(ev2.code, 0, ev2.out);
-    const w2 = disco("writes");
-    assert.match(w2.out, /r1-\d+\tact:\d+\tPOST .*\/api\/save 202/);
-    const rid = w2.stdout.match(/^(r1-\d+)/m)![1];
-    const rq = disco("req", rid);
-    assert.match(rq.out, /POST http.*\/api\/save/); assert.match(rq.out, /request body: \{\}/);
+    const miss = disco("act", 'page.click("#nope")', "--max", "500");
+    assert.equal(miss.code, 1); assert.match(miss.out, /not-found/); assert.match(miss.out, /visible controls/);
+    const already = disco("act", 'page.click("#noop")', "--until", 'page.locator("#load-chart").waitFor()');
+    assert.equal(already.code, 1); assert.match(already.out, /already true/);
+    const bad = disco("act", "page.click(");
+    assert.equal(bad.code, 2); assert.match(bad.out, /does not parse/);
+    const l = disco("look");
+    assert.equal(l.code, 0, l.out); assert.match(l.out, /button "Load Chart"/); assert.match(l.out, /#load-chart/); assert.match(l.out, /shot: .*blobs/);
+    const l2 = disco("look", "#load-chart");
+    assert.match(l2.out, /1 match/);
+    const l3 = disco("look", "#never");
+    assert.match(l3.out, /0 matches/);
     const q = disco("sql", "SELECT count(*) n FROM actions");
-    assert.match(q.out, /\n9/);
-    const n = disco("note", "hello from the cli");
-    assert.equal(n.code, 0, n.out);
-    assert.ok(existsSync(join(appsDir, "c", "NOTES.md")));
+    assert.match(q.out, /\n\d+/);
+    const e = disco("sql", "SELECT nope FROM actions");
+    assert.equal(e.code, 2); assert.match(e.out, /no such column: nope — actions\(/);
     const x = disco("close", "c");
     assert.match(x.out, /killed/);
-    assert.doesNotMatch(disco("ls").out, /recording/);
   });
-  it("attach: a browser started independently with a debugging port is driven and recorded", async () => {
+  it("attach: a browser started independently with a debugging port is driven, recorded, and left running", async () => {
     const { launchChromium, killLaunched } = await import("../src/browser.ts");
     const dir = join(appsDir, "_external");
     mkdirSync(dir, { recursive: true });
-    const ext = await launchChromium(dir, {});            // stands in for a browser the user started with --remote-debugging-port
+    const ext = await launchChromium(dir, {});
     try {
       const o = disco("open", "att", "--attach", String(ext.port), "--url", g.origin);
       assert.equal(o.code, 0, o.out);
-      assert.match(o.out, /attach http:\/\/127\.0\.0\.1:\d+/);
-      const n = disco("navigate", g.origin, "--until-selector", "#load-chart");
-      assert.equal(n.code, 0, n.out);
-      const c = disco("click", "#load-chart", "--until-request", "/api/slow", "--landed");
-      assert.equal(c.code, 0, c.out);
-      assert.match(c.out, /GET \/api\/chart\/a 200/);
+      const c = disco("act", 'page.click("#load-chart")', "--until", 'page.waitForResponse(r => r.url().includes("/api/slow"))');
+      assert.equal(c.code, 0, c.out); assert.match(c.out, /GET \/api\/chart\/a 200/);
       const x = disco("close", "att");
-      assert.match(x.out, /detached/);                     // an attached browser is forgotten, never killed
+      assert.match(x.out, /detached/);
       assert.equal((await fetch(ext.endpoint + "/json/version")).ok, true, "the external browser must survive close");
     } finally { killLaunched(ext); }
   });
-  it("run-check runs a pack's check.ts", async () => {
+  it("a pack's sdk.ts runs its own check when executed directly", async () => {
     mkdirSync(join(appsDir, "chk"), { recursive: true });
-    writeFileSync(join(appsDir, "chk", "check.ts"), `
-import { reached } from "${root}/src/index.ts";
-export const target = { url: "${g.origin}" };
-export async function check(s, step) {
-  await step("no-op", async () => reached(await s.click("#noop")));
-  await step("chart loads", async () => reached(await s.click("#load-chart", { until: { request: "/api/slow", landed: true } })));
-  await step("fails on purpose", async () => reached(await s.click("#nope")));
+    writeFileSync(join(appsDir, "chk", "sdk.ts"), `
+import { open, reached, type Session } from "${root}/src/index.ts";
+export const URL = ${JSON.stringify(g.origin)};
+export async function loadChart(s: Session) {
+  reached(await s.act("load chart", (p) => p.click("#load-chart"), { until: () => s.page.waitForResponse((r) => r.url().includes("/api/slow")) }));
+  return s.json<{ ms: number }>("/api/slow");
+}
+export async function check(s: Session) {
+  const steps: Array<[string, () => Promise<unknown>]> = [
+    ["chart loads", async () => { const j = await loadChart(s); if (!j || typeof j.ms !== "number") throw new Error("no /api/slow body"); }],
+    ["fails on purpose", async () => reached(await s.act("nope", (p) => p.click("#nope"), { max: 500 }))],
+  ];
+  let failed = 0;
+  for (const [name, fn] of steps) { const t = performance.now(); try { await fn(); console.log(\`PASS \${name} (\${Math.round(performance.now() - t)}ms)\`); } catch (e) { failed++; console.log(\`FAIL \${name}: \${String((e as Error).message).split("\\n")[0]}\`); } }
+  return failed;
+}
+if (import.meta.main) {
+  const s = await open("chk", { url: URL });
+  let failed = 1;
+  try { failed = await check(s); } finally { await s.close({ browser: true }); }
+  process.exit(failed ? 1 : 0);
 }
 `);
-    const r = spawnSync("node", [join(root, "scripts/run-check.ts"), "chk", "--close"], { cwd: root, env: { ...process.env, DISCO_APPS_DIR: appsDir }, encoding: "utf8", timeout: 90000 });
+    const r = spawnSync("node", [join(appsDir, "chk", "sdk.ts")], { cwd: root, env: { ...process.env, DISCO_APPS_DIR: appsDir }, encoding: "utf8", timeout: 90000 });
     const out = r.stdout + r.stderr;
     assert.equal(r.status, 1, out);
-    assert.match(out, /PASS no-op/); assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose .*not-found/);
-    assert.match(out, /2\/3 passed/);
+    assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose: nope \(act:\d+\): not-found/);
   });
 });

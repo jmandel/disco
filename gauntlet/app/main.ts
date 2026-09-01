@@ -562,6 +562,56 @@ function syncNotify(): void {
 }
 
 // ---------------------------------------------------------------------------
+// #29 Skeleton table: the structure paints at once (empty cells, title "--"), the data lands 800 ms later
+// ---------------------------------------------------------------------------
+$("load-people").addEventListener("click", async () => {
+  const tbody = $("people").querySelector("tbody")!;
+  setText("people-title", "--");
+  tbody.replaceChildren(...Array.from({ length: 6 }, () => { const tr = el("tr"); for (let i = 0; i < 4; i++) { const td = el("td", "\u00a0"); td.className = "skel"; tr.appendChild(td); } return tr; }));
+  const j = await getJson<{ people: Array<{ name: string; role: string; dept: string; since: string }> }>("/api/people?hold=800");
+  tbody.replaceChildren(...j.people.map((p) => { const tr = el("tr"); for (const v of [p.name, p.role, p.dept, p.since]) tr.appendChild(el("td", v)); return tr; }));
+  setText("people-title", `People (${j.people.length})`);
+});
+
+// ---------------------------------------------------------------------------
+// #30 Cached revisit: the first visit to a tab fetches, every later visit renders from memory with nothing on the wire
+// ---------------------------------------------------------------------------
+{
+  const cache = new Map<string, string[]>();
+  for (const id of ["a", "b"]) $(`tab-${id}`).addEventListener("click", async () => {
+    for (const t of ["a", "b"]) $(`tab-${t}`).setAttribute("aria-selected", String(t === id));
+    let items = cache.get(id);
+    if (!items) { items = (await getJson<{ items: string[] }>(`/api/tab/${id}`)).items; cache.set(id, items); }
+    const ul = el("ul"); ul.id = "tab-items"; for (const it of items) ul.appendChild(el("li", it));
+    $("tab-panel").replaceChildren(el("h3", `Tab ${id.toUpperCase()}`), ul);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// #31 Stacked panels: panel 2 opens on top of panel 1, which stays mounted; Back removes panel 2 only
+// ---------------------------------------------------------------------------
+{
+  const host = $("panel-host");
+  const panel2 = () => { const d = el("div", undefined, "panel-2"); d.className = "panel"; d.appendChild(el("h3", "Panel 2")); const b = el("button", "Back", "panel-back"); b.addEventListener("click", () => d.remove()); d.appendChild(b); return d; };
+  const panel1 = () => { const d = el("div", undefined, "panel-1"); d.className = "panel"; d.appendChild(el("h3", "Panel 1")); const b = el("button", "Next", "panel-next"); b.addEventListener("click", () => { if (!document.getElementById("panel-2")) host.appendChild(panel2()); }); d.appendChild(b); const c = el("button", "Close", "panel-close"); c.addEventListener("click", () => host.replaceChildren()); d.appendChild(c); return d; };
+  $("open-panel").addEventListener("click", () => { host.replaceChildren(panel1()); });
+}
+
+// ---------------------------------------------------------------------------
+// #32 Styled radios: the input is opacity 0 under a span in the same label (Carbon / MUI shape)
+// ---------------------------------------------------------------------------
+for (const r of document.querySelectorAll<HTMLInputElement>("#severity input[type=radio]")) r.addEventListener("change", () => setText("sev-value", r.value));
+
+// ---------------------------------------------------------------------------
+// #33 Blocking submit: the click handler busy-waits 3.5 s on the main thread, then renders and posts
+// ---------------------------------------------------------------------------
+$("slow-submit").addEventListener("click", () => {
+  const t = Date.now(); while (Date.now() - t < 3500) { /* hold the main thread */ }
+  setText("slow-result", "Submitted");
+  void postJson("/api/slow-submit", { at: Date.now() });
+});
+
+// ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 async function boot(): Promise<void> {

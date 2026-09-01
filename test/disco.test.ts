@@ -1,431 +1,344 @@
-// The wrapper against the gauntlet. One browser, one gauntlet, sequential tests. Timing assertions
-// are the contract: every wait is short and named, and a diagnosis costs about nothing.
+// The surface against the gauntlet. One browser, one gauntlet, sequential tests. Timing assertions are the
+// contract: every wait is bounded by max, a diagnosis costs about max and no more, a bare act costs quiet.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startGauntlet, type GauntletHandle } from "./gauntlet.ts";
-import { open, openApp, reached, type Session } from "../src/index.ts";
+import { open, reached, type Session } from "../src/index.ts";
 
 const appsDir = mkdtempSync(join(process.env.DISCO_TEST_TMP ?? tmpdir(), "disco-apps-"));
 let g: GauntletHandle; let s: Session;
 const sleep = (n: number) => new Promise((r) => setTimeout(r, n));
+// a navigation's postcondition: the nav event (false before, true after — even when the page was already there), then the anchor
+const home = async () => reached(await s.act("home", (p) => p.goto(g.origin), { until: () => s.waitFor("nav", (e) => e.url.startsWith(g.origin)).then(() => s.page.locator("#load-chart").waitFor()), max: 8000 }));
 
 before(async () => { g = await startGauntlet(); s = await open("t", { url: g.origin, appsDir }); });
 after(async () => { await s.close({ browser: true }); g.stop(); });
 
-describe("act + report", () => {
-  it("no-op click: the window is the whole cost, act overhead is small", async () => {
-    const r = await s.click("#noop");
+describe("act + report: the promise table", () => {
+  it("a bare act costs quiet and little else, and says why it returned", async () => {
+    const r = await s.act("noop", (p) => p.click("#noop"));
     assert.equal(r.ok, true);
+    assert.equal(r.returned, "quiet");
     assert.equal(r.requests.length, 0);
-    assert.ok(r.timing.windowMs >= 650 && r.timing.windowMs <= 1000, `window ${r.timing.windowMs}`);
-    assert.ok(r.timing.actMs < 400, `act ${r.timing.actMs}`);
-    assert.ok(r.timing.totalMs < 1400, `total ${r.timing.totalMs}`);
+    assert.ok(r.timing.observeMs >= 480 && r.timing.observeMs <= 1000, `observe ${r.timing.observeMs}`);
+    assert.ok(r.timing.runMs < 400, `run ${r.timing.runMs}`);
+    assert.ok(r.timing.totalMs < 1300, `total ${r.timing.totalMs}`);
+    assert.equal(typeof String(r), "string"); assert.match(String(r), /returned: quiet/);
   });
-  it("missing selector → not-found with candidates and a screenshot, no long wait", async () => {
-    const r = await s.click("#nope");
-    assert.equal(r.ok, false);
+  it("missing selector → not-found within max, with candidates that paste and a shot", async () => {
+    const r = await s.act("nope", (p) => p.click("#nope"), { max: 700 });
+    assert.equal(r.ok, false); assert.equal(r.returned, "error");
     assert.equal(r.diagnosis?.reason, "not-found");
-    assert.ok(r.diagnosis!.candidates!.some((c) => c === 'role=button[name="Load Chart"] (#load-chart)'), JSON.stringify(r.diagnosis!.candidates));
-    assert.equal(await s.page.locator(r.diagnosis!.candidates![0].split(" (")[0]).count(), 1, "the first candidate pastes as a selector");
-    assert.equal(r.diagnosis!.shot!.length, 64);
-    assert.ok(r.timing.totalMs < 1700, `total ${r.timing.totalMs}`);
+    assert.equal(r.diagnosis?.selector, "locator('#nope')");
+    assert.ok(r.diagnosis!.candidates!.some((c) => c.startsWith("#load-chart")), JSON.stringify(r.diagnosis!.candidates));
+    assert.equal(await s.page.locator(r.diagnosis!.candidates![0].split("  (")[0]).count(), 1, "the first candidate pastes as a selector");
+    assert.ok(existsSync(r.diagnosis!.shot!), "diagnosis shot exists");
+    assert.ok(r.timing.totalMs < 1500, `total ${r.timing.totalMs}`);
     assert.throws(() => reached(r), /not-found/);
   });
-  it("disabled control → immediate diagnosis", async () => {
-    const r = await s.click("#noop-disabled");
+  it("disabled control → diagnosed within max", async () => {
+    const r = await s.act("disabled", (p) => p.click("#noop-disabled"), { max: 700 });
     assert.equal(r.diagnosis?.reason, "disabled");
-    assert.ok(r.timing.totalMs < 700, `total ${r.timing.totalMs}`);
+    assert.ok(r.timing.totalMs < 1500, `total ${r.timing.totalMs}`);
   });
-  it("modal: until visible; the covered button is diagnosed as occluded with the open dialog named; ack clears it", async () => {
+  it("modal: until visible; the covered button is diagnosed occluded with the open dialog named; ack clears it", async () => {
     await g.ctl.set({ modal: true, modalDelayMs: 50 });
     try {
-      const r1 = reached(await s.click("#record-2", { until: { selector: "#record-modal", visible: true } }));
-      assert.equal(r1.until?.ok, true);
+      const r1 = reached(await s.act("open record 2", (p) => p.click("#record-2"), { until: () => s.page.locator("#record-modal").waitFor() }));
+      assert.equal(r1.returned, "until");
       assert.ok(r1.ui.added.some((l) => l.includes("Allergy Review Required")));
-      const r2 = await s.click("#record-3");
+      assert.ok(r1.proposed.some((p) => p.code.includes('"dialog"') && p.code.includes("Allergy Review Required")), JSON.stringify(r1.proposed));
+      const r2 = await s.act("click under the modal", (p) => p.click("#record-3"), { max: 700 });
       assert.equal(r2.diagnosis?.reason, "occluded");
       assert.match(r2.diagnosis!.over!, /record-modal/);
       assert.match(r2.diagnosis!.dialogs![0], /Allergy/);
-      assert.ok(r2.timing.totalMs < 700, `total ${r2.timing.totalMs}`);
-      reached(await s.click("#modal-ack", { until: { gone: "#record-modal" } }));
+      assert.ok(r2.timing.totalMs < 1500, `total ${r2.timing.totalMs}`);
+      reached(await s.act("ack", (p) => p.click("#modal-ack"), { until: () => s.page.locator("#record-modal").waitFor({ state: "hidden" }) }));
     } finally { await g.ctl.reset(); }
   });
-  it("until request landed: proportional to the server, bodies captured", async () => {
+  it("until a response: returns when it lands, proportional to the server; json() reads the body", async () => {
     await g.ctl.set({ slowMs: 400 });
-    const r = reached(await s.click("#load-chart", { until: { request: "/api/slow", landed: true } }));
-    assert.ok(r.until!.elapsedMs >= 380 && r.until!.elapsedMs <= 1500, `elapsed ${r.until!.elapsedMs}`);
-    assert.deepEqual(r.requests.map((w) => w.path.split("?")[0]).sort(), ["/api/chart/a", "/api/chart/b", "/api/slow"]);
-    await sleep(200);
-    const slow = s.store.latestJson<{ ms: number }>("/api/slow", r.action);
-    assert.equal(slow?.ms, 400);
-    await g.ctl.reset();
+    try {
+      const r = reached(await s.act("load chart", (p) => p.click("#load-chart"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/slow")) }));
+      assert.equal(r.returned, "until");
+      assert.ok(r.until!.elapsedMs >= 380 && r.until!.elapsedMs <= 1500, `elapsed ${r.until!.elapsedMs}`);
+      assert.deepEqual(r.requests.map((w) => w.path.split("?")[0]).sort(), ["/api/chart/a", "/api/chart/b", "/api/slow"]);
+      assert.ok(r.proposed.some((p) => p.kind === "response" && p.code.includes("/api/slow") && p.atMs! >= 300), JSON.stringify(r.proposed));
+      const slow = await s.json<{ ms: number }>("/api/slow", { action: r.action });
+      assert.equal(slow?.ms, 400);
+    } finally { await g.ctl.reset(); }
   });
-  it("a predicate that already holds is flagged", async () => {
-    await s.until({ selector: "#chart-status:has-text('idle')" }, { timeout: 2000 });
-    const r = await s.click("#load-chart", { until: { selector: "#chart-status:has-text('idle')" } });
-    assert.equal(r.until?.ok, true);
-    assert.equal(r.until?.alreadyTrue, true);
+  it("a until that already held is flagged and refused by reached", async () => {
+    const r = await s.act("already", (p) => p.click("#noop"), { until: () => s.page.locator("#load-chart").waitFor() });
+    assert.equal(r.until?.ok, true); assert.equal(r.until?.alreadyTrue, true);
     assert.throws(() => reached(r), /already true/);
-    await s.until({ request: "/api/slow", landed: true }, { timeout: 3000 });
   });
-  it("until that never comes: budget honoured, diagnosis with screenshot", async () => {
-    const r = await s.until({ selector: "#never" }, { timeout: 600 });
-    assert.equal(r.until?.ok, false);
-    assert.ok(r.until!.elapsedMs >= 550 && r.until!.elapsedMs <= 1100, `elapsed ${r.until!.elapsedMs}`);
-    assert.equal(r.until?.diagnosis?.reason, "timeout");
-    assert.equal(r.until?.diagnosis?.shot?.length, 64);
+  it("a until that never comes costs max and no more, with the Playwright error", async () => {
+    const r = await s.act("wait for never", async () => {}, { until: () => s.page.locator("#never").waitFor(), max: 600 });
+    assert.equal(r.ok, true); assert.equal(r.returned, "max"); assert.equal(r.until?.ok, false);
+    assert.match(r.until!.error!, /Timeout/);
+    assert.ok(r.timing.totalMs >= 550 && r.timing.totalMs <= 1400, `total ${r.timing.totalMs}`);
     assert.throws(() => reached(r), /until failed/);
   });
-  it("any-of with labels reports which arm; request bodies are captured", async () => {
+  it("Promise.race arms: until.value says which; the wire has the write and its status", async () => {
     await g.ctl.set({ saveFails: true });
     try {
-      const r = reached(await s.click("#save", { until: { any: [{ selector: "#toast[data-kind=ok]", label: "ok" }, { selector: "#toast[data-kind=fail]", label: "fail" }] } }));
-      assert.equal(r.until?.which, "fail");
-      await sleep(100);
-      const post = s.store.requests({ url: "/api/save", method: "POST", action: r.action }).at(-1)!;
-      assert.match(post.req_body!, /form/);
-      assert.equal(post.status, 202);
-      const status = s.store.requests({ url: "/api/save/status", action: r.action }).at(-1)!;
-      assert.equal(status.status, 500);
+      const r = reached(await s.act("save", (p) => p.click("#save"), { until: () => Promise.race([s.page.locator("#toast[data-kind=ok]").waitFor().then(() => "ok"), s.page.locator("#toast[data-kind=fail]").waitFor().then(() => "fail")]) }));
+      assert.equal(r.until?.value, "fail");
+      assert.ok(r.writes.some((w) => w.startsWith("POST /api/save 202")), JSON.stringify(r.writes));
+      await sleep(200);
+      const status = s.sql<{ status: number }>("SELECT status FROM requests WHERE url LIKE '%/api/save/status%' AND action_id=? ORDER BY t_start DESC LIMIT 1", r.action)[0];
+      assert.equal(status?.status, 500);
+      await s.act("toast gone", async () => {}, { until: () => s.page.locator("#toast").waitFor({ state: "hidden" }), max: 4000 });
     } finally { await g.ctl.reset(); }
   });
-  it("debounced search: type + request landed; the aria diff shows the rows", async () => {
-    const r = reached(await s.type("#search", "al", { until: { request: "/api/search", landed: true } }));
+  it("debounced search: keystrokes + a DOM until; the diff shows the rows", async () => {
+    const r = reached(await s.act("search", (p) => p.locator("#search").pressSequentially("al", { delay: 15 }), { until: () => s.page.locator("#s-7").getByText("Alan Turing").waitFor() }));
+    assert.ok(r.requests.some((w) => w.path.includes("/api/search")), JSON.stringify(r.requests));
     assert.ok(r.ui.added.some((l) => l.includes("Alan Turing")), JSON.stringify(r.ui.added));
   });
-  it("keyboard-only combobox: type, ArrowDown, Enter", async () => {
-    reached(await s.type("#med", "as", { until: { request: "/api/meds", landed: true } }));
-    reached(await s.press("ArrowDown", { target: "#med" }));
-    const r = reached(await s.press("Enter", { target: "#med", until: { selector: "#med-selected:has-text('Selected:')" } }));
+  it("keyboard-only combobox: keystrokes, ArrowDown, Enter", async () => {
+    reached(await s.act("type med", (p) => p.locator("#med").pressSequentially("as", { delay: 15 }), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/meds")) }));
+    reached(await s.act("down", (p) => p.press("#med", "ArrowDown")));
+    const r = reached(await s.act("enter", (p) => p.press("#med", "Enter"), { until: () => s.page.locator("#med-selected:has-text('Selected:')").waitFor() }));
     assert.ok(r.ui.added.some((l) => l.includes("Selected:")));
   });
   it("shadow DOM: css pierces", async () => {
-    reached(await s.click("#shadow-btn", { until: { selector: "#shadow-count:has-text('1')" } }));
+    reached(await s.act("shadow", (p) => p.click("#shadow-btn"), { until: () => s.page.locator("#shadow-count:has-text('1')").waitFor() }));
   });
-  it("same-origin and cross-origin iframes via frame:", async () => {
-    reached(await s.fill("#if-name", "Ada", { frame: "#same-origin" }));
-    reached(await s.click("#if-submit", { frame: "#same-origin", until: { request: "/api/iframe-submit", landed: true } }));
-    reached(await s.fill("#xf-name", "Grace", { frame: "#cross-origin" }));
-    const r = reached(await s.click("#xf-submit", { frame: "#cross-origin", until: { request: "/api/xframe-submit", landed: true } }));
+  it("same-origin and cross-origin iframes via frameLocator", async () => {
+    reached(await s.act("if name", (p) => p.frameLocator("#same-origin").locator("#if-name").fill("Ada")));
+    reached(await s.act("if submit", (p) => p.frameLocator("#same-origin").locator("#if-submit").click(), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/iframe-submit")) }));
+    reached(await s.act("xf name", (p) => p.frameLocator("#cross-origin").locator("#xf-name").fill("Grace")));
+    const r = reached(await s.act("xf submit", (p) => p.frameLocator("#cross-origin").locator("#xf-submit").click(), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/xframe-submit")) }));
     assert.ok(r.requests.some((w) => w.path.includes("/api/xframe-submit") && w.method === "POST"));
   });
-  it("native dialogs are handled by policy and reported", async () => {
-    const r = reached(await s.click("#confirm"));
-    assert.equal(r.dialogs[0]?.type, "confirm");
-    assert.equal(r.dialogs[0]?.handled, "accept");
+  it("native dialogs are accepted and reported", async () => {
+    const r = reached(await s.act("confirm", (p) => p.click("#confirm")));
+    assert.equal(r.dialogs[0]?.type, "confirm"); assert.equal(r.dialogs[0]?.handled, "accept");
   });
-  it("child window: the new page is reported; the driven page is not throttled behind it; closeOtherPages", async () => {
-    const r = reached(await s.click("#open-child"));
-    assert.ok(r.pages.some((u) => u.includes("/child.html")), JSON.stringify(r.pages));
+  it("child window: reported, waitFor('page') works, the driven page is not throttled behind it", async () => {
+    const r = reached(await s.act("open child", (p) => p.click("#open-child"), { until: () => s.waitFor("page", (e) => e.url.includes("/child.html")) }));
     assert.equal(r.openPages, 2);
-    const r2 = reached(await s.click("#noop", { window: 0 }));
-    assert.ok(r2.timing.actMs < 800, `act ${r2.timing.actMs}ms with a popup open (background throttling?)`);
-    assert.equal(await s.closeOtherPages(), 1);
+    const r2 = reached(await s.act("noop with popup", (p) => p.click("#noop"), { quiet: 100 }));
+    assert.ok(r2.timing.runMs < 800, `run ${r2.timing.runMs}ms with a popup open (background throttling?)`);
+    for (const p of s.context.pages()) if (p !== s.page) await p.close();
     assert.equal(s.context.pages().length, 1);
   });
-  it("push channels: WS frames recorded; SSE marked streaming", async () => {
-    const dirs = s.store.sql<{ dir: string; n: number }>("SELECT dir, count(*) n FROM ws_frames GROUP BY dir").map((x) => x.dir);
+  it("push channels: WS frames recorded, waitFor('ws') sees a pushed frame, SSE marked streaming", async () => {
+    const dirs = s.sql<{ dir: string }>("SELECT DISTINCT dir FROM ws_frames").map((x) => x.dir);
     assert.ok(dirs.includes("open") && dirs.includes("in"), dirs.join());
-    assert.equal(s.store.requests({ url: "/api/notify-sse" })[0]?.body_state, "streaming");
+    const r = reached(await s.act("push", () => g.ctl.set({ wsPush: true }), { until: () => s.waitFor("ws", (f) => f.payload.includes("push")) }));
+    assert.equal(r.returned, "until");
+    await assert.rejects(() => s.waitFor("ws", () => false, 300), /nothing matched/);
+    assert.equal(s.sql<{ body_state: string }>("SELECT body_state FROM requests WHERE url LIKE '%/api/notify-sse%' LIMIT 1")[0]?.body_state, "streaming");
   });
-  it("login: set-cookie visible in the log; until url", async () => {
-    reached(await s.navigate(g.origin + "/login.html"));
-    reached(await s.fill("#user", "ada"));
-    reached(await s.fill("#pass", "x"));
-    const r = reached(await s.click("#login", { until: { url: "/secure.html" } }));
+  it("login: HttpOnly set-cookie shows in the storage line; url until; proposals use the pathname", async () => {
+    reached(await s.act("go login", (p) => p.goto(g.origin + "/login.html?next=/secure.html"), { until: () => s.page.locator("#login").waitFor(), max: 8000 }));
+    reached(await s.act("user", (p) => p.fill("#user", "ada"), { quiet: 50 }));
+    reached(await s.act("pass", (p) => p.fill("#pass", "x"), { quiet: 50 }));
+    const r = reached(await s.act("log in", (p) => p.click("#login"), { until: () => s.page.waitForURL((u) => u.pathname.includes("/secure.html")) }));
     assert.match(r.url, /secure\.html/);
+    assert.ok(r.storage.cookies.some((c) => c.startsWith("+gauntlet_auth=")), JSON.stringify(r.storage));
+    assert.ok(r.proposed.some((p) => p.kind === "url" && p.code.includes("/secure.html")), JSON.stringify(r.proposed));
     await sleep(100);
-    const login = s.store.requests({ url: "/api/login", method: "POST" }).at(-1)!;
-    assert.match(login.resp_headers!, /set-cookie/i);
-    assert.match(login.resp_headers!, /gauntlet_auth=ada/);
-    reached(await s.navigate(g.origin, { until: { selector: "#load-chart", visible: true } }));
+    const login = s.sql<{ resp_headers: string }>("SELECT resp_headers FROM requests WHERE url LIKE '%/api/login%' AND method='POST' ORDER BY t_start DESC LIMIT 1")[0];
+    assert.match(login.resp_headers, /set-cookie/i);
+    await home();
   });
   it("console errors inside the window are in the report", async () => {
-    await s.evaluate("setTimeout(() => { throw new Error('gauntlet-boom') }, 100)");
-    const r = await s.until({ selector: "#never" }, { timeout: 400 });
+    await s.page.evaluate("setTimeout(() => { throw new Error('gauntlet-boom') }, 100)");
+    const r = await s.act("wait", async () => {}, { until: () => s.page.locator("#never").waitFor(), max: 400 });
     assert.ok(r.console.some((c) => c.text.includes("gauntlet-boom")), JSON.stringify(r.console));
   });
-  it("evaluate returns values; the raw page is there", async () => {
-    assert.equal(typeof (await s.evaluate("document.title")), "string");
-    assert.equal(await s.page.locator("#noop").count(), 1);
-  });
-  it("note appends to NOTES.md", async () => {
-    s.note("the modal is conditional (act:5)");
-    const { readFileSync } = await import("node:fs");
-    assert.match(readFileSync(join(appsDir, "t", "NOTES.md"), "utf8"), /conditional/);
-  });
-});
-
-describe("round-1 friction", () => {
-  it("url predicate ignores the query string: '?next=/secure.html' on the login page is not alreadyTrue", async () => {
-    reached(await s.navigate(g.origin + "/login.html?next=/secure.html"));
-    reached(await s.fill("#user", "ada"));
-    reached(await s.fill("#pass", "x"));
-    const r = reached(await s.click("#login", { until: { url: "/secure.html" } }));
-    assert.notEqual(r.until?.alreadyTrue, true);
-    assert.match(r.url, /\/secure\.html$/);
-    reached(await s.navigate(g.origin, { until: { selector: "#load-chart", visible: true } }));
-  });
-  it("landed on a body the page never reads: bounded at ~1 s, status known, body marked missing", async () => {
-    const r = reached(await s.click("#save", { until: { request: "/api/save/status", landed: true } }));
-    assert.ok(r.until!.elapsedMs >= 500 && r.until!.elapsedMs <= 2200, `elapsed ${r.until!.elapsedMs}`);
-    const w = r.requests.find((x) => x.path.includes("/api/save/status"))!;
-    assert.equal(w.status, 200);
-    await sleep(1700);
-    assert.equal(s.store.requests({ url: "/api/save/status", action: r.action })[0]?.body_state, "missing");
-    reached(await s.until({ gone: "#toast" }, { timeout: 4000 }));
-  });
-  it("a widget the app re-renders every 100 ms: mouse click → detached diagnosis with the hint; js: true lands", async () => {
-    const before = await s.evaluate<string>("document.getElementById('rerender-count').textContent");
-    const r1 = await s.click("#rerender");
-    assert.equal(r1.ok, false);
-    assert.equal(r1.diagnosis?.reason, "detached", r1.diagnosis?.message);
-    assert.match(r1.diagnosis!.message, /js: true/);
-    const r2 = reached(await s.click("#rerender", { js: true, until: { fn: `document.getElementById('rerender-count').textContent !== ${JSON.stringify(before)}` } }));
-    assert.equal(r2.until?.ok, true);
-  });
-  it("a fixed element outside the viewport → offscreen, fast", async () => {
-    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"fx\" style=\"position:fixed;top:5000px;left:10px\">fx</button>')");
-    const r = await s.click("#fx");
-    assert.equal(r.diagnosis?.reason, "offscreen", r.diagnosis?.message);
-    assert.match(r.diagnosis!.message, /position: fixed/);
-    assert.ok(r.timing.totalMs < 900, `total ${r.timing.totalMs}`);
-    await s.evaluate("document.getElementById('fx').remove()");
-  });
-  it("an element with pointer-events: none → unclickable, fast, with the keyboard hint", async () => {
-    reached(await s.type("#med", "as", { until: { request: "/api/meds" } }));
-    const r = await s.click("#med-list li >> nth=0");
-    assert.equal(r.diagnosis?.reason, "unclickable", r.diagnosis?.message);
-    assert.match(r.diagnosis!.message, /keyboard/);
-    assert.ok(r.timing.totalMs < 900, `total ${r.timing.totalMs}`);
-    reached(await s.press("Escape", { target: "#med" }));
-  });
-  it("drag: the slider thumb moves and the drag report is posted", async () => {
-    const r = reached(await s.drag("#slider-thumb", "#slider-track", { until: { request: "/api/drag-report" } }));
-    assert.ok(r.requests.some((w) => w.path.includes("/api/drag-report") && w.method === "POST"));
-  });
-});
-
-describe("round-3 friction", () => {
-  it("until { page }: a popup opening is a postcondition", async () => {
-    const r = reached(await s.click("#open-child", { until: { page: "/child.html" } }));
-    assert.equal(r.until?.ok, true);
-    assert.equal(await s.closeOtherPages(), 1);
-  });
-  it("until { ws }: a pushed WebSocket frame is a postcondition; the diagnosis counts frames", async () => {
-    const p = s.until({ ws: "push" }, { timeout: 3000 });
-    await g.ctl.set({ wsPush: true });
-    const r = reached(await p);
-    assert.equal(r.until?.ok, true);
-    const miss = await s.until({ ws: "never-in-any-payload" }, { timeout: 300 });
-    assert.match(miss.until!.diagnosis!.message, /WebSocket frame/);
-  });
-  it("a session that joins after the socket opened still sees its frames (round 4)", async () => {
-    const s2 = await open("t", { appsDir });
+  it("a page that never goes quiet returns at max and says so, with what is in flight", async () => {
+    await g.ctl.set({ slowMs: 2500 });
     try {
-      assert.equal(s2.page, s2.context.pages().find((p) => p.url().startsWith(g.origin)) ?? s2.page);
-      const p = s2.until({ ws: "push" }, { timeout: 3000 });
-      await g.ctl.set({ wsPush: true });
-      const r = reached(await p);
-      assert.equal(r.until?.ok, true);
-    } finally { await s2.close(); }
-  });
-  it("the wire marks the response an until matched, and a long-poll that answered inside the window", async () => {
-    const r = reached(await s.click("#load-chart", { until: { request: "/api/chart/b" } }));
-    const hit = r.requests.find((w) => w.until);
-    assert.ok(hit && hit.path.includes("/api/chart/b"), JSON.stringify(r.requests));
-    assert.ok(r.until?.request?.startsWith("r"));
-    await g.ctl.set({ ambient: true, pollHoldMs: 400, heartbeatMs: 60000 });
-    try {
-      reached(await s.navigate(g.origin, { until: { selector: "#load-chart" } }));
-      const p = reached(await s.until({ request: "/api/poll" }, { timeout: 4000 }));
-      const answered = p.requests.find((w) => w.until);
-      assert.ok(answered, JSON.stringify(p.requests));
-    } finally { await g.ctl.reset(); reached(await s.navigate(g.origin, { until: { selector: "#load-chart" } })); }
-  });
-  it("until { request } that never fires says whether the request was issued at all", async () => {
-    const r = await s.until({ request: "/api/does-not-exist" }, { timeout: 300 });
-    assert.match(r.until!.diagnosis!.message, /no request matching .* was issued/);
-  });
-  it("drag by offset: the slider moves", async () => {
-    const before = Number(await s.evaluate("document.getElementById('slider-value').textContent"));
-    const r = reached(await s.drag("#slider-thumb", { dx: 120, dy: 0 }, { until: { request: "/api/drag-report" } }));
-    const after = Number(await s.evaluate("document.getElementById('slider-value').textContent"));
-    assert.ok(after > before, `slider ${before} → ${after}`);
-    assert.ok(r.requests.some((w) => w.path.includes("/api/drag-report")));
-  });
-  it("click with position: a canvas cell", async () => {
-    reached(await s.click("#grid", { position: { x: 30, y: 30 }, until: { fn: "window.__gridSelected != null" } }));
-  });
-  it("selector predicates mean visible by default; visible: false means attached", async () => {
-    const r = await s.until({ selector: "#ctx-menu" }, { timeout: 300 });    // exists, hidden until a right-click
-    assert.equal(r.until?.ok, false);
-    const r2 = reached(await s.until({ selector: "#ctx-menu", visible: false }, { timeout: 300 }));
-    assert.equal(r2.until?.ok, true);
-  });
-  it("uiIgnore drops noisy lines from the diff", async () => {
-    s.uiIgnore.push("ws: open");
-    const r = reached(await s.click("#record-4", { until: { request: "/api/record/4", landed: true } }));
-    assert.ok(!r.ui.added.some((l) => l.includes("ws: open")) && !r.ui.removed.some((l) => l.includes("ws: open")), JSON.stringify(r.ui));
-    s.uiIgnore.pop();
-  });
-  it("a second session joining the browser with the same url does not reload it; close sweeps unread bodies to missing", async () => {
-    await g.ctl.set({ modal: true, modalDelayMs: 0 });
-    try {
-      reached(await s.click("#save", { window: 0 }));
-      reached(await s.click("#record-5", { until: { selector: "#record-modal", visible: true } }));
-      const s2 = await open("t", { url: g.origin, appsDir });
-      assert.equal(await s2.page.locator("#record-modal").count(), 1, "open({url}) reloaded a page that was already there");
-      await s2.close();
-      const st = openApp("t", appsDir);
-      const pendingWithStatus = st.sql("SELECT count(*) n FROM requests WHERE run=? AND body_state='pending' AND status IS NOT NULL", s.run)[0].n;
-      assert.equal(pendingWithStatus, 0);
-      st.close();
-      reached(await s.click("#modal-ack", { until: { gone: "#record-modal" } }));
+      const r = reached(await s.act("slow chart", (p) => p.click("#load-chart"), { max: 900 }));
+      assert.equal(r.returned, "max");
+      assert.ok(r.pending.some((p) => p.includes("/api/slow")), JSON.stringify(r.pending));
+      assert.match(String(r), /still changing/);
+      await s.act("drain", async () => {}, { until: () => s.page.locator("#chart:has-text('Chart loaded')").waitFor(), max: 4000 });
     } finally { await g.ctl.reset(); }
   });
 });
 
-describe("openmrs friction", () => {
-  it("aria: the page as the accessibility tree sees it; one element; the CLI prints it", async () => {
-    const body = await s.aria();
-    assert.match(body, /button "Load Chart"/);
-    assert.match(await s.aria("#s-13"), /button "Do nothing"/);
+describe("what the real apps taught (gauntlet sections 29–33)", () => {
+  it("skeleton table: structure satisfies a structural until at once; quiet-return waits for the data", async () => {
+    const r1 = reached(await s.act("load people", (p) => p.click("#load-people"), { until: () => s.page.locator("#people tbody tr").nth(3).waitFor() }));
+    assert.ok(r1.until!.elapsedMs < 400, `the skeleton satisfied the structural wait in ${r1.until!.elapsedMs}ms`);
+    assert.equal(await s.page.locator("#people-title").textContent(), "--");
+    await s.act("data", async () => {}, { until: () => s.page.locator("#people-title:has-text('People (')").waitFor(), max: 3000 });
+    await home();
+    const r2 = reached(await s.act("load people again", (p) => p.click("#load-people"), { max: 4000 }));
+    assert.equal(r2.returned, "quiet");
+    assert.ok(r2.ui.added.some((l) => l.includes("People (6)")), JSON.stringify(r2.ui.added));
+    assert.ok(r2.proposed.some((p) => p.code.includes("/api/people")), JSON.stringify(r2.proposed));
   });
-  it("static resources are folded out of the wire section unless wire: 'all'", async () => {
-    const r = reached(await s.navigate(g.origin, { until: { selector: "#load-chart" } }));
-    assert.ok(r.static.count >= 2, JSON.stringify(r.static));
-    assert.ok(!r.requests.some((w) => w.type === "script" || w.type === "stylesheet"), JSON.stringify(r.requests.map((w) => w.type)));
-    assert.ok(r.requests.some((w) => w.type === "document"));
-    const all = reached(await s.navigate(g.origin, { until: { selector: "#load-chart" }, wire: "all" }));
-    assert.ok(all.requests.some((w) => w.type === "script"));
-    assert.equal(all.static.count, 0);
+  it("cached revisit: the second visit issues no request; a state proposal (selected) is offered instead", async () => {
+    reached(await s.act("tab a", (p) => p.click("#tab-a"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/tab/a")) }));
+    reached(await s.act("tab b", (p) => p.click("#tab-b"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/tab/b")) }));
+    const r = await s.act("tab a again", (p) => p.click("#tab-a"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/tab/a")), max: 800 });
+    assert.equal(r.until?.ok, false); assert.equal(r.returned, "max");
+    assert.ok(!r.requests.some((w) => w.path.includes("/api/tab")), "no request on a cached revisit");
+    const bare = reached(await s.act("tab b again", (p) => p.click("#tab-b")));
+    assert.ok(bare.proposed.some((p) => p.code.includes('"tab"') && p.code.includes("selected: true")), JSON.stringify(bare.proposed));
+    assert.ok(!bare.proposed.some((p) => p.code.includes('"tab"') && !p.code.includes("selected")), "a tab that existed before is not proposed without its new state");
   });
-});
-
-describe("openmrs run-2 friction", () => {
-  it("an any-of arm that resolves before dispatch is alreadyTrue even when it is a fn arm", async () => {
-    const r = await s.click("#noop", { until: { any: [{ url: "/never" }, { fn: "document.querySelector('#load-chart') !== null", label: "fn" }] } });
-    assert.equal(r.until?.ok, true);
-    assert.equal(r.until?.alreadyTrue, true);
+  it("stacked panels: what you leave is the postcondition; the arriving element was already there", async () => {
+    reached(await s.act("open panel", (p) => p.click("#open-panel"), { until: () => s.page.locator("#panel-next").waitFor() }));
+    reached(await s.act("next", (p) => p.click("#panel-next"), { until: () => s.page.locator("#panel-2").waitFor() }));
+    const wrong = await s.act("back (wrong until)", (p) => p.click("#panel-back"), { until: () => s.page.locator("#panel-next").waitFor() });
+    assert.equal(wrong.until?.alreadyTrue, true);
+    assert.ok(wrong.proposed.some((p) => p.kind === "gone" && p.code.includes("Panel 2")), JSON.stringify(wrong.proposed));
+    reached(await s.act("next again", (p) => p.click("#panel-next"), { until: () => s.page.locator("#panel-2").waitFor() }));
+    reached(await s.act("back", (p) => p.click("#panel-back"), { until: () => s.page.locator("#panel-2").waitFor({ state: "hidden" }) }));
+    reached(await s.act("close panel", (p) => p.click("#panel-close"), { until: () => s.page.locator("#panel-1").waitFor({ state: "hidden" }) }));
   });
-  it("a panel translated exactly to the viewport edge is offscreen, not occluded", async () => {
-    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<div id=\"panel\" style=\"position:fixed;top:0;left:100vw;width:200px;height:100px;background:#eee\"><button id=\"panel-btn\">Logout</button></div>')");
-    const r = await s.click("#panel-btn");
-    assert.equal(r.diagnosis?.reason, "offscreen", r.diagnosis?.message);
-    await s.evaluate("document.getElementById('panel').remove()");
+  it("styled radio: a real click on the input is diagnosed as a styled control, not a dialog; the label works", async () => {
+    const r = await s.act("click hidden input", (p) => p.click("#sev-mild"), { max: 800 });
+    assert.equal(r.ok, false);
+    assert.equal(r.diagnosis?.reason, "occluded");
+    assert.match(r.diagnosis!.message, /styled control/);
+    assert.doesNotMatch(r.diagnosis!.message, /dismiss the dialog/);
+    reached(await s.act("click label", (p) => p.click("label:has-text('Mild')"), { until: () => s.page.locator("#sev-value:has-text('Mild')").waitFor() }));
+    const l = await s.look("#sev-severe");
+    assert.match(l.matches![0].why ?? "", /styled control/);
   });
-  it("aria on a missing selector throws; a request predicate that expires lists what did arrive", async () => {
-    await assert.rejects(() => s.aria("#nope"), /no element matches #nope/);
-    const r = await s.click("#load-chart", { until: { request: "/api/nothing-like-this" }, timeout: 700 });
-    assert.match(r.until!.diagnosis!.message, /what did arrive: .*\/api\/(chart|slow)/);
-  });
-  it("jsonAll returns every body for an endpoint family", async () => {
-    const all = s.store.jsonAll("/api/chart/");
-    assert.ok(all.length >= 2, String(all.length));
-  });
-});
-
-describe("openmrs run-3 friction", () => {
-  it("probe is an act: its requests are attributed, the value comes back, writes are listed", async () => {
-    const r = await s.probe<number>("fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.status)", undefined, { until: { request: "/api/save" } });
-    assert.equal(r.ok, true);
-    assert.equal(r.value, 202);
-    assert.ok(r.writes.some((w) => w.startsWith("POST /api/save")), JSON.stringify(r.writes));
-    await new Promise((x) => setTimeout(x, 200));
-    assert.ok(s.store.requests({ url: "/api/save", method: "POST", action: r.action }).length >= 1);
-  });
-  it("holds: one cheap check, no waiting", async () => {
-    assert.equal(await s.holds({ selector: "#load-chart" }), true);
-    assert.equal(await s.holds({ selector: "#never" }), false);
-    assert.equal(await s.holds({ any: [{ url: "/nowhere" }, { text: "Load Chart" }] }), true);
-  });
-  it("aria accepts a bare role name", async () => {
-    assert.match(await s.aria("main").catch(() => s.aria("body")), /Load Chart/);
-    assert.match(await s.aria("combobox"), /Medication/);
-  });
-  it("a malformed arm fails the any-of immediately instead of burning the budget", async () => {
-    const t0 = performance.now();
-    const r = await s.until({ any: [{ selector: "#never" }, { selector: "role=button[name='x'] svg, #broken[" }] }, { timeout: 4000 });
-    assert.equal(r.until?.ok, false);
-    assert.match(r.until!.error!, /arm failed/);
-    assert.ok(performance.now() - t0 < 1500, "should not have waited for the budget");
-  });
-});
-
-describe("write-pass friction", () => {
-  it("request predicate with a method distinguishes a POST from a GET on a shared path", async () => {
-    const r = reached(await s.click("#save", { until: { request: "/api/save", method: "POST" } }));
-    assert.match(r.until!.which!, /POST/);
-    const g2 = await s.until({ request: "/api/save", method: "DELETE" }, { timeout: 300 });
-    assert.equal(g2.until?.ok, false);
-    await s.until({ gone: "#toast" }, { timeout: 4000 });
-  });
-  it("a styled checkbox whose input hides under its label's visual is clicked, not diagnosed", async () => {
-    // Carbon-style: the input is sized but transparent, under a visual span in the same label
-    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<label id=\"lbl\" style=\"position:relative;display:inline-block\"><input type=\"checkbox\" id=\"cb\" style=\"position:absolute;opacity:0;left:0;top:0;width:24px;height:24px;margin:0\"><span style=\"position:absolute;left:0;top:0;width:24px;height:24px;background:#ccc\"></span><span style=\"margin-left:30px\">Opt</span></label>')");
-    const r = await s.click("#cb");
-    assert.equal(r.ok, true, r.diagnosis?.message);
-    assert.equal(await s.evaluate("document.getElementById('cb').checked"), true);
-    await s.evaluate("document.getElementById('lbl').remove()");
-    // zero-size input (display-hidden) with a visible label: the label is clicked
-    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<label id=\"lbl2\"><input type=\"checkbox\" id=\"cb2\" style=\"position:absolute;opacity:0;width:0;height:0\"><span style=\"display:inline-block;width:24px;height:24px;background:#ccc;vertical-align:middle\"></span> Opt2</label>')");
-    const r2 = await s.click("#cb2");
-    assert.equal(r2.ok, true, r2.diagnosis?.message);
-    assert.equal(await s.evaluate("document.getElementById('cb2').checked"), true);
-    await s.evaluate("document.getElementById('lbl2').remove()");
-  });
-  it("aria on a miss names the visible controls; latestJson can read a write by method", async () => {
-    await assert.rejects(() => s.aria("#nope"), /Visible controls: role=button/);
-    const r = reached(await s.probe("fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.json()).then(j => j.id)", undefined, { until: { request: "/api/save", method: "POST", landed: true } }));
-    await new Promise((x) => setTimeout(x, 300));
-    const posted = s.store.latestJson<{ id: number }>("/api/save", { action: r.action, method: "POST" });
-    assert.ok(posted && typeof posted.id === "number", JSON.stringify(posted));
-  });
-});
-
-describe("saucedemo friction", () => {
-  it("a click whose handler blocks the main thread past the action budget still counts, and its until still runs", async () => {
-    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"blk\">block</button>'); document.getElementById('blk').onclick = () => { const t = Date.now(); while (Date.now() - t < 3600) {} document.body.dataset.blk = '1'; }");
-    const r = await s.click("#blk", { until: { fn: "document.body.dataset.blk === '1'" }, timeout: 8000 });
+  it("blocking submit: a click whose handler holds the main thread past max still counts, and the note says so", async () => {
+    const r = await s.act("slow submit", (p) => p.click("#slow-submit"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/slow-submit"), { timeout: 8000 }), max: 3000 });
     assert.equal(r.ok, true, r.diagnosis?.message);
     assert.match(r.note ?? "", /blocked the main thread/);
-    assert.equal(r.until?.ok, true);
-    await s.evaluate("document.getElementById('blk').remove()");
+    assert.equal(r.returned, "max");
+    await s.act("drain", async () => {}, { until: () => s.page.locator("#slow-result:has-text('Submitted')").waitFor(), max: 6000 });
+    const r2 = reached(await s.act("slow submit with room", (p) => p.click("#slow-submit"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/slow-submit")), max: 6000 }));
+    assert.equal(r2.until?.ok, true); assert.equal(r2.note, undefined);
   });
-  it("a child whose parent receives the pointer is clicked through the parent", async () => {
-    // a visually-hidden child (clip pattern) inside a button: it has a box, but the pointer lands on the parent
-    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"pb\" onclick=\"this.dataset.hit=1\" style=\"position:relative;padding:12px\"><span id=\"ps\" style=\"position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);left:4px;top:4px\">menu</span>≡</button>')");
-    const r = await s.click("#ps");
-    assert.equal(r.ok, true, r.diagnosis?.message);
-    assert.equal(await s.evaluate("document.getElementById('pb').dataset.hit"), "1");
-    await s.evaluate("document.getElementById('pb').remove()");
-  });
-  it("storage changes in the window are reported: cookies and localStorage", async () => {
-    const r = reached(await s.probe("localStorage.setItem('cart', '[4]'); document.cookie = 'who=ada'; 1"));
-    assert.ok(r.storage.local.some((x) => x.startsWith("+cart=[4]")), JSON.stringify(r.storage));
-    assert.ok(r.storage.cookies.some((x) => x.startsWith("+who=ada")), JSON.stringify(r.storage));
-    const r2 = reached(await s.probe("localStorage.setItem('cart', '[4,0]'); localStorage.removeItem('nothing'); 1"));
-    assert.ok(r2.storage.local.some((x) => x.includes("cart: [4] → [4,0]")), JSON.stringify(r2.storage));
-    await s.evaluate("localStorage.clear(); document.cookie = 'who=; max-age=0'");
-  });
-  it("body() returns the whole blob even when the text column was truncated", async () => {
-    const big = "x".repeat(600 * 1024);
-    const hash = s.log.storeBody(new TextEncoder().encode(big), "text/plain").hash;
-    assert.equal(s.store.sql("SELECT truncated FROM bodies WHERE hash=?", hash)[0].truncated, 1);
-    assert.equal(s.store.body(hash).length, big.length);
+  it("a body the page never reads: the until on the response is fast; finished() cannot resolve and the note says why", async () => {
+    const r = reached(await s.act("save", (p) => p.click("#save"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/save/status")) }));
+    assert.ok(r.until!.elapsedMs < 1500);
+    await s.act("toast gone", async () => {}, { until: () => s.page.locator("#toast").waitFor({ state: "hidden" }), max: 4000 });
+    const r2 = await s.act("save + finished", (p) => p.click("#save"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/save/status")).then((x) => x.finished()), max: 2500 });
+    assert.equal(r2.until?.ok, false);
+    assert.match(r2.note ?? "", /never read its body/);
+    await sleep(300);
+    assert.equal(s.sql<{ body_state: string }>("SELECT body_state FROM requests WHERE url LIKE '%/api/save/status%' AND action_id=?", r2.action)[0]?.body_state, "missing");
+    await s.act("toast gone", async () => {}, { until: () => s.page.locator("#toast").waitFor({ state: "hidden" }), max: 4000 });
   });
 });
 
-describe("the log without a browser", () => {
-  it("openApp reads what was recorded", async () => {
-    const st = openApp("t", appsDir);
-    assert.ok(st.requests({ url: "/api/record/2" }).length >= 1);
-    assert.equal(st.latestJson<{ name: string }>("/api/record/2")?.name, "Alan Turing");
-    assert.ok(st.action("act:1")?.report);
-    st.close();
+describe("diagnoses the wrapper used to make itself", () => {
+  it("a widget re-rendered every 100 ms: detached with the dispatchEvent hint; dispatchEvent lands", async () => {
+    const before = await s.page.evaluate<string>("document.getElementById('rerender-count').textContent");
+    const r1 = await s.act("rerender", (p) => p.click("#rerender"), { max: 1200 });
+    assert.equal(r1.ok, false);
+    assert.equal(r1.diagnosis?.reason, "detached", r1.diagnosis?.message);
+    assert.match(r1.diagnosis!.message, /dispatchEvent/);
+    reached(await s.act("rerender js", (p) => p.locator("#rerender").dispatchEvent("click"), { until: () => s.page.waitForFunction((b) => document.getElementById("rerender-count")!.textContent !== b, before) }));
+  });
+  it("a fixed element outside the viewport → offscreen, with the reason", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"fx\" style=\"position:fixed;top:5000px;left:10px\">fx</button>')");
+    const r = await s.act("fx", (p) => p.click("#fx"), { max: 700 });
+    assert.equal(r.diagnosis?.reason, "offscreen", r.diagnosis?.message);
+    assert.match(r.diagnosis!.message, /position: fixed/);
+    await s.page.evaluate("document.getElementById('fx').remove()");
+  });
+  it("pointer-events: none → unclickable, with the keyboard hint", async () => {
+    reached(await s.act("type med", (p) => p.locator("#med").pressSequentially("as", { delay: 15 }), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/meds")) }));
+    const r = await s.act("click option", (p) => p.click("#med-list li >> nth=0"), { max: 700 });
+    assert.equal(r.diagnosis?.reason, "unclickable", r.diagnosis?.message);
+    assert.match(r.diagnosis!.message, /keyboard/);
+    reached(await s.act("esc", (p) => p.press("#med", "Escape"), { quiet: 100 }));
+  });
+  it("drag: the slider moves and the report is posted", async () => {
+    const r = reached(await s.act("drag", (p) => p.locator("#slider-thumb").dragTo(p.locator("#slider-track")), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/drag-report")) }));
+    assert.ok(r.requests.some((w) => w.path.includes("/api/drag-report") && w.method === "POST"));
+  });
+  it("a long-poll that answers inside the window is attributed as started earlier", async () => {
+    await g.ctl.set({ ambient: true, pollHoldMs: 400, heartbeatMs: 60000 });
+    try {
+      await home();
+      const r = reached(await s.act("poll", async () => {}, { until: () => s.waitFor("response", (e) => e.url.includes("/api/poll")), max: 4000 }));
+      assert.ok(r.requests.some((w) => w.path.includes("/api/poll")), JSON.stringify(r.requests));
+    } finally { await g.ctl.reset(); await home(); }
+  });
+  it("a probe is an act: page.evaluate(fetch) is attributed, the value comes back, json reads the write by method", async () => {
+    const r = reached(await s.act("probe", (p) => p.evaluate("fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.json()).then(j => j.id)")));
+    assert.equal(typeof r.value, "number");
+    assert.ok(r.writes.some((w) => w.startsWith("POST /api/save")), JSON.stringify(r.writes));
+    const posted = await s.json<{ id: number }>("/api/save", { action: r.action, method: "POST" });
+    assert.ok(posted && typeof posted.id === "number", JSON.stringify(posted));
+  });
+  it("a second session joins the browser and the run, sees frames on a socket it did not open, and does not reload the page", async () => {
+    await g.ctl.set({ modal: true, modalDelayMs: 0 });
+    try {
+      reached(await s.act("open record 5", (p) => p.click("#record-5"), { until: () => s.page.locator("#record-modal").waitFor() }));
+      const s2 = await open("t", { url: g.origin, appsDir });
+      try {
+        assert.equal(s2.run, s.run);
+        assert.equal(await s2.page.locator("#record-modal").count(), 1, "open({url}) reloaded a page that was already there");
+        const r = reached(await s2.act("push", () => g.ctl.set({ wsPush: true }), { until: () => s2.waitFor("ws", (f) => f.payload.includes("push")) }));
+        assert.equal(r.until?.ok, true);
+      } finally { await s2.close(); }
+      reached(await s.act("ack", (p) => p.click("#modal-ack"), { until: () => s.page.locator("#record-modal").waitFor({ state: "hidden" }) }));
+    } finally { await g.ctl.reset(); }
+  });
+});
+
+describe("look", () => {
+  it("the screen: aria, numbered controls with durable selectors, a marked-up JPEG", async () => {
+    const t = performance.now();
+    const l = await s.look();
+    const ms = performance.now() - t;
+    assert.match(l.aria!, /button "Load Chart"/);
+    assert.ok(l.controls!.some((c) => c.selector === "#load-chart" && c.role === "button" && c.name === "Load Chart"), JSON.stringify(l.controls!.slice(0, 5)));
+    assert.ok(l.controls!.every((c) => c.box.w > 0 && c.box.h > 0));
+    assert.ok(existsSync(l.shot!), "shot exists");
+    const bytes = readFileSync(l.shot!); assert.equal(bytes[0], 0xff); assert.equal(bytes[1], 0xd8);
+    assert.ok(ms < 3000, `look took ${ms}ms`);
+    assert.equal(s.context.pages().length, 1, "the scratch page is closed again");
+  });
+  it("a selector: matches with visibility and what is under the pointer; hidden, none, and a parse error", async () => {
+    const one = await s.look("#load-chart");
+    assert.equal(one.count, 1); assert.equal(one.matches![0].visible, true); assert.equal(one.matches![0].under, null);
+    const hidden = await s.look("#ctx-menu");
+    assert.equal(hidden.matches![0].visible, false);
+    const none = await s.look("#never");
+    assert.equal(none.count, 0); assert.match(none.note!, /nothing matches/);
+    const bad = await s.look("role=button[name='x'] svg, #broken[");
+    assert.match(bad.error!, /selector error/);
+    const many = await s.look("button");
+    assert.ok(many.count! > 10); assert.equal(many.matches!.length, 10); assert.match(many.note!, /several match/);
+  });
+  it("controls inside a frame via a Locator", async () => {
+    const l = await s.look(s.page.frameLocator("#same-origin").locator("#if-name"));
+    assert.equal(l.count, 1);
+  });
+});
+
+describe("ceilings on a large page", () => {
+  it("10,000 real rows: a bare act's report overhead stays bounded; look stays bounded", async () => {
+    reached(await s.act("big", (p) => p.goto(g.origin + "/big.html"), { until: () => s.page.locator("#big-btn").waitFor(), max: 15000 }));
+    const r = reached(await s.act("count", (p) => p.click("#big-btn")));
+    console.log(`    big page: run ${r.timing.runMs} observe ${r.timing.observeMs} report ${r.timing.reportMs} total ${r.timing.totalMs} ms; ui +${r.ui.added.length}`);
+    assert.ok(r.ui.added.some((l) => l.includes("10000")), JSON.stringify(r.ui.added));
+    assert.ok(r.timing.reportMs < 2500, `report ${r.timing.reportMs}ms`);
+    assert.ok(r.timing.observeMs < 2000, `observe ${r.timing.observeMs}ms`);
+    const t = performance.now(); const l = await s.look(); const lookMs = performance.now() - t;
+    console.log(`    big page: look ${Math.round(lookMs)} ms, ${l.controls!.length} controls`);
+    assert.ok(lookMs < 6000, `look ${lookMs}ms`);
+    await home();
+  });
+});
+
+describe("the log", () => {
+  it("sql errors name the columns; body returns a blob by prefix", async () => {
+    assert.throws(() => s.sql("SELECT id FROM ws_frames"), /no such column: id — ws_frames\(run, seq, t, url, dir, payload, action_id\)/);
+    const row = s.sql<{ body_hash: string }>("SELECT body_hash FROM requests WHERE url LIKE '%/api/record/5%' AND body_hash IS NOT NULL LIMIT 1")[0];
+    assert.match(s.body(row.body_hash.slice(0, 16)), /Grace|Alan|Ada|name/);
+    assert.ok(s.sql<{ n: number }>("SELECT count(*) n FROM actions WHERE code LIKE '%click%'")[0].n > 5, "the code of each act is stored");
   });
 });

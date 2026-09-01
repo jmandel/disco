@@ -64,3 +64,16 @@ iframe { width: 45%; height: 160px; border: 1px solid #999; vertical-align: top;
 #sort-list li.dragging { opacity: .5; }
 /* disabled controls usually get pointer-events:none, so elementFromPoint returns the ANCESTOR (§13, disabled-control diagnosis) */
 button:disabled { pointer-events: none; opacity: .5; }
+
+/* #29 skeleton */
+#people { border-collapse: collapse; min-width: 420px; }
+#people td, #people th { border: 1px solid #ddd; padding: 2px 8px; text-align: left; }
+#people td.skel { background: #eee; color: transparent; height: 18px; }
+/* #31 stacked panels */
+.panel { position: fixed; top: 60px; right: 0; width: 320px; height: 300px; background: #fff; border: 2px solid #333; padding: 12px; z-index: 900; box-sizing: border-box; }
+#panel-2 { top: 80px; width: 280px; height: 260px; z-index: 901; background: #f7f7ff; }
+/* #32 styled radios */
+label.styled { position: relative; display: inline-block; margin-right: 12px; padding-left: 22px; cursor: pointer; }
+label.styled input { position: absolute; left: 0; top: 2px; width: 16px; height: 16px; opacity: 0; margin: 0; }
+label.styled .fake-radio { position: absolute; left: 0; top: 2px; width: 14px; height: 14px; border: 1px solid #333; border-radius: 50%; background: #fff; }
+label.styled input:checked + .fake-radio { background: #c00; }

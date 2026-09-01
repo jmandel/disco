@@ -1,135 +1,84 @@
-// The one wrapper. `act` = do a Playwright action, optionally wait for the state you asked for
-// (`until`), then return what happened: URL, aria diff, requests, console, dialogs, new pages —
-// or a diagnosis when the action could not be performed. Every wait is short and named.
-import { existsSync, mkdirSync, appendFileSync } from "node:fs";
-import { join } from "node:path";
-import type { Browser, BrowserContext, FrameLocator, Locator, Page } from "playwright-core";
+// The surface. open → Session with three verbs: look (the screen), act (any Playwright code, bracketed by an
+// observation that returns when the app is quiet or your until holds), sql (the log). Plus waitFor over the
+// recorder's event stream, body/json for bodies, and reached to assert a report.
+import { mkdirSync } from "node:fs";
+import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { Store, appStoreDir, appDir, openStore, type StoreReader } from "./store.ts";
-import { attachRecorder, type DialogPolicy, type Recorder, type WsFrame } from "./record.ts";
+import { attachRecorder, type Recorder, type EventKind, type Events } from "./record.ts";
 import { readBrowserInfo, writeBrowserInfo, isAlive, launchChromium, attachEndpoint, connect, killLaunched, pidAlive, type BrowserInfo } from "./browser.ts";
+import { lookAt, controls, inspect, dialogCensus, locatorFromDescription, type Look, type LookCtx } from "./look.ts";
+import { formatReport } from "./format.ts";
 
-// ---------------------------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------------------------
-export interface Timeouts {
-  /** How long a Playwright action may wait for its element (visible, stable, receiving events). */
-  action: number;
-  /** Default budget for `until`. */
-  until: number;
-  /** Observation window after an action without `until`. */
-  window: number;
-  /** Budget for `navigate` to commit. */
-  navigate: number;
-}
-export const DEFAULT_TIMEOUTS: Timeouts = { action: 3000, until: 5000, window: 700, navigate: 15000 };
-/** `landed` waits this long past the response headers for the body to finish; a body the page never reads never does. */
-export const LANDED_BOUND_MS = 1000;
-/** A string url predicate matches the href without its query string (unless the string itself contains '?'); a RegExp sees the whole href. */
-function originOf(u: string): string { try { return new URL(u).origin; } catch { return ""; } }
-function sameUrl(a: string, b: string): boolean { const n = (x: string) => x.replace(/#.*$/, "").replace(/\/+$/, ""); return n(a) === n(b); }
-export function urlMatches(u: string | RegExp, href: string): boolean {
-  if (typeof u !== "string") return u.test(href);
-  if (u.includes("?")) return href.includes(u);
-  const q = href.indexOf("?"); return (q >= 0 ? href.slice(0, q) : href).includes(u);
+export interface OpenOptions {
+  /** navigate after connecting (launch) — or pick the page containing it (attach / rejoin) */
+  url?: string;
+  /** a running browser: port, host:port, http://…, or ws://… ; omit to launch (or rejoin the one launched before) */
+  attach?: string | number;
+  headed?: boolean;
+  /** where apps/<app>/ lives (default: apps/ next to this checkout, or $DISCO_APPS_DIR) */
+  appsDir?: string;
+  /** @internal this process IS the detached recorder */
+  recorder?: boolean;
 }
 
-export type Pred =
-  | { selector: string; visible?: boolean; frame?: string; label?: string }   // an element is visible (visible: false → merely attached, hidden or not)
-  | { gone: string; frame?: string; label?: string }                          // an element is hidden or detached
-  | { text: string; label?: string }                                          // visible text anywhere on the page
-  | { url: string | RegExp; label?: string }                                  // string: URL without its query contains it (with it, if the string has a '?'); RegExp: whole href
-  | { request: string | RegExp; method?: string; landed?: boolean; label?: string }   // a response whose URL contains / matches (and whose method matches, if given) arrives; landed: its body finished too — bounded at 1 s past the headers
-  | { fn: string | ((arg: any) => unknown); arg?: unknown; label?: string }   // page.waitForFunction
-  | { page: string | RegExp; label?: string }                                 // a new page (popup) opens whose URL contains / matches
-  | { ws: string | RegExp; dir?: "in" | "out"; label?: string }               // a WebSocket frame (received by default) whose payload contains / matches
-  | { any: Pred[]; label?: string }
-  | { all: Pred[]; label?: string };
-
-export type Kind = "click" | "dblclick" | "fill" | "type" | "press" | "select" | "hover" | "scroll" | "drag" | "navigate" | "evaluate" | "noop";
-
-export interface ActSpec {
-  kind: Kind;
-  target?: string | Locator;
-  text?: string;               // fill / type
-  key?: string;                // press
-  value?: string | string[];   // select
-  url?: string;                // navigate
-  fn?: string | ((arg: any) => unknown); arg?: unknown;   // evaluate: run in the page as an act (its requests are attributed; the value is report.value)
-  frame?: string;              // iframe selector(s), `>>`-chained for nesting; the target is resolved inside
-  button?: "left" | "right" | "middle";
-  js?: boolean;                // click: dispatch a DOM click event instead of moving the mouse (widgets the app re-renders under you)
-  to?: string | Locator | { dx: number; dy: number };   // drag: the drop target, or an offset from the target's centre
-  position?: { x: number; y: number };                   // click/dblclick at this offset from the element's top-left (canvas cells)
-  deltaY?: number;             // scroll without a target
-  until?: Pred;
-  timeout?: number;            // budget for `until` (default timeouts.until)
-  window?: number;             // observation window when there is no `until` (default timeouts.window)
-  shot?: boolean;              // take a screenshot at the end of the window
-  wire?: "app" | "all";        // report: "app" (default) lists documents/xhr/fetch/streams and folds scripts, styles, images, fonts into `static`; "all" lists everything
+export interface ActOptions {
+  /** Armed before `run`; the act returns the moment it resolves. Flagged `alreadyTrue` when it resolved before `run` was dispatched. */
+  until?: () => Promise<unknown>;
+  /** Without `until`: return once nothing has happened for this long — no request, response, frame, console line, dialog, navigation or DOM change. Default 500. */
+  quiet?: number;
+  /** The one budget of an act: the default timeout of every Playwright call inside `run` and `until`, and the longest the act observes. Default 3000. */
+  max?: number;
 }
 
 export interface Diagnosis {
   reason: "not-found" | "hidden" | "disabled" | "occluded" | "offscreen" | "unclickable" | "detached" | "timeout" | "error";
   message: string;
-  target?: string;
-  matches?: number;
-  over?: string;               // the element that would receive the click instead
-  candidates?: string[];       // visible controls on the page (not-found)
-  dialogs?: string[];          // open dialogs/overlays at the time
-  url?: string;
-  shot?: string;               // screenshot blob hash
+  /** the locator Playwright named in its message, as it printed it */
+  selector?: string;
+  over?: string;
+  candidates?: string[];
+  dialogs?: string[];
+  shot?: string;
 }
-export interface UntilResult { ok: boolean; elapsedMs: number; which?: string; error?: string; diagnosis?: Diagnosis; /** the predicate already held before the action was dispatched — it proved nothing */ alreadyTrue?: boolean; /** the log id of the response a `request` predicate matched */ request?: string }
-export interface WireLine { id: string; method: string; path: string; status?: number | null; ms?: number | null; mime?: string | null; body?: string | null; size?: number | null; state?: string | null; type?: string | null; /** started before the window and finished inside it (a long-poll that answered you) */ earlier?: boolean; /** the response the `until` matched */ until?: boolean }
-export interface Report {
-  action: string;              // act:<n>
-  kind: Kind | "until";
-  target?: string;
-  matches?: number;
-  ok: boolean;                 // the action was performed (a failed `until` still has ok: true — read report.until; `reached()` checks both)
+export interface WireLine { id: string; method: string; path: string; status?: number | null; ms?: number | null; mime?: string | null; body?: string | null; size?: number | null; state?: string | null; type?: string | null; earlier?: boolean }
+export interface Proposal { kind: "response" | "appeared" | "gone" | "url" | "storage"; code: string; atMs: number | null }
+export interface Report<T = unknown> {
+  action: string;              // act:<n> — the id every log row inside the window carries
+  label: string;
+  ok: boolean;                 // the code ran without throwing (a failed until leaves ok: true — read until.ok; reached() checks both)
+  value?: T;
   diagnosis?: Diagnosis;
-  until?: UntilResult;
+  /** why the observation ended: your until held · the app went quiet · max expired · the code threw */
+  returned: "until" | "quiet" | "max" | "error";
+  until?: { ok: boolean; elapsedMs: number; alreadyTrue?: boolean; error?: string; /** what your until resolved with — label your Promise.race arms and this says which */ value?: unknown };
   url: string;
   ui: { added: string[]; removed: string[]; more?: number };
   requests: WireLine[];
-  /** Static resources (script, stylesheet, image, font, media…) started in the window, folded out of `requests` unless `wire: "all"`. */
   static: { count: number; types: Record<string, number> };
+  /** requests started in the window and still in flight when it closed */
+  pending: string[];
+  /** the non-GET app requests in the window — what this act may have persisted */
+  writes: string[];
+  storage: { cookies: string[]; local: string[]; session: string[] };
   console: Array<{ level: string; text: string }>;
   dialogs: Array<{ type: string; message: string | null; handled: string | null }>;
   pages: string[];
-  /** Non-GET requests of the app's own traffic in the window — what this act may have persisted. */
-  writes: string[];
-  /** evaluate: what the expression returned */
-  value?: unknown;
-  /** something worth knowing that is not a failure (e.g. the click landed but the page blocked past the action budget) */
-  note?: string;
-  /** cookie and localStorage changes in the window — the wire of an app that has no wire */
-  storage: { cookies: string[]; local: string[] };
-  /** Pages open in the browser after this act (popups included). More than 1 means the driven page can be throttled in the background. */
   openPages: number;
-  shot?: string;
+  /** pasteable until code for what this act caused — each was false before the action */
+  proposed: Proposal[];
+  note?: string;
   window: { t0: number; t1: number };
-  timing: { actMs: number; untilMs: number; windowMs: number; reportMs: number; totalMs: number };
+  timing: { runMs: number; observeMs: number; reportMs: number; totalMs: number };
 }
 
-export interface OpenOptions {
-  url?: string;
-  attach?: string | number;
-  headed?: boolean;
-  dialogs?: DialogPolicy;
-  appsDir?: string;
-  timeouts?: Partial<Timeouts>;
-  page?: number;
-  fresh?: boolean;
-  /** Drop aria-diff lines containing these strings / matching these RegExps (live counters, clocks). Also `s.uiIgnore`. */
-  uiIgnore?: Array<string | RegExp>;
-  /** This session IS the recorder (`disco record`): always write rows, even if browser.json names a recorder. */
-  recorder?: boolean;
-}
+const DEFAULT_MAX = 3000;
+const DEFAULT_QUIET = 500;
+const STATIC_TYPES = new Set(["script", "stylesheet", "image", "font", "media", "texttrack", "manifest"]);
 
-// ---------------------------------------------------------------------------------------------
-// open / Session
-// ---------------------------------------------------------------------------------------------
+function originOf(u: string): string { try { return new URL(u).origin; } catch { return ""; } }
+function sameUrl(a: string, b: string): boolean { const n = (x: string) => x.replace(/#.*$/, "").replace(/\/+$/, ""); return n(a) === n(b); }
+const isScratch = (p: Page) => { try { return p.url().startsWith("data:"); } catch { return false; } };
+
 export async function open(app: string, opts: OpenOptions = {}): Promise<Session> {
   const dir = appDir(app, opts.appsDir);
   const storeDir = appStoreDir(app, opts.appsDir);
@@ -140,563 +89,340 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
     info = { mode: "attach", endpoint: attachEndpoint(opts.attach), startedWall: new Date().toISOString() };
     writeBrowserInfo(storeDir, info); fresh = true;
   } else if (!info || !(await isAlive(info.endpoint))) {
-    if (opts.fresh && existsSync(join(storeDir, "profile"))) { const { rmSync } = await import("node:fs"); rmSync(join(storeDir, "profile"), { recursive: true, force: true }); }
     info = await launchChromium(storeDir, { headed: opts.headed }); fresh = true;
   }
   const browser = await connect(info);
   const context = browser.contexts()[0] ?? (await browser.newContext());
-  const pages = context.pages();
+  const pages = context.pages().filter((p) => !isScratch(p));
   // pages() is not in creation order after a reconnect: prefer the page already at `url` (then its origin), never a popup by accident
-  let page = opts.page !== undefined ? pages[opts.page] : undefined;
-  if (!page && opts.url) page = pages.find((p) => sameUrl(p.url(), opts.url!)) ?? pages.find((p) => p.url().includes(opts.url!)) ?? pages.find((p) => originOf(p.url()) === originOf(opts.url!));
+  let page: Page | undefined;
+  if (opts.url) page = pages.find((p) => sameUrl(p.url(), opts.url!)) ?? pages.find((p) => p.url().includes(opts.url!)) ?? pages.find((p) => originOf(p.url()) === originOf(opts.url!));
   page = page ?? pages[0] ?? (await context.newPage());
   await page.bringToFront().catch(() => {});
   const store = new Store(storeDir);
   if (fresh || !store.resumeRun()) store.beginRun({ url: opts.url ?? page.url(), mode: info.mode });
-  // a detached `disco record` process may already be capturing this browser: then this session only acts
+  // a detached `disco _record` process may already be capturing this browser: then this session only acts
   const external = !opts.recorder && pidAlive(info.recorderPid);
-  const s = new Session(app, dir, store, browser, context, page, info, { ...DEFAULT_TIMEOUTS, ...(opts.timeouts ?? {}) }, opts.dialogs ?? "accept", !external);
-  s.uiIgnore.push(...(opts.uiIgnore ?? []));
-  await s.recorderReady();
+  const s = new Session(app, dir, store, browser, context, page, info, !external);
+  await Session._ready(s);
   // navigate when we just launched, or when the page is somewhere else; joining a browser that is already there leaves its state alone
-  if (opts.url && (fresh || !sameUrl(page.url(), opts.url))) await s.navigate(opts.url);
+  if (opts.url && (fresh || !sameUrl(page.url(), opts.url))) await page.goto(opts.url, { waitUntil: "load", timeout: 15000 }).catch(() => {});
   return s;
 }
 
-/** open → fn → close, whatever happens. A script that forgets `close()` never exits; this one cannot forget. */
-export async function withApp<T>(app: string, opts: OpenOptions, fn: (s: Session) => Promise<T>): Promise<T> {
-  const s = await open(app, opts);
-  try { return await fn(s); } finally { await s.close(); }
-}
-
 export class Session {
-  private currentAction: string | null = null;
-  private recorder: Recorder;
-  /** Aria-diff lines containing any of these are dropped from reports (live counters, clocks). */
-  uiIgnore: Array<string | RegExp> = [];
-  private reader: StoreReader | null = null;
-
   app: string;
-  /** apps/<app> — where NOTES.md and the pack live. */
+  /** apps/<app>/ — where the pack lives. */
   dir: string;
-  log: Store;
-  browser: Browser;
-  context: BrowserContext;
-  /** The Playwright page. Use it directly whenever the wrapper is in your way. */
+  /** The run this session records into (one browser's life = one run; a script that joins a live browser joins its run). */
+  run: number;
+  /** The Playwright page. This is what your `act` code drives. */
   page: Page;
-  info: BrowserInfo;
-  timeouts: Timeouts;
-  dialogs: DialogPolicy;
+  context: BrowserContext;
+  browser: Browser;
 
-  /** false when a detached `disco record` process is writing the log for this browser and this session only acts. */
-  recording: boolean;
+  #store: Store;
+  #reader: StoreReader | null = null;
+  #recorder: Recorder;
+  #info: BrowserInfo;
+  #recording: boolean;
+  #current: string | null = null;
+  #max = DEFAULT_MAX;
 
-  constructor(app: string, dir: string, log: Store, browser: Browser, context: BrowserContext, page: Page, info: BrowserInfo, timeouts: Timeouts, dialogs: DialogPolicy, recording = true) {
-    this.app = app; this.dir = dir; this.log = log; this.browser = browser; this.context = context; this.page = page; this.info = info; this.timeouts = timeouts; this.dialogs = dialogs; this.recording = recording;
-    page.setDefaultTimeout(timeouts.action);
-    if (recording) sweepUnread(log);
-    this.recorder = attachRecorder(context, log, () => this.currentAction, dialogs, { silent: !recording });
+  /** @internal */
+  constructor(app: string, dir: string, store: Store, browser: Browser, context: BrowserContext, page: Page, info: BrowserInfo, recording: boolean) {
+    this.app = app; this.dir = dir; this.#store = store; this.browser = browser; this.context = context; this.page = page; this.#info = info; this.#recording = recording; this.run = store.run;
+    page.setDefaultTimeout(DEFAULT_MAX);
+    if (recording) store.update("requests", { body_state: "missing", error: "body not read by the page" }, "body_state='pending' AND status IS NOT NULL AND t_response < ?", [store.now() - 1500]);
+    this.#recorder = attachRecorder(context, store, () => this.#current, "accept", { silent: !recording });
   }
+  /** @internal */ static _ready(s: Session): Promise<void> { return s.#recorder.ready; }
 
-  /** @internal */ recorderReady(): Promise<void> { return this.recorder.ready; }
-  /** The run this session records into (one `open` of a browser = one run; a script that joins a live browser joins its run). */
-  get run(): number { return this.log.run; }
-  /** Read-only view of the log with the helpers (`requests`, `json`, `latestJson`, `sql`). */
-  get store(): StoreReader { return (this.reader ??= openStore(this.log.dir)); }
-
-  // --- sugar -------------------------------------------------------------------------------------
-  click(target: string | Locator, o: Partial<ActSpec> = {}) { return this.act({ kind: "click", target, ...o }); }
-  dblclick(target: string | Locator, o: Partial<ActSpec> = {}) { return this.act({ kind: "dblclick", target, ...o }); }
-  rightclick(target: string | Locator, o: Partial<ActSpec> = {}) { return this.act({ kind: "click", target, button: "right", ...o }); }
-  fill(target: string | Locator, text: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "fill", target, text, ...o }); }
-  type(target: string | Locator, text: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "type", target, text, ...o }); }
-  press(key: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "press", key, ...o }); }
-  select(target: string | Locator, value: string | string[], o: Partial<ActSpec> = {}) { return this.act({ kind: "select", target, value, ...o }); }
-  hover(target: string | Locator, o: Partial<ActSpec> = {}) { return this.act({ kind: "hover", target, ...o }); }
-  scroll(targetOrDeltaY: string | Locator | number, o: Partial<ActSpec> = {}) {
-    return typeof targetOrDeltaY === "number" ? this.act({ kind: "scroll", deltaY: targetOrDeltaY, ...o }) : this.act({ kind: "scroll", target: targetOrDeltaY, ...o });
-  }
-  drag(target: string | Locator, to: string | Locator | { dx: number; dy: number }, o: Partial<ActSpec> = {}) { return this.act({ kind: "drag", target, to, ...o }); }
-  navigate(url: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "navigate", url, ...o }); }
-  /** Wait for a state without acting. Same report shape; `report.until` says whether it arrived. */
-  until(pred: Pred, o: { timeout?: number } = {}) { return this.act({ kind: "noop", until: pred, timeout: o.timeout }); }
-  /** Run code in the page AS AN ACT: the requests it causes are attributed to it, the value is `report.value`. `s.evaluate` is the raw, unlogged form. */
-  probe<T = unknown>(fn: string | ((arg: any) => T | Promise<T>), arg?: unknown, o: Partial<ActSpec> = {}) { return this.act({ kind: "evaluate", fn: fn as any, arg, ...o }) as Promise<Report & { value: T }>; }
-  /** Is this predicate true right now? One cheap check, no waiting — ask before you write an `until` on it. */
-  holds(pred: Pred): Promise<boolean> { return this.holdsNow(pred); }
-
-  /** Close every page except the driven one (popups left by earlier scripts throttle the browser). Returns how many were closed. */
-  async closeOtherPages(): Promise<number> {
-    let n = 0;
-    for (const p of this.context.pages()) if (p !== this.page) { await p.close().catch(() => {}); n++; }
-    await this.page.bringToFront().catch(() => {});
-    return n;
-  }
-
-  /** A FrameLocator for `iframe#a >> iframe#b`. */
-  frame(spec: string): FrameLocator {
-    let fl: FrameLocator | null = null;
-    for (const part of spec.split(">>").map((x) => x.trim()).filter(Boolean)) fl = fl ? fl.frameLocator(part) : this.page.frameLocator(part);
-    if (!fl) throw new Error("empty frame spec");
-    return fl;
-  }
-  private base(frame?: string): Page | FrameLocator { return frame ? this.frame(frame) : this.page; }
-
-  evaluate<T = unknown>(fn: string | ((arg: any) => T | Promise<T>), arg?: unknown): Promise<T> { return this.page.evaluate(fn as any, arg) as Promise<T>; }
-
-  /** The page as the accessibility tree sees it (Playwright's aria snapshot) — the whole body, or one element. Read this when the diff is not enough. */
-  async aria(selector?: string, o: { frame?: string } = {}): Promise<string> {
-    const base = this.base(o.frame);
-    let loc = base.locator(selector ?? "body").first();
-    // a bare word that is an ARIA role ("banner", "navigation", "dialog") — the words aria itself prints — means role=
-    if (selector && /^[a-z]+$/.test(selector) && (await loc.count()) === 0) { const byRole = base.locator(`role=${selector}`).first(); if ((await byRole.count()) > 0) loc = byRole; }
-    if (selector && (await loc.count()) === 0) { const c = await this.candidates(o.frame); throw new Error(`aria: no element matches ${selector}${o.frame ? ` in ${o.frame}` : ""} (a css/role selector, or a bare role name such as "banner"). Visible controls: ${c.slice(0, 10).join(", ")}${c.length > 10 ? ", …" : ""}`); }
-    return loc.ariaSnapshot({ timeout: this.timeouts.action });
-  }
-
-  async screenshot(reason = "shot"): Promise<{ hash: string; path: string }> {
-    const buf = await this.page.screenshot({ type: "jpeg", quality: 60 });
-    const hash = this.log.writeBlob(new Uint8Array(buf));
-    this.log.insert("shots", { t: this.log.now(), hash, reason, action_id: this.currentAction });
-    return { hash, path: join(this.log.dir, "blobs", hash.slice(0, 2), hash) };
-  }
-
-  /** Append a line to apps/<app>/NOTES.md (and the notes table). */
-  note(text: string): void {
-    const t = this.log.now();
-    this.log.insert("notes", { t, text, action_id: this.currentAction });
-    mkdirSync(this.dir, { recursive: true });
-    const p = join(this.dir, "NOTES.md");
-    const head = existsSync(p) ? "" : `# ${this.app} — notes\n\nAppended by \`disco note\` / \`s.note()\`. Distill into README.md when it settles.\n\n`;
-    appendFileSync(p, `${head}- [run ${this.log.run} · ${Math.round(t)}ms] ${text}\n`);
-  }
-
-  /** Disconnect. `{ browser: true }` also kills a browser we launched (an attached one is only forgotten). */
+  /** Disconnect. `{ browser: true }` also kills a browser disco launched (an attached one is only forgotten). A script that never closes never exits. */
   async close(o: { browser?: boolean } = {}): Promise<void> {
-    await this.recorder.flush(500);
-    this.recorder.detach();
-    if (this.recording) this.log.update("requests", { body_state: "missing", error: "body not read by the page (session closed)" }, "run=? AND body_state='pending' AND status IS NOT NULL", [this.log.run]);
-    if (o.browser) { this.log.endRun(); killLaunched(this.info); writeBrowserInfo(this.log.dir, null); }
+    await this.#recorder.flush(500);
+    this.#recorder.detach();
+    if (this.#recording) this.#store.update("requests", { body_state: "missing", error: "body not read by the page (session closed)" }, "run=? AND body_state='pending' AND status IS NOT NULL", [this.#store.run]);
+    if (o.browser) { this.#store.endRun(); killLaunched(this.#info); writeBrowserInfo(this.#store.dir, null); }
     try { await this.browser.close(); } catch {}
-    this.reader?.close(); this.log.close();
+    this.#reader?.close(); this.#store.close();
   }
 
-  // --- act -----------------------------------------------------------------------------------------
-  async act(spec: ActSpec): Promise<Report> {
-    const T = this.timeouts;
-    const n = this.log.nextActionN();
-    const id = `act:${n}`;
-    const targetText = spec.target === undefined ? undefined : typeof spec.target === "string" ? spec.target : String(spec.target);
+  /** The screen: aria tree, numbered controls with durable selectors, a marked-up screenshot. With a selector or Locator: what it matches, where, and what is under the pointer. */
+  look(target?: string | Locator): Promise<Look> { return lookAt(this.#ctx(), target); }
+
+  /** Run any Playwright code as one observed step. Returns when your `until` holds, when the app has been quiet, or at `max`. */
+  async act<T = unknown>(label: string, run: (page: Page) => Promise<T> | T, opts: ActOptions = {}): Promise<Report<T>> {
+    const quiet = opts.quiet ?? DEFAULT_QUIET, max = opts.max ?? DEFAULT_MAX;
+    const store = this.#store, rec = this.#recorder, page = this.page;
+    const n = store.nextActionN(); const id = `act:${n}`;
     const tStart = performance.now();
-    const untilBudget = spec.timeout ?? T.until;
-    // The postcondition is armed synchronously, before anything else happens in this call — so a response or
-    // frame that arrives during the pre-action snapshot counts, and `const p = s.until(…); trigger(); await p`
-    // cannot lose the race. A navigation's postcondition is about the NEW document: it is armed after commit
-    // (an anchor that is true on both the old and the new page is a legitimate postcondition there).
-    const armLate = spec.kind === "navigate";
-    let armed = spec.until && !armLate ? this.arm(spec.until, untilBudget) : null;
-    const alreadyTrue = spec.until && spec.kind !== "noop" && !armLate ? await this.holdsNow(spec.until) : false;
-    const preAria = await this.ariaSafe();
-    const preStorage = await this.storageSnapshot();
-    const t0 = this.log.now();
-    this.log.insert("actions", { id, n, t0, kind: spec.kind, target: targetText });
-    this.currentAction = id;
-    let ok = true; let diagnosis: Diagnosis | undefined; let matches: number | undefined; let value: unknown; let note: string | undefined;
-    let untilRes: UntilResult | undefined;
-    const tAct0 = performance.now();
-    if (this.context.pages().length > 1) await this.page.bringToFront().catch(() => {});
-    try {
-      if (spec.kind === "evaluate") value = await this.page.evaluate(spec.fn as any, spec.arg);
-      else if (spec.kind !== "noop" && spec.kind !== "navigate" && spec.kind !== "scroll" && !(spec.kind === "press" && !spec.target)) {
-        const r = await this.resolve(spec);
-        if ("diagnosis" in r) { ok = false; diagnosis = r.diagnosis; }
-        else { matches = r.matches; await this.perform(spec, r.locator, r.force); }
-      } else await this.perform(spec, null);
-      if (armLate && spec.until) armed = this.arm(spec.until, untilBudget);
-    } catch (e) {
-      const msg = String((e as Error)?.message ?? e);
-      // Playwright's click can time out AFTER the click was performed: a handler that blocks the main thread past the action
-      // budget. The click landed; say so, keep the armed until, and let the postcondition decide.
-      const lastLog = msg.replace(/\x1b\[\d+m/g, "").split("\n").map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
-      if ((spec.kind === "click" || spec.kind === "dblclick") && /Timeout/.test(msg) && /^- (performing click action|click action done|waiting for scheduled navigations|navigations have finished)/.test(lastLog)) {
-        note = `the click landed but the page did not respond within the action budget (${T.action} ms) — a handler blocked the main thread; the until still ran`;
-      } else { ok = false; diagnosis = await this.diagnose(e as Error, spec); }
+    page.setDefaultTimeout(max); page.setDefaultNavigationTimeout(max); this.#max = max;
+    // The until is armed first, before the pre-snapshots — a response that lands during them still counts; one that already
+    // held resolves during them and is flagged. A navigation is the one case where "already true" is legitimate: arm late there? No —
+    // the agent's until code decides; page.waitForURL on the new document is false before the click.
+    const armed = { done: false, resolvedAt: undefined as number | undefined, error: undefined as string | undefined, value: undefined as unknown };
+    let untilP: Promise<unknown> | null = null;
+    if (opts.until) {
+      try { untilP = Promise.resolve(opts.until()); } catch (e) { untilP = Promise.reject(e); }
+      untilP.then((v) => { armed.done = true; armed.resolvedAt = performance.now(); armed.value = v; }, (e) => { armed.done = true; armed.error = firstLine(e); });
     }
-    const tAct1 = performance.now();
-    if (armed) {
-      if (ok) {
-        untilRes = await armed.wait();
-        // resolved before the action was even dispatched → it held beforehand, whatever the arm (fn arms are not pre-checked)
-        if (untilRes.ok && spec.kind !== "noop" && !armLate && armed.resolvedAt !== undefined && armed.resolvedAt <= tAct0 && stateArms(spec.until!).has(untilRes.which ?? "")) untilRes.alreadyTrue = true;
-      } else { armed.cancel(); untilRes = { ok: false, elapsedMs: 0, error: "action not performed" }; }
-      if (!untilRes.ok && !untilRes.diagnosis && ok) untilRes.diagnosis = await this.untilDiagnosis(spec.until!, untilRes.error ?? "", t0);
-      if (alreadyTrue) untilRes.alreadyTrue = true;
-    } else if (ok && spec.kind !== "noop" && spec.kind !== "evaluate") await sleep(spec.window ?? T.window);
-    const tWin1 = performance.now();
-    await this.recorder.flush(300);
-    const t1 = this.log.now();
-    this.currentAction = null;
-    const postAria = await this.ariaSafe();
-    const postStorage = await this.storageSnapshot();
-    const shot = spec.shot ? (await this.screenshot("shot")).hash : undefined;
-    const report: Report = {
-      action: id, kind: spec.kind === "noop" ? "until" : spec.kind, target: targetText, matches, ok, diagnosis, until: untilRes,
-      url: safe(() => this.page.url(), ""),
-      ui: diffAria(preAria, postAria, 40, this.uiIgnore),
-      ...this.wire(t0, t1, untilRes?.request, spec.wire ?? "app"),
-      console: this.log.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", this.log.run, t0, t1 + 1),
-      dialogs: this.log.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1),
-      pages: this.log.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1).map((x) => x.url),
-      openPages: this.context.pages().length,
-      writes: [],
-      storage: diffStorage(preStorage, postStorage),
-      ...(note ? { note } : {}),
-      ...(spec.kind === "evaluate" ? { value } : {}),
-      shot,
+    const preAria = await this.#aria();
+    const preStorage = await this.#storage();
+    const preUrl = safe(() => page.url(), "");
+    const t0 = store.now();
+    store.insert("actions", { id, n, t0, label, code: fnSource(run) });
+    this.#current = id;
+    if (this.context.pages().filter((p) => !isScratch(p)).length > 1) await page.bringToFront().catch(() => {});
+    const tDispatch = performance.now();
+    let ok = true, value: T | undefined, runError: unknown, landedNote: string | undefined;
+    try { value = await run(page); } catch (e) {
+      // Playwright's click can time out AFTER the click was performed: a handler that blocks the main thread past max.
+      // The click landed; say so and keep observing, so the until (or quiet) still decides.
+      const m = String((e as Error)?.message ?? e).replace(/\x1b\[\d+m/g, "");
+      const lastLog = m.split("\n").map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
+      if (/click: Timeout/.test(m) && /^- (performing click action|click action done|waiting for scheduled navigations|navigations have finished)/.test(lastLog)) landedNote = `the click landed but the page did not respond within max (${max} ms) — a handler blocked the main thread; the observation continued`;
+      else { ok = false; runError = e; }
+    }
+    const tRun1 = performance.now();
+    let returned: Report["returned"];
+    let until: Report["until"];
+    if (!ok) {
+      returned = "error";
+      if (untilP) { until = { ok: false, elapsedMs: 0, error: "the code threw before the until could be judged" }; untilP.catch(() => {}); }
+    } else if (untilP) {
+      const remaining = Math.max(0, max - (tRun1 - tDispatch));
+      if (!armed.done) await Promise.race([untilP.catch(() => {}), sleep(remaining)]);
+      if (armed.done && !armed.error) { returned = "until"; until = { ok: true, elapsedMs: Math.max(0, ms(tDispatch, armed.resolvedAt!)) }; if (armed.resolvedAt! <= tDispatch) until.alreadyTrue = true; if (armed.value !== undefined && (typeof armed.value !== "object" || armed.value === null)) until.value = armed.value; }
+      else { returned = "max"; until = { ok: false, elapsedMs: ms(tDispatch, performance.now()), error: armed.error ?? `did not hold within max (${max} ms)` }; untilP.catch(() => {}); }
+    } else {
+      const deadline = tDispatch + max;
+      let prev = await this.#fingerprint();
+      for (;;) {
+        const left = deadline - performance.now();
+        if (left <= 0) { returned = "max"; break; }
+        await sleep(Math.min(quiet, left));
+        const cur = await this.#fingerprint();
+        const idle = store.now() - rec.lastActivity();
+        const awaiting = store.get<{ n: number }>("SELECT count(*) n FROM requests WHERE run=? AND t_start >= ? AND t_response IS NULL AND t_end IS NULL", store.run, t0 - 1)?.n ?? 0;
+        if (cur === prev && idle >= quiet && awaiting === 0) { returned = "quiet"; break; }
+        prev = cur;
+        if (performance.now() >= deadline) { returned = "max"; break; }
+      }
+    }
+    const tObs1 = performance.now();
+    await rec.flush(300);
+    const t1 = store.now();
+    this.#current = null;
+    page.setDefaultTimeout(DEFAULT_MAX); page.setDefaultNavigationTimeout(DEFAULT_MAX); this.#max = DEFAULT_MAX;
+    const postAria = await this.#aria();
+    const postStorage = await this.#storage();
+    const url = safe(() => page.url(), "");
+    const diagnosis = ok ? undefined : await this.#diagnose(runError);
+    const { requests, static: st, pending, matchedRows } = this.#wire(t0, t1);
+    const ui = diffAria(preAria, postAria, 40);
+    const storage = diffStorage(preStorage, postStorage);
+    const report: Report<T> = {
+      action: id, label, ok, ...(value !== undefined ? { value } : {}), diagnosis, returned, until, url,
+      ui, requests, static: st, pending,
+      writes: requests.filter((w) => !["GET", "HEAD", "OPTIONS"].includes(w.method) && !w.earlier).map((w) => `${w.method} ${w.path}${w.status != null ? " " + w.status : ""}`),
+      storage,
+      console: store.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", store.run, t0, t1 + 1),
+      dialogs: store.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1),
+      pages: store.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1).map((x) => x.url),
+      openPages: this.context.pages().filter((p) => !isScratch(p)).length,
+      proposed: propose(matchedRows, t0, ms(tStart, tDispatch), ui, preAria.split("\n").map((l) => l.trim()), preUrl, url, storage),
       window: { t0: Math.round(t0), t1: Math.round(t1) },
-      timing: { actMs: ms(tAct0, tAct1), untilMs: armed ? ms(tAct1, tWin1) : 0, windowMs: armed ? 0 : ms(tAct1, tWin1), reportMs: 0, totalMs: 0 },
+      timing: { runMs: ms(tDispatch, tRun1), observeMs: ms(tRun1, tObs1), reportMs: 0, totalMs: 0 },
     };
-    report.writes = report.requests.filter((w) => !["GET", "HEAD", "OPTIONS"].includes(w.method) && !w.earlier).map((w) => `${w.method} ${w.path}${w.status != null ? " " + w.status : ""}`);
-    report.timing.reportMs = ms(tWin1, performance.now());
+    const notes: string[] = [];
+    if (landedNote) notes.push(landedNote);
+    if (!preAria || !postAria) notes.push("the aria snapshot exceeded 1.5 s on this page; the ui diff is unreliable");
+    if (until && !until.ok && /finished\(\)/.test(fnSource(opts.until!)) && requests.some((w) => w.state === "missing")) notes.push("a matching response arrived but the page never read its body, so finished() cannot resolve — drop it and read the status, or read the body from the log");
+    if (until && !until.ok && returned === "max" && !opts.until!.toString().includes("timeout")) notes.push(`Playwright calls inside until inherit max (${max} ms) as their timeout`);
+    if (notes.length) report.note = notes.join("; ");
+    report.timing.reportMs = ms(tObs1, performance.now());
     report.timing.totalMs = ms(tStart, performance.now());
-    this.log.update("actions", { t1, ok, report }, "id=?", [id]);
-    if (!this.recording) for (const table of ["requests", "console", "dialogs", "nav", "ws_frames"]) // the recorder process could not know the window; attribution is the window
-      this.log.update(table, { action_id: id }, `run=? AND action_id IS NULL AND ${table === "requests" ? "t_start" : "t"} BETWEEN ? AND ?`, [this.log.run, t0 - 1, t1 + 1]);
+    store.update("actions", { t1, ok, report }, "id=?", [id]);
+    if (!this.#recording) for (const table of ["requests", "console", "dialogs", "nav", "ws_frames"]) // the recorder process could not know the window; attribution is the window
+      store.update(table, { action_id: id }, `run=? AND action_id IS NULL AND ${table === "requests" ? "t_start" : "t"} BETWEEN ? AND ?`, [store.run, t0 - 1, t1 + 1]);
+    Object.defineProperty(report, "toString", { value: () => formatReport(report as Report), enumerable: false });
     return report;
   }
 
-  private wire(t0: number, t1: number, matched: string | undefined, mode: "app" | "all"): { requests: WireLine[]; static: Report["static"] } {
-    const all = this.log.all<any>("SELECT id, method, path, url, status, t_start, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?)) OR id=?) ORDER BY t_start", this.log.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1, matched ?? "")
-      .map((r) => ({ id: r.id, method: r.method, path: pathOf(r.url, r.path), status: r.status, ms: r.t_end != null ? Math.round(r.t_end - r.t_start) : null, mime: shortMime(r.mime), body: r.body_hash ? r.body_hash.slice(0, 16) : null, size: r.body_size, state: r.body_state, type: r.resource_type, ...(r.t_start < t0 - 1 ? { earlier: true } : {}), ...(matched && r.id === matched ? { until: true } : {}) }));
+  /** The log. Any SQL over the app's store (`disco sql` prints the same). */
+  sql<T = any>(query: string, ...args: unknown[]): T[] { return this.#read().sql<T>(query, ...args); }
+  /** A captured body (or screenshot) by hash or 16-char prefix — the whole blob, even when the text column was capped. */
+  body(hash: string): string { return this.#read().body(hash); }
+  /** The newest JSON body whose URL contains `urlPart` — scoped to an act and/or a method (`json("/api/save", { action: r.action, method: "POST" })` reads back a write even when the app fired GETs afterwards). Waits up to 1 s for a body that is still arriving. */
+  async json<T = any>(urlPart: string, scope: { action?: string; method?: string } = {}): Promise<T | null> {
+    const where = ["url LIKE ?", "status IS NOT NULL"]; const args: unknown[] = [`%${urlPart}%`];
+    if (scope.action) { where.push("action_id=?"); args.push(scope.action); }
+    if (scope.method) { where.push("method=?"); args.push(scope.method.toUpperCase()); }
+    const q = `SELECT id, body_hash, body_state FROM requests WHERE ${where.join(" AND ")} ORDER BY run DESC, t_start DESC LIMIT 20`;
+    const t0 = Date.now();
+    for (;;) {
+      const rows = this.#store.all<{ id: string; body_hash: string | null; body_state: string }>(q, ...args);
+      if (!rows.length) return null;
+      if (rows[0].body_state === "pending" && Date.now() - t0 < 1000) { await sleep(50); continue; }
+      const row = rows.find((r) => r.body_hash);
+      if (!row) return null;
+      try { return JSON.parse(this.body(row.body_hash!)) as T; } catch { return null; }
+    }
+  }
+
+  /** The next event of a kind on the recorder's stream (every page, sockets opened before you joined included) that satisfies `pred`. Default timeout: the enclosing act's max. */
+  waitFor<K extends EventKind>(kind: K, pred: (e: Events[K]) => boolean, timeout?: number): Promise<Events[K]> {
+    const budget = timeout ?? this.#max;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { off(); reject(new Error(`waitFor ${kind}: nothing matched within ${budget} ms`)); }, budget);
+      const off = this.#recorder.on(kind, (e) => { let hit = false; try { hit = !!pred(e); } catch {} if (hit) { clearTimeout(timer); off(); resolve(e); } });
+    });
+  }
+
+  // --- internals -----------------------------------------------------------------------------------
+  #ctx(): LookCtx { return { page: this.page, context: this.context, store: this.#store, recorder: this.#recorder, current: () => this.#current }; }
+  #read(): StoreReader { return (this.#reader ??= openStore(this.#store.dir)); }
+  async #aria(): Promise<string> { try { return await this.page.locator("body").ariaSnapshot({ timeout: 1500 }); } catch { return ""; } }
+  /** A cheap change detector for the quiet loop: element count, text length, focus, url. */
+  #fingerprint(): Promise<string> {
+    return this.page.evaluate(() => `${document.getElementsByTagName("*").length}:${document.body?.textContent?.length ?? 0}:${document.activeElement?.tagName ?? ""}#${(document.activeElement as HTMLElement | null)?.id ?? ""}:${location.href}`).catch(() => "?");
+  }
+  async #storage(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    try { for (const c of await this.context.cookies()) out[`cookie:${c.name}`] = c.value.slice(0, 80); } catch {}
+    try {
+      const kv = await this.page.evaluate(() => {
+        const o: Record<string, string> = {};
+        try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i)!; o["local:" + k] = (localStorage.getItem(k) ?? "").slice(0, 80); } } catch {}
+        try { for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i)!; o["session:" + k] = (sessionStorage.getItem(k) ?? "").slice(0, 80); } } catch {}
+        return o;
+      });
+      Object.assign(out, kv);
+    } catch {}
+    return out;
+  }
+  #wire(t0: number, t1: number): { requests: WireLine[]; static: Report["static"]; pending: string[]; matchedRows: any[] } {
+    const store = this.#store;
+    const rows = store.all<any>("SELECT id, method, path, url, status, t_start, t_response, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?))) ORDER BY t_start", store.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1);
+    const all: WireLine[] = rows.map((r) => ({ id: r.id, method: r.method, path: pathOf(r.url, r.path), status: r.status, ms: r.t_end != null ? Math.round(r.t_end - r.t_start) : null, mime: shortMime(r.mime), body: r.body_hash ? r.body_hash.slice(0, 16) : null, size: r.body_size, state: r.body_state, type: r.resource_type, ...(r.t_start < t0 - 1 ? { earlier: true } : {}) }));
     const types: Record<string, number> = {}; let count = 0;
-    const requests = all.filter((w) => { const isStatic = mode === "app" && STATIC_TYPES.has(w.type ?? "") && !w.until; if (isStatic) { count++; types[w.type!] = (types[w.type!] ?? 0) + 1; } return !isStatic; });
-    return { requests, static: { count, types } };
+    const requests = all.filter((w) => { const isStatic = STATIC_TYPES.has(w.type ?? ""); if (isStatic) { count++; types[w.type!] = (types[w.type!] ?? 0) + 1; } return !isStatic; });
+    const pending = rows.filter((r) => r.t_start >= t0 - 1 && r.t_end == null && !STATIC_TYPES.has(r.resource_type) && r.body_state !== "streaming" && r.resource_type !== "websocket" && r.resource_type !== "eventsource" && r.body_state !== "missing")
+      .map((r) => `${r.method} ${pathOf(r.url, r.path).slice(0, 80)} (${((t1 - r.t_start) / 1000).toFixed(1)}s${r.status != null ? `, ${r.status}, body pending` : ""})`);
+    return { requests, static: { count, types }, pending, matchedRows: rows.filter((r) => r.t_start >= t0 - 1 && !STATIC_TYPES.has(r.resource_type)) };
   }
-
-  private async resolve(spec: ActSpec): Promise<{ locator: Locator; matches: number; force?: boolean } | { diagnosis: Diagnosis }> {
-    const base = this.base(spec.frame);
-    const loc = typeof spec.target === "string" ? base.locator(spec.target) : spec.target!;
-    const targetText = typeof spec.target === "string" ? spec.target : String(spec.target);
-    let count = await loc.count();
-    if (count === 0) {
-      // brief attach wait: re-renders and route transitions often need a few hundred ms
-      try { await loc.first().waitFor({ state: "attached", timeout: Math.min(this.timeouts.action, 1000) }); count = await loc.count(); } catch {}
-      if (count === 0) return { diagnosis: await this.finish({ reason: "not-found", message: `no element matches ${targetText}`, target: targetText, candidates: await this.candidates(spec.frame) }) };
-    }
-    const el = loc.first();
-    if (spec.kind === "hover" || spec.kind === "press") return { locator: el, matches: count };
-    const detached = () => this.finish({ reason: "detached", message: `${targetText} was replaced while being checked — the app re-renders it continuously; try { js: true } (a dispatched click event)`, target: targetText, matches: count });
-    if (!(await el.isVisible())) {
-      if (!(await el.evaluate((n: Element) => n.isConnected).catch(() => false))) return { diagnosis: await detached() };
-      // a visually-hidden checkbox/radio with a visible <label> is a styled control: the label is what a user clicks
-      if (spec.kind === "click") {
-        const labelSel = await el.evaluate((n: Element) => {
-          if (!(n instanceof HTMLInputElement) || !["checkbox", "radio"].includes(n.type)) return null;
-          const lbl = n.closest("label") || (n.id ? document.querySelector(`label[for="${CSS.escape(n.id)}"]`) : null);
-          if (!lbl) return null;
-          if (!lbl.id) lbl.setAttribute("data-disco-label", String(Date.now()));
-          return lbl.id ? `#${CSS.escape(lbl.id)}` : `label[data-disco-label="${lbl.getAttribute("data-disco-label")}"]`;
-        }).catch(() => null);
-        if (labelSel) { const lbl = this.base(spec.frame).locator(labelSel).first(); if (await lbl.isVisible()) return { locator: lbl, matches: count, force: true }; }
-      }
-      return { diagnosis: await this.finish({ reason: "hidden", message: `${targetText} exists but is not visible`, target: targetText, matches: count }) };
-    }
-    if ((spec.kind === "click" || spec.kind === "dblclick" || spec.kind === "fill" || spec.kind === "type" || spec.kind === "select") && !(await el.isEnabled()))
-      return { diagnosis: await this.finish({ reason: "disabled", message: `${targetText} is disabled`, target: targetText, matches: count }) };
-    if ((spec.kind === "click" || spec.kind === "dblclick") && !spec.js) {
-      try { await el.scrollIntoViewIfNeeded({ timeout: 1000 }); } catch {}
-      const hit = await el.evaluate((node: Element, pos: { x: number; y: number } | null) => {
-        const d = (e: Element) => e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + (typeof e.className === "string" && e.className ? "." + e.className.trim().split(/\s+/).slice(0, 2).join(".") : "");
-        const r = node.getBoundingClientRect();
-        const x = pos ? r.left + pos.x : r.left + r.width / 2, y = pos ? r.top + pos.y : r.top + r.height / 2;
-        const vw = Math.min(innerWidth, document.documentElement.clientWidth || innerWidth), vh = Math.min(innerHeight, document.documentElement.clientHeight || innerHeight);
-        if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) {
-          let fixed: Element | null = node; while (fixed && getComputedStyle(fixed).position !== "fixed") fixed = fixed.parentElement;
-          return { offscreen: `at (${Math.round(r.left)}, ${Math.round(r.top)}) in a ${vw}×${vh} viewport${fixed ? `; ${d(fixed)} is position: fixed, so scrolling cannot bring it into view` : " (a panel translated out of view still counts as visible)"}` };
-        }
-        for (let e: Element | null = node; e; e = e.parentElement) if (getComputedStyle(e).pointerEvents === "none") return { noPointer: d(e) };
-        let h = document.elementFromPoint(x, y);
-        while (h && h.shadowRoot) { const inner = h.shadowRoot.elementFromPoint(x, y); if (!inner || inner === h) break; h = inner; }
-        if (!h || node.contains(h)) return null;
-        if (h.contains(node)) return { ancestor: d(h) };   // the parent receives the pointer (pointer-events: none on the child): click there
-        // a styled checkbox/radio/switch: the real input is hidden under a visual that lives in the same <label> (or a label[for]) — that is the control, not an occluder
-        const label = node.closest("label") || (node.id ? document.querySelector(`label[for="${CSS.escape(node.id)}"]`) : null);
-        if (label && (label.contains(h) || h === label)) return { styled: d(h) };
-        return { over: d(h) };
-      }, spec.position ?? null).catch((e: Error) => (/detached|not attached|not connected/i.test(String(e?.message)) ? { detached: true } : null));
-      if (hit && "detached" in hit) return { diagnosis: await detached() };
-      if (hit?.offscreen) return { diagnosis: await this.finish({ reason: "offscreen", message: `${targetText} is outside the viewport ${hit.offscreen} — scroll the page so it is visible, or click with { js: true } if its handler is delegated`, target: targetText, matches: count }) };
-      if (hit?.noPointer) return { diagnosis: await this.finish({ reason: "unclickable", message: `${targetText} ignores the mouse (pointer-events: none on ${hit.noPointer}) — the app wants the keyboard (type / ArrowDown / Enter), or { js: true }`, target: targetText, matches: count }) };
-      if (hit?.styled || hit?.ancestor) return { locator: el, matches: count, force: true };
-      if (hit?.over) return { diagnosis: await this.finish({ reason: "occluded", message: `${targetText} is covered by ${hit.over}`, target: targetText, matches: count, over: hit.over }) };
-    }
-    return { locator: el, matches: count };
-  }
-
-  private async perform(spec: ActSpec, el: Locator | null, force = false): Promise<void> {
-    const T = this.timeouts;
-    switch (spec.kind) {
-      case "click": if (spec.js) await el!.dispatchEvent("click", undefined, { timeout: T.action }); else await el!.click({ timeout: T.action, button: spec.button, position: spec.position, force }); break;
-      case "drag": {
-        const to = spec.to;
-        if (to && typeof to === "object" && "dx" in to) {
-          await el!.scrollIntoViewIfNeeded({ timeout: T.action });
-          const box = await el!.boundingBox(); if (!box) throw new Error("drag: target has no box");
-          const x = box.x + box.width / 2, y = box.y + box.height / 2;
-          await this.page.mouse.move(x, y); await this.page.mouse.down();
-          await this.page.mouse.move(x + to.dx / 2, y + to.dy / 2, { steps: 6 }); await this.page.mouse.move(x + to.dx, y + to.dy, { steps: 6 });
-          await this.page.mouse.up();
-        } else { const base = this.base(spec.frame); const dst = typeof to === "string" ? base.locator(to).first() : (to as Locator); await el!.dragTo(dst, { timeout: T.action }); }
-        break;
-      }
-      case "dblclick": await el!.dblclick({ timeout: T.action, position: spec.position }); break;
-      case "fill": await el!.fill(spec.text ?? "", { timeout: T.action }); break;
-      case "type": await el!.pressSequentially(spec.text ?? "", { timeout: T.action, delay: 15 }); break;
-      case "press": if (el) await el.press(spec.key!, { timeout: T.action }); else await this.page.keyboard.press(spec.key!); break;
-      case "select": await el!.selectOption(spec.value as any, { timeout: T.action }); break;
-      case "hover": await el!.hover({ timeout: T.action }); break;
-      case "scroll":
-        if (spec.target) { const base = this.base(spec.frame); const loc = typeof spec.target === "string" ? base.locator(spec.target).first() : spec.target; await loc.scrollIntoViewIfNeeded({ timeout: T.action }); }
-        else await this.page.mouse.wheel(0, spec.deltaY ?? 600);
-        break;
-      case "navigate": await this.page.goto(spec.url!, { waitUntil: "commit", timeout: T.navigate }); break;
-      case "evaluate": case "noop": break;
-    }
-  }
-
-  private async diagnose(e: Error, spec: ActSpec): Promise<Diagnosis> {
-    const full = String(e?.message ?? e);
-    const msg = full.split("\n").filter((l) => l.trim() && !/^\s*[-=]+\s*$/.test(l)).slice(0, 8).join(" | ");
-    const targetText = spec.target === undefined ? undefined : String(spec.target);
-    let reason: Diagnosis["reason"] = "error"; let over: string | undefined;
-    const m = full.match(/<([a-z][^>]*)>[^\n]*intercepts pointer events/i);
-    // a detach-retry loop (often with <html> "intercepting" because the node vanished) is the re-render signature
-    if (/detached from the DOM|not attached/i.test(full)) reason = "detached";
-    else if (m && /^(html|body)\b/i.test(m[1])) { reason = "offscreen"; over = "<" + m[1].split(" ")[0] + ">"; }
-    else if (m) { reason = "occluded"; over = "<" + m[1] + ">"; }
-    else if (/scrolling into view if needed/.test(full) && !/done scrolling/.test(full)) reason = "offscreen";
+  async #diagnose(e: unknown): Promise<Diagnosis> {
+    const full = String((e as Error)?.message ?? e).replace(/\x1b\[\d+m/g, "");
+    const msg = full.split("\n").filter((l) => l.trim() && !/^\s*[-=]+\s*$/.test(l) && !/^Call log:/.test(l)).slice(0, 6).map((l) => l.trim()).join(" | ").slice(0, 600);
+    const page = this.page;
+    const desc = full.match(/waiting for (locator\(.*\)|getBy[A-Z]\w*\(.*\)|frameLocator\(.*\))\s*$/m)?.[1] ?? full.match(/(locator\('[^\n]*?'\)(?:\.\w+\([^\n]*?\))*|getBy[A-Z]\w*\([^\n]*?\))/)?.[1];
+    let reason: Diagnosis["reason"] = "error"; let over: string | undefined; let hint = ""; let styled = false;
+    const intercept = full.match(/<([a-z][^>]*)>[^\n]*intercepts pointer events/i);
+    if (/detached from the DOM|not attached|Element is not attached/i.test(full)) reason = "detached";
+    else if (intercept && /^(html|body)\b/i.test(intercept[1])) { reason = "offscreen"; over = "<" + intercept[1].split(" ")[0] + ">"; }
+    else if (intercept) { reason = "occluded"; over = "<" + intercept[1].slice(0, 80) + ">"; }
+    else if (/waiting for/.test(full) && !/resolved to|locator resolved/.test(full)) reason = "not-found";
     else if (/not enabled|is disabled/i.test(full)) reason = "disabled";
     else if (/not visible|is hidden/i.test(full)) reason = "hidden";
+    else if (/scrolling into view if needed/.test(full) && !/done scrolling/.test(full)) reason = "offscreen";
     else if (/Timeout/i.test(full)) reason = "timeout";
-    const hint = reason === "detached" ? " — the app replaces this element faster than a mouse click; try { js: true } (a dispatched click event)"
-      : reason === "offscreen" ? ` — the pointer lands on ${over ?? "nothing"}: the element is outside the viewport (a panel translated off-screen, a menu below the fold) or still moving; scroll it into view, or { js: true }`
-      : reason === "occluded" ? ` — covered by ${over}` : "";
-    return this.finish({ reason, message: msg + hint, target: targetText, over });
-  }
-
-  private async finish(d: Diagnosis): Promise<Diagnosis> {
-    d.url = safe(() => this.page.url(), "");
-    d.dialogs = await this.dialogCensus();
-    try { d.shot = (await this.screenshot("diagnosis")).hash; } catch {}
+    const d: Diagnosis = { reason, message: msg, ...(desc ? { selector: desc } : {}), over };
+    // ask the page what is really there for the locator Playwright named
+    const loc = desc ? locatorFromDescription(page, desc) : null;
+    if (loc) {
+      const count = await loc.count().catch(() => -1);
+      if (count === 0) reason = "not-found";
+      else if (count > 0) {
+        const m = await inspect(page, loc.first());
+        if (!m.visible) reason = "hidden";
+        else if (!m.enabled) reason = "disabled";
+        else if (m.why && /pointer-events/.test(m.why)) reason = "unclickable";
+        else if (m.why && /outside the/.test(m.why)) reason = "offscreen";
+        else if (m.why && /styled control|ancestor/.test(m.why)) { reason = "occluded"; over = m.under ?? over; styled = true; }
+        else if (m.why && /covered by/.test(m.why)) { reason = "occluded"; over = m.under ?? over; }
+        else if (m.why && /detached/.test(m.why)) reason = "detached";
+        if (m.why) hint = " — " + m.why;
+        if (count > 1) hint += ` (${count} elements match; the first was used)`;
+      }
+      d.reason = reason; d.over = over;
+    }
+    if (reason === "not-found") { d.candidates = (await controls(page).catch(() => [])).slice(0, 25).map((c) => `${c.selector}${c.role && c.name && !c.selector.startsWith("role=") ? `  (${c.role} "${c.name}")` : ""}`); hint = " — nothing matches; the visible controls are listed below, and look(selector) tries a selector without acting"; }
+    else if (reason === "occluded" && !styled) hint = ` — covered by ${over ?? "another element"}: dismiss the dialog or toast that is over it, or wait for it to be gone`;
+    else if (reason === "detached") hint = " — the app replaces this element faster than a mouse click; locator.dispatchEvent(\"click\") lands where a real click cannot";
+    else if (reason === "timeout" && /page\.goto/.test(full)) hint = ` — the navigation did not finish within max; raise max for this act, or goto(url, { waitUntil: "commit" }) and wait for the element you need`;
+    else if (reason === "timeout") hint = ` — the wait inherited this act's max (${this.#max === DEFAULT_MAX ? DEFAULT_MAX : this.#max} ms); look() shows what is on the screen now`;
+    else if (reason === "disabled") hint = " — the form is not ready; wait for whatever enables it";
+    else if (reason === "hidden") hint = " — it is rendered but collapsed, off-screen or display:none; open what reveals it";
+    d.message = msg + hint;
+    d.dialogs = await dialogCensus(page);
+    try { const buf = await page.screenshot({ type: "jpeg", quality: 60 }); const hash = this.#store.writeBlob(new Uint8Array(buf)); this.#store.insert("shots", { t: this.#store.now(), hash, reason: "diagnosis", action_id: this.#current }); d.shot = `${this.#store.dir}/blobs/${hash.slice(0, 2)}/${hash}`; } catch {}
     return d;
   }
+}
 
-  private async untilDiagnosis(pred: Pred, error: string, t0: number): Promise<Diagnosis> {
-    const notes: string[] = [];
-    const walk = (p: Pred) => {
-      if ("any" in p) p.any.forEach(walk); else if ("all" in p) p.all.forEach(walk);
-      else if ("request" in p) {
-        const rows = this.log.all<any>("SELECT id, t_start, status, url, method FROM requests WHERE run=? AND t_start>=? ORDER BY t_start", this.log.run, t0 - 1)
-          .filter((r) => (typeof p.request === "string" ? r.url.includes(p.request) : p.request.test(r.url)) && (!p.method || r.method.toUpperCase() === p.method.toUpperCase()));
-        notes.push(rows.length === 0 ? `no request matching ${String(p.request)} was issued during the wait` : `${rows.length} matching request(s) issued (${rows.map((r) => `${r.id} status ${r.status ?? "none yet"}`).join(", ")})`);
-        if (rows.length === 0) {
-          const arrived = this.log.all<any>("SELECT method, url, status, resource_type FROM requests WHERE run=? AND t_start>=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start LIMIT 9", this.log.run, t0 - 1);
-          notes.push(arrived.length ? `what did arrive: ${arrived.slice(0, 8).map((r) => `${r.method} ${pathOf(r.url, null)} ${r.status ?? "…"}`).join(", ")}${arrived.length > 8 ? ", …" : ""}` : "nothing else was requested either");
-        }
-      } else if ("ws" in p) {
-        const n = this.log.get<{ n: number }>("SELECT count(*) n FROM ws_frames WHERE run=? AND t>=? AND dir=?", this.log.run, t0 - 1, p.dir ?? "in")?.n ?? 0;
-        notes.push(n === 0 ? `no WebSocket frame was ${p.dir === "out" ? "sent" : "received"} during the wait` : `${n} frame(s) ${p.dir === "out" ? "sent" : "received"}, none matched ${String(p.ws)}`);
-      } else if ("page" in p) notes.push(`no page opened matching ${String(p.page)}`);
-    };
-    walk(pred);
-    return this.finish({ reason: "timeout", message: `until ${describe(pred)} did not happen: ${error}${notes.length ? " — " + notes.join("; ") : ""}` });
-  }
-
-  private dialogCensus(): Promise<string[]> {
-    return this.page.evaluate(() => {
-      const out: string[] = [];
-      for (const el of Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]'))) {
-        const r = (el as HTMLElement).getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) continue;
-        const title = el.querySelector("h1,h2,h3,h4,[role=heading]")?.textContent?.trim() || (el as HTMLElement).innerText?.trim().slice(0, 80) || "";
-        out.push(`${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""} "${title.slice(0, 80)}"`);
-      }
-      return out;
-    }).catch(() => []);
-  }
-
-  private candidates(frame?: string): Promise<string[]> {
-    const base = this.base(frame);
-    return base.locator("body").evaluate((body: Element) => {
-      const out: string[] = [];
-      const sel = 'button,a[href],input,select,textarea,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="option"],[role="combobox"],[role="checkbox"],summary';
-      for (const el of Array.from(body.querySelectorAll(sel))) {
-        const h = el as HTMLElement;
-        const r = h.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) continue;
-        const name = (h.getAttribute("aria-label") || h.innerText || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || "").trim().replace(/\s+/g, " ").slice(0, 40);
-        const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase();
-        const role = h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" ? "button" : "textbox") : tag);
-        // a selector that pastes: role=…[name="…"] matches icon buttons and inputs that :has-text() cannot
-        const sel = name ? `role=${role}[name="${name.replace(/"/g, '\\"')}"]` : h.id ? `#${h.id}` : tag;
-        out.push(h.id && name ? `${sel} (#${h.id})` : sel);
-        if (out.length >= 25) break;
-      }
-      return out;
-    }).catch(() => []);
-  }
-
-  private async storageSnapshot(): Promise<Record<string, string>> {
-    return this.page.evaluate(() => {
-      const out: Record<string, string> = {};
-      for (const c of document.cookie.split(";")) { const t = c.trim(); if (!t) continue; const i = t.indexOf("="); out["cookie:" + (i < 0 ? t : t.slice(0, i))] = i < 0 ? "" : t.slice(i + 1, i + 81); }
-      try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i)!; out["local:" + k] = (localStorage.getItem(k) ?? "").slice(0, 80); } } catch {}
-      return out;
-    }).catch(() => ({}));
-  }
-
-  private async ariaSafe(): Promise<string> {
-    try { return await this.page.locator("body").ariaSnapshot({ timeout: 1500 }); } catch { return ""; }
-  }
-
-  // --- until ---------------------------------------------------------------------------------------
-  private arm(pred: Pred, timeout: number): { wait: () => Promise<UntilResult>; cancel: () => void; resolvedAt?: number } {
-    const t0 = performance.now();
-    let cancelled = false;
-    const ctx: ArmContext = {};
-    const handle: { wait: () => Promise<UntilResult>; cancel: () => void; resolvedAt?: number } = { wait: () => p, cancel: () => { cancelled = true; } };
-    const p = this.waitPred(pred, timeout, ctx).then(
-      (which) => { handle.resolvedAt = performance.now(); return { ok: true, elapsedMs: ms(t0, handle.resolvedAt), which, ...(ctx.request ? { request: ctx.request } : {}) }; },
-      (e) => ({ ok: false, elapsedMs: ms(t0, performance.now()), error: firstLine(e) }),
-    );
-    p.catch(() => {});
-    return handle;
-  }
-
-  /** Cheap pre-dispatch check for element/text predicates (the ones that can be trivially true already). */
-  private async holdsNow(pred: Pred): Promise<boolean> {
-    try {
-      if ("any" in pred) { for (const p of pred.any) if (await this.holdsNow(p)) return true; return false; }
-      if ("all" in pred) { for (const p of pred.all) if (!(await this.holdsNow(p))) return false; return true; }
-      if ("selector" in pred) { const l = this.base(pred.frame).locator(pred.selector).first(); return pred.visible === false ? (await l.count()) > 0 : l.isVisible(); }
-      if ("gone" in pred) return !(await this.base(pred.frame).locator(pred.gone).first().isVisible());
-      if ("text" in pred) return this.page.getByText(pred.text).first().isVisible();
-      if ("url" in pred) return urlMatches(pred.url, this.page.url());
-      if ("fn" in pred) return !!(await this.page.evaluate(pred.fn as any, pred.arg));
-    } catch {}
-    return false;
-  }
-
-  private waitPred(pred: Pred, timeout: number, ctx: ArmContext = {}): Promise<string> {
-    const label = pred.label ?? describe(pred);
-    const done = (p: Promise<unknown>) => p.then(() => label);
-    if ("any" in pred) return firstFulfilled(pred.any.map((x) => this.waitPred(x, timeout, ctx)));
-    if ("all" in pred) return Promise.all(pred.all.map((x) => this.waitPred(x, timeout, ctx))).then(() => label);
-    if ("selector" in pred) return done(this.base(pred.frame).locator(pred.selector).first().waitFor({ state: pred.visible === false ? "attached" : "visible", timeout }));
-    if ("gone" in pred) return done(this.base(pred.frame).locator(pred.gone).first().waitFor({ state: "hidden", timeout }));
-    if ("text" in pred) return done(this.page.getByText(pred.text).first().waitFor({ state: "visible", timeout }));
-    if ("url" in pred) { const u = pred.url; return done(this.page.waitForURL((x) => urlMatches(u, x.href), { timeout, waitUntil: "commit" })); }
-    if ("request" in pred) {
-      const r = pred.request; const match = (url: string) => (typeof r === "string" ? url.includes(r) : r.test(url));
-      const wantMethod = pred.method?.toUpperCase();
-      return done(this.page.waitForResponse((res) => match(res.url()) && (!wantMethod || res.request().method().toUpperCase() === wantMethod), { timeout }).then(async (res) => {
-        ctx.request = this.recorder.idOf(res.request());
-        // a body the page never reads never "finishes" in Chromium (and cannot be fetched at all), so landed waits at most 1 s past the headers
-        if (pred.landed) await Promise.race([res.finished(), new Promise((r) => setTimeout(r, LANDED_BOUND_MS))]);
-        return res;
-      }));
-    }
-    if ("fn" in pred) return done(this.page.waitForFunction(pred.fn as any, pred.arg, { timeout, polling: 100 }));
-    if ("page" in pred) {
-      const u = pred.page;
-      return done(this.context.waitForEvent("page", { timeout }).then((p) => p.waitForURL((x) => urlMatches(u, x.href), { timeout, waitUntil: "commit" })));
-    }
-    if ("ws" in pred) {
-      const m = pred.ws;
-      const match = (payload: unknown) => (typeof m === "string" ? String(payload).includes(m) : m.test(String(payload)));
-      return new Promise<string>((resolve, reject) => {
-        const want = pred.dir ?? "in";
-        const cb = (f: WsFrame) => { if (f.dir === want && match(f.payload)) { cleanup(); resolve(label); } };
-        const timer = setTimeout(() => { cleanup(); reject(new Error(`no WebSocket frame matching ${String(m)} within ${timeout}ms`)); }, timeout);
-        const cleanup = () => { clearTimeout(timer); this.recorder.offFrame(cb); };
-        this.recorder.onFrame(cb);
-      });
-    }
-    return Promise.reject(new Error("unknown predicate " + JSON.stringify(pred)));
-  }
+/** Throw unless the code ran and its until (if any) held — and throw when the until was already true before the action, because that proved nothing. */
+export function reached<T>(r: Report<T>, what?: string): Report<T> {
+  const who = `${what ?? r.label} (${r.action})`;
+  if (r.ok && r.until?.alreadyTrue) throw new Error(`${who}: the until was already true before the action — it proves nothing; wait for something that is false beforehand (the report's proposed untils all were)`);
+  if (r.ok && (!r.until || r.until.ok)) return r;
+  const d = r.diagnosis;
+  throw new Error(`${who}: ${r.ok ? `until failed after ${r.until?.elapsedMs}ms — ${r.until?.error ?? ""}${r.note ? ` (${r.note})` : ""}` : `${d?.reason} — ${d?.message}${d?.dialogs?.length ? ` (open: ${d.dialogs.join("; ")})` : ""}${d?.shot ? ` [shot ${d.shot}]` : ""}`}`);
 }
 
 // ---------------------------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------------------------
-export function describe(p: Pred): string {
-  if ("any" in p) return "any(" + p.any.map(describe).join(", ") + ")";
-  if ("all" in p) return "all(" + p.all.map(describe).join(", ") + ")";
-  if ("selector" in p) return (p.visible === false ? "attached " : "") + p.selector + (p.frame ? ` in ${p.frame}` : "");
-  if ("gone" in p) return "gone " + p.gone;
-  if ("text" in p) return `text "${p.text}"`;
-  if ("url" in p) return "url " + String(p.url);
-  if ("request" in p) return "request " + (p.method ? p.method.toUpperCase() + " " : "") + String(p.request) + (p.landed ? " landed" : "");
-  if ("fn" in p) return "fn " + (typeof p.fn === "string" ? p.fn : p.fn.name || "…").slice(0, 60);
-  if ("page" in p) return "page " + String(p.page);
-  if ("ws" in p) return "ws " + (p.dir === "out" ? "sent " : "") + String(p.ws);
-  return JSON.stringify(p);
+/** Pasteable until code for what an act caused. Every proposal was false before the action: responses only exist after it, ui lines come from the diff, the url changed. */
+function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLines: string[], preUrl: string, postUrl: string, storage: Report["storage"]): Proposal[] {
+  const out: Proposal[] = [];
+  const seen = new Set<string>();
+  for (const r of rows.filter((x) => x.t_response != null).sort((a, b) => a.t_response - b.t_response)) {
+    let path: string; try { path = new URL(r.url).pathname; } catch { path = r.path ?? r.url; }
+    const key = `${r.method} ${path}`; if (seen.has(key)) continue; seen.add(key);
+    const m = r.method === "GET" ? "" : ` && r.request().method() === ${JSON.stringify(r.method)}`;
+    out.push({ kind: "response", code: `() => page.waitForResponse(r => r.url().includes(${JSON.stringify(path)})${m})`, atMs: Math.max(0, Math.round(r.t_response - t0 - preMs)) });
+    if (out.length >= 3) break;
+  }
+  if (preUrl && postUrl && preUrl !== postUrl) {
+    let p: string; try { p = new URL(postUrl).pathname; } catch { p = postUrl; }
+    if (p && p !== "/") out.push({ kind: "url", code: `() => page.waitForURL(u => u.pathname.includes(${JSON.stringify(p)}))`, atMs: null });
+  }
+  const STATES = ["selected", "expanded", "checked", "pressed", "disabled"];
+  const rank = (role: string) => ({ dialog: 0, alertdialog: 0, heading: 1, alert: 2, status: 2, tab: 3, button: 4, link: 5, textbox: 5, cell: 9, text: 8 } as Record<string, number>)[role] ?? 7;
+  const parsed = (line: string) => {
+    const m = line.match(/^-\s+([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?((?:\s*\[[^\]]*\])*)\s*:?\s*(.*)$/); if (!m) return null;
+    const states = [...(m[3] ?? "").matchAll(/\[([a-z]+)\]/g)].map((x) => x[1]).filter((x) => STATES.includes(x));
+    return { role: m[1], name: m[2], states, rest: m[4]?.trim().replace(/^"|"$/g, ""), key: `${m[1]}|${m[2] ?? ""}|${states.join(",")}` };
+  };
+  const before = new Set(preLines.map(parsed).filter(Boolean).flatMap((x) => [x!.key, `${x!.role}|${x!.name ?? ""}|`]));
+  const added = ui.added.map(parsed).filter((x): x is NonNullable<typeof x> => !!x && !before.has(x.key) && x.role !== "generic" && x.role !== "list" && x.role !== "listitem" && x.role !== "group" && x.role !== "region").sort((a, b) => rank(a.role) - rank(b.role));
+  let n = 0;
+  for (const a of added) {
+    if (n >= 3) break;
+    if (a.role === "text") { const t = a.rest; if (!t || t.length < 3 || t.length > 40) continue; out.push({ kind: "appeared", code: `() => page.getByText(${JSON.stringify(t)}).first().waitFor()`, atMs: null }); n++; continue; }
+    if (!a.name) continue;
+    const st = a.states.map((x) => `, ${x}: true`).join("");
+    out.push({ kind: "appeared", code: `() => page.getByRole(${JSON.stringify(a.role)}, { name: ${JSON.stringify(a.name.slice(0, 60))}, exact: true${st} }).first().waitFor()`, atMs: null }); n++;
+  }
+  const removed = ui.removed.map(parsed).filter((x): x is NonNullable<typeof x> => !!x && !!x.name && ["dialog", "heading", "button", "alert", "status", "progressbar"].includes(x.role)).sort((a, b) => rank(a.role) - rank(b.role));
+  if (removed[0]) out.push({ kind: "gone", code: `() => page.getByRole(${JSON.stringify(removed[0].role)}, { name: ${JSON.stringify(removed[0].name!.slice(0, 60))}, exact: true }).first().waitFor({ state: "hidden" })`, atMs: null });
+  for (const line of storage.local.slice(0, 1)) { const k = line.replace(/^\+/, "").split(/[=:]/)[0]; if (k && line.startsWith("+")) out.push({ kind: "storage", code: `() => page.waitForFunction(k => localStorage.getItem(k) !== null, ${JSON.stringify(k)})`, atMs: null }); }
+  return out.slice(0, 7);
 }
 
-/** Throw unless the action was performed and its `until` (if any) held. The message carries the diagnosis. */
-export function reached(r: Report, what?: string): Report {
-  if (r.ok && r.until?.alreadyTrue) throw new Error(`${what ?? r.action}: until ${r.until.which ?? ""} was already true before the action — it proves nothing; wait for something that is false beforehand`);
-  if (r.ok && (!r.until || r.until.ok)) return r;
-  const d = r.diagnosis ?? r.until?.diagnosis;
-  throw new Error(`${what ?? r.action}: ${r.ok ? `until failed after ${r.until?.elapsedMs}ms` : r.diagnosis?.reason}${d ? ` — ${d.message}${d.dialogs?.length ? ` (open: ${d.dialogs.join("; ")})` : ""}${d.shot ? ` [shot ${d.shot.slice(0, 12)}]` : ""}` : ""}`);
-}
-
-interface ArmContext { request?: string }
 function diffStorage(a: Record<string, string>, b: Record<string, string>): Report["storage"] {
-  const lines: Record<"cookies" | "local", string[]> = { cookies: [], local: [] };
-  const bucket = (k: string) => (k.startsWith("cookie:") ? "cookies" : "local");
+  const lines: Report["storage"] = { cookies: [], local: [], session: [] };
+  const bucket = (k: string) => (k.startsWith("cookie:") ? "cookies" : k.startsWith("session:") ? "session" : "local") as keyof Report["storage"];
   const name = (k: string) => k.slice(k.indexOf(":") + 1);
   for (const k of Object.keys(b)) { if (!(k in a)) lines[bucket(k)].push(`+${name(k)}=${b[k]}`); else if (a[k] !== b[k]) lines[bucket(k)].push(`${name(k)}: ${a[k]} → ${b[k]}`); }
   for (const k of Object.keys(a)) if (!(k in b)) lines[bucket(k)].push(`-${name(k)}`);
   return lines;
 }
-/** Labels of the arms that describe a STATE (element, text, url, fn) — the ones that can be true before an action. Event arms (request, ws, page) only ever see the future. */
-function stateArms(p: Pred, out = new Set<string>()): Set<string> {
-  if ("any" in p) { p.any.forEach((x) => stateArms(x, out)); return out; }
-  if ("all" in p) { p.all.forEach((x) => stateArms(x, out)); out.add(p.label ?? describe(p)); return out; }
-  if (!("request" in p) && !("ws" in p) && !("page" in p)) out.add(p.label ?? describe(p));
-  return out;
-}
-/** Playwright resource types that are the page's own assets, not the app talking to its server. */
-const STATIC_TYPES = new Set(["script", "stylesheet", "image", "font", "media", "texttrack", "manifest"]);
-
-/** Rows whose headers arrived but whose body never finished are bodies the page never read: no recorder will ever complete them. */
-export function sweepUnread(log: Store): void {
-  log.update("requests", { body_state: "missing", error: "body not read by the page" }, "body_state='pending' AND status IS NOT NULL AND t_response < ?", [log.now() - 1500]);
-}
-
-function firstFulfilled<T>(ps: Promise<T>[]): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let rejected = 0; const errors: unknown[] = [];
-    ps.forEach((p, i) => p.then(resolve, (e) => {
-      errors[i] = e;
-      // a malformed selector (or any non-timeout failure) in one arm is a bug in the predicate: say so now, don't burn the budget on the other arms
-      if (!/timeout/i.test(String((e as any)?.message ?? e))) { reject(new Error("arm failed: " + firstLine(e))); return; }
-      if (++rejected === ps.length) reject(new Error("none matched: " + errors.map(firstLine).join(" / ")));
-    }));
-  });
-}
-function firstLine(e: unknown): string { return String((e as any)?.message ?? e).split("\n")[0].slice(0, 200); }
-function ms(a: number, b: number): number { return Math.round(b - a); }
-function safe<T>(f: () => T, d: T): T { try { return f(); } catch { return d; } }
-function sleep(n: number) { return new Promise((r) => setTimeout(r, n)); }
-function pathOf(url: string, path: string | null): string { try { const u = new URL(url); return u.pathname + u.search; } catch { return path ?? url; } }
-function shortMime(m: string | null): string | null { if (!m) return null; const b = m.split(";")[0].trim(); return b.replace(/^application\//, "").replace(/^text\//, "text/"); }
 
 /** Line-multiset diff of two aria snapshots. */
-export function diffAria(pre: string, post: string, cap = 40, ignore: Array<string | RegExp> = []): Report["ui"] {
-  const skip = (t: string) => ignore.some((x) => (typeof x === "string" ? t.includes(x) : x.test(t)));
-  const count = (s: string) => { const m = new Map<string, number>(); for (const l of s.split("\n")) { const t = l.trim(); if (t && !skip(t)) m.set(t, (m.get(t) ?? 0) + 1); } return m; };
+export function diffAria(pre: string, post: string, cap = 40): Report["ui"] {
+  const count = (s: string) => { const m = new Map<string, number>(); for (const l of s.split("\n")) { const t = l.trim(); if (t) m.set(t, (m.get(t) ?? 0) + 1); } return m; };
   const a = count(pre), b = count(post);
   const added: string[] = [], removed: string[] = [];
   for (const [l, n] of b) { const d = n - (a.get(l) ?? 0); for (let i = 0; i < d; i++) added.push(l); }
@@ -704,3 +430,11 @@ export function diffAria(pre: string, post: string, cap = 40, ignore: Array<stri
   const more = Math.max(0, added.length - cap) + Math.max(0, removed.length - cap);
   return { added: added.slice(0, cap), removed: removed.slice(0, cap), ...(more ? { more } : {}) };
 }
+
+function fnSource(f: unknown): string { try { return String(f).slice(0, 4000); } catch { return ""; } }
+function firstLine(e: unknown): string { return String((e as any)?.message ?? e).split("\n")[0].slice(0, 300); }
+function ms(a: number, b: number): number { return Math.round(b - a); }
+function safe<T>(f: () => T, d: T): T { try { return f(); } catch { return d; } }
+function sleep(n: number) { return new Promise((r) => setTimeout(r, n)); }
+function pathOf(url: string, path: string | null): string { try { const u = new URL(url); return u.pathname + u.search; } catch { return path ?? url; } }
+function shortMime(m: string | null): string | null { if (!m) return null; const b = m.split(";")[0].trim(); return b.replace(/^application\//, "").replace(/^text\//, "text/"); }

@@ -1,64 +1,114 @@
-// The recorder: Playwright context/page events → store rows. Passive; nothing in the page is touched.
-// Records while the Session is open (a script) or while a CLI command runs (`disco record` for longer).
+// The recorder: Playwright context/page events and one CDP Network session per page → store rows and an
+// in-process event stream. Passive: nothing in the page is touched. Every handler is guarded — a write
+// that fails must never take the recorder down with it.
 import type { BrowserContext, CDPSession, Page, Request, Response } from "playwright-core";
 import { Store, REQ_BODY_CAP, WS_PAYLOAD_CAP } from "./store.ts";
 
 export type DialogPolicy = "accept" | "dismiss";
-/** How long after the headers a body may stay `pending` before it is marked missing (the page never read it). */
+/** How long after the headers a body may stay `pending`, with no bytes arriving, before it is marked missing (the page never read it). */
 export const UNREAD_BODY_MS = 1500;
+
+export type EventKind = "request" | "response" | "ws" | "console" | "dialog" | "page" | "nav";
+export interface Events {
+  request: { id: string; method: string; url: string; resourceType: string; t: number };
+  response: { id: string; method: string; url: string; status: number; mime: string | null; t: number; response: Response };
+  ws: { dir: "in" | "out"; payload: string; url: string; t: number };
+  console: { level: string; text: string; t: number };
+  dialog: { type: string; message: string; t: number };
+  page: { url: string; page: Page; t: number };
+  nav: { url: string; t: number };
+}
 
 export interface Recorder {
   /** Wait (bounded) for in-flight async writes — response headers and bodies — so a report sees them. */
   flush(maxMs: number): Promise<void>;
   detach(): void;
-  /** Every WebSocket frame on every page — including sockets opened before this session joined (for the `ws` predicate). */
-  onFrame(cb: (f: WsFrame) => void): void;
-  offFrame(cb: (f: WsFrame) => void): void;
-  /** The log id of a Playwright Request (to mark the row an `until` matched). */
+  /** Subscribe to the live stream (every page, including sockets opened before this session joined). Returns the unsubscribe. */
+  on<K extends EventKind>(kind: K, cb: (e: Events[K]) => void): () => void;
+  /** The log id of a Playwright Request. */
   idOf(r: Request): string | undefined;
-  /** Resolves once the initial listeners (including the CDP socket watchers of existing pages) are in place. */
+  /** `store.now()` of the most recent event of any kind. */
+  lastActivity(): number;
+  /** Have response bytes for `url` arrived within the last `withinMs`? (Distinguishes "still downloading" from "never read".) */
+  flowing(url: string, withinMs: number): boolean;
+  /** A scratch page of ours (look's overlay): record nothing from it. */
+  ignore(page: Page): void;
+  /** Resolves once the initial listeners (including the CDP sessions of existing pages) are in place. */
   ready: Promise<void>;
 }
-export interface WsFrame { dir: "in" | "out"; payload: string; url: string }
 
-/** `silent`: handle dialogs and watch WebSocket frames (for the `ws` predicate) but write nothing — another process is recording this browser. */
+const warned = new Set<string>();
+function warn(where: string, e: unknown): void {
+  const msg = `${where}: ${String((e as Error)?.message ?? e).split("\n")[0]}`;
+  if (warned.has(msg)) return;
+  warned.add(msg);
+  process.stderr.write(`disco recorder: ${msg}\n`);
+}
+
+/** `silent`: handle dialogs and feed the event stream but write nothing — another process is recording this browser. */
 export function attachRecorder(context: BrowserContext, store: Store, current: () => string | null, dialogs: DialogPolicy, opts: { silent?: boolean } = {}): Recorder {
   const silent = opts.silent === true;
   const ids = new WeakMap<Request, string>();
   let counter = store.get<{ n: number }>("SELECT COUNT(*) n FROM requests")?.n ?? 0;
   const pending = new Set<Promise<unknown>>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
-  const track = (p: Promise<unknown>) => { pending.add(p); p.catch(() => {}).finally(() => pending.delete(p)); };
+  const listeners: { [K in EventKind]: Set<(e: any) => void> } = { request: new Set(), response: new Set(), ws: new Set(), console: new Set(), dialog: new Set(), page: new Set(), nav: new Set() };
+  const ignored = new WeakSet<Page>();
+  const lastData = new Map<string, number>();
+  let last = store.now();
+
+  const track = (p: Promise<unknown>) => { pending.add(p); p.catch((e) => warn("async write", e)).finally(() => pending.delete(p)); };
+  const emit = <K extends EventKind>(kind: K, e: Events[K]) => { last = store.now(); for (const cb of listeners[kind]) { try { cb(e); } catch (err) { warn(`listener ${kind}`, err); } } };
+  const guard = <A extends unknown[]>(where: string, fn: (...a: A) => unknown) => (...a: A) => { try { const r = fn(...a); if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch((e) => warn(where, e)); } catch (e) { warn(where, e); } };
   const idOf = (r: Request) => { let id = ids.get(r); if (!id) { id = `r${store.run}-${++counter}`; ids.set(r, id); } return id; };
   const cap = (s: string | null | undefined, n: number) => (s == null ? null : s.length > n ? s.slice(0, n) : s);
   const hostPath = (url: string) => { try { const u = new URL(url); return { host: u.host, path: u.pathname }; } catch { return { host: null, path: null }; } };
+  const scratch = (page: Page | null | undefined): boolean => { if (!page) return false; if (ignored.has(page)) return true; try { return page.url().startsWith("data:"); } catch { return false; } };
+  const pageOf = (r: Request): Page | null => { try { return r.frame().page(); } catch { return null; } };
+  const flowing = (url: string, withinMs: number) => store.now() - (lastData.get(url) ?? -Infinity) <= withinMs;
 
-  const onRequest = (r: Request) => {
-    if (silent) return;
-    const id = idOf(r);
+  const onRequest = guard("request", (r: Request) => {
+    if (scratch(pageOf(r))) return;
+    const id = idOf(r); const t = store.now();
     let frameUrl: string | null = null; try { frameUrl = r.frame().url(); } catch {}
-    store.insert("requests", {
-      id, t_start: store.now(), method: r.method(), url: r.url(), ...hostPath(r.url()), resource_type: r.resourceType(), frame_url: frameUrl,
+    if (!silent) store.insert("requests", {
+      id, t_start: t, method: r.method(), url: r.url(), ...hostPath(r.url()), resource_type: r.resourceType(), frame_url: frameUrl,
       req_headers: r.headers(), req_body: cap(r.postData(), REQ_BODY_CAP), body_state: "pending", action_id: current(),
     });
+    emit("request", { id, method: r.method(), url: r.url(), resourceType: r.resourceType(), t });
+  });
+  // a body the page never reads never finishes and cannot be fetched; once no bytes have arrived for a while, stop calling it pending
+  const armMissing = (id: string, url: string, wait = UNREAD_BODY_MS) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      const since = store.now() - (lastData.get(url) ?? -Infinity);
+      if (since < UNREAD_BODY_MS) { armMissing(id, url, Math.max(50, UNREAD_BODY_MS - since)); return; }
+      try { store.update("requests", { body_state: "missing", error: "body not read by the page" }, "id=? AND body_state='pending'", [id]); } catch (e) { warn("missing sweep", e); }
+    }, wait);
+    timers.add(timer);
   };
-  const onResponse = (res: Response) => {
-    if (silent) return;
-    const id = idOf(res.request());
+  const onResponse = guard("response", (res: Response) => {
+    const req = res.request();
+    if (scratch(pageOf(req))) return;
+    const id = idOf(req); const t = store.now();
     const mime = res.headers()["content-type"] ?? null;
     const streaming = /event-stream/i.test(mime ?? "");
-    store.update("requests", { t_response: store.now(), status: res.status(), mime, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
-    // a body the page never reads never finishes and cannot be fetched; stop calling it pending
-    if (!streaming) { const timer = setTimeout(() => { store.update("requests", { body_state: "missing", error: "body not read by the page" }, "id=? AND body_state='pending'", [id]); }, UNREAD_BODY_MS); timers.add(timer); }
-    track(res.allHeaders().then((h) => store.update("requests", { resp_headers: h }, "id=?", [id])));
-  };
-  const onFinished = (r: Request) => {
+    if (!silent) {
+      store.update("requests", { t_response: t, status: res.status(), mime, ...(streaming ? { body_state: "streaming" } : {}) }, "id=?", [id]);
+      if (!streaming) armMissing(id, req.url());
+      track(res.allHeaders().then((h) => store.update("requests", { resp_headers: h }, "id=?", [id])));
+    }
+    emit("response", { id, method: req.method(), url: req.url(), status: res.status(), mime, t, response: res });
+  });
+  const onFinished = guard("requestfinished", (r: Request) => {
+    if (scratch(pageOf(r))) return;
+    last = store.now();
     if (silent) return;
     const id = idOf(r);
     const tEnd = store.now();
     const rt = r.resourceType();
     if (rt === "websocket" || rt === "eventsource") { store.update("requests", { t_end: tEnd, body_state: "missing" }, "id=?", [id]); return; }
-    const p = (async () => {
+    track((async () => {
       const res = await r.response();
       if (!res) { store.update("requests", { t_end: tEnd, body_state: "missing" }, "id=?", [id]); return; }
       const mime = res.headers()["content-type"] ?? null;
@@ -69,19 +119,18 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       } catch (e) {
         store.update("requests", { t_end: tEnd, body_state: "missing", error: cap(String((e as Error).message), 200) }, "id=?", [id]);
       }
-    })();
-    track(p);
-  };
-  const onFailed = (r: Request) => {
-    if (silent) return;
-    store.update("requests", { t_end: store.now(), body_state: "error", error: r.failure()?.errorText ?? "failed" }, "id=?", [idOf(r)]);
-  };
+    })());
+  });
+  const onFailed = guard("requestfailed", (r: Request) => {
+    if (scratch(pageOf(r))) return;
+    last = store.now();
+    if (!silent) store.update("requests", { t_end: store.now(), body_state: "error", error: r.failure()?.errorText ?? "failed" }, "id=?", [idOf(r)]);
+  });
 
   const pageCleanups = new Map<Page, () => void>();
-  const frameCbs = new Set<(f: WsFrame) => void>();
   const cdpSessions = new Set<CDPSession>();
-  // WebSocket frames come from a CDP Network session per page rather than Playwright's `websocket` event, which
-  // only reports sockets created after the listener exists: a script joining a live page must still see frames.
+  // One CDP Network session per page: WebSocket frames (Playwright's `websocket` event only reports sockets created
+  // after the listener exists; a script joining a live page must still see frames) and body-byte progress.
   const watchSockets = async (page: Page) => {
     let cdp: CDPSession;
     try { cdp = await context.newCDPSession(page); await cdp.send("Network.enable"); } catch { return; }
@@ -89,40 +138,50 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     const urls = new Map<string, string>();
     const urlOf = (id: string) => urls.get(id) ?? "(opened before recording)";
     const frame = (dir: "in" | "out", id: string, payload: string) => {
-      const f: WsFrame = { dir, payload: String(payload), url: urlOf(id) };
-      if (!silent) store.insert("ws_frames", { t: store.now(), url: f.url, dir, payload: cap(f.payload, WS_PAYLOAD_CAP), action_id: current() });
-      for (const cb of frameCbs) cb(f);
+      if (scratch(page)) return;
+      const f = { dir, payload: String(payload), url: urlOf(id), t: store.now() };
+      if (!silent) store.insert("ws_frames", { t: f.t, url: f.url, dir, payload: cap(f.payload, WS_PAYLOAD_CAP), action_id: current() });
+      emit("ws", f);
     };
-    cdp.on("Network.webSocketCreated", (e: any) => { urls.set(e.requestId, e.url); if (!silent) store.insert("ws_frames", { t: store.now(), url: e.url, dir: "open", action_id: current() }); });
-    cdp.on("Network.webSocketFrameReceived", (e: any) => frame("in", e.requestId, e.response?.payloadData ?? ""));
-    cdp.on("Network.webSocketFrameSent", (e: any) => frame("out", e.requestId, e.response?.payloadData ?? ""));
-    cdp.on("Network.webSocketClosed", (e: any) => { if (!silent) store.insert("ws_frames", { t: store.now(), url: urlOf(e.requestId), dir: "close", action_id: current() }); urls.delete(e.requestId); });
+    cdp.on("Network.webSocketCreated", guard("ws created", (e: any) => { urls.set(e.requestId, e.url); if (!silent && !scratch(page)) store.insert("ws_frames", { t: store.now(), url: e.url, dir: "open", action_id: current() }); }));
+    cdp.on("Network.webSocketFrameReceived", guard("ws frame", (e: any) => frame("in", e.requestId, e.response?.payloadData ?? "")));
+    cdp.on("Network.webSocketFrameSent", guard("ws frame", (e: any) => frame("out", e.requestId, e.response?.payloadData ?? "")));
+    cdp.on("Network.webSocketClosed", guard("ws closed", (e: any) => { if (!silent && !scratch(page)) store.insert("ws_frames", { t: store.now(), url: urlOf(e.requestId), dir: "close", action_id: current() }); urls.delete(e.requestId); }));
+    const resUrls = new Map<string, string>();
+    cdp.on("Network.responseReceived", (e: any) => { resUrls.set(e.requestId, e.response?.url ?? ""); });
+    cdp.on("Network.dataReceived", (e: any) => { const u = resUrls.get(e.requestId); if (u) { lastData.set(u, store.now()); last = store.now(); } });
+    cdp.on("Network.loadingFinished", (e: any) => { resUrls.delete(e.requestId); });
+    cdp.on("Network.loadingFailed", (e: any) => { resUrls.delete(e.requestId); });
     page.once("close", () => { cdpSessions.delete(cdp); cdp.detach().catch(() => {}); });
   };
   const onPage = (page: Page) => {
     const handlers = {
-      console: (m: any) => { if (!silent) store.insert("console", { t: store.now(), level: m.type(), text: cap(m.text(), 2000), url: m.location()?.url ?? null, action_id: current() }); },
-      pageerror: (e: Error) => { if (!silent) store.insert("console", { t: store.now(), level: "exception", text: cap(String(e?.message ?? e), 2000), action_id: current() }); },
-      dialog: (d: any) => {
-        if (!silent) store.insert("dialogs", { t: store.now(), type: d.type(), message: cap(d.message(), 2000), handled: dialogs, action_id: current() });
+      console: guard("console", (m: any) => { if (scratch(page)) return; const e = { level: m.type(), text: cap(m.text(), 2000) ?? "", t: store.now() }; if (!silent) store.insert("console", { t: e.t, level: e.level, text: e.text, url: m.location()?.url ?? null, action_id: current() }); emit("console", e); }),
+      pageerror: guard("pageerror", (err: Error) => { if (scratch(page)) return; const e = { level: "exception", text: cap(String(err?.message ?? err), 2000) ?? "", t: store.now() }; if (!silent) store.insert("console", { t: e.t, level: e.level, text: e.text, action_id: current() }); emit("console", e); }),
+      dialog: guard("dialog", (d: any) => {
+        const e = { type: d.type(), message: cap(d.message(), 2000) ?? "", t: store.now() };
+        if (!silent && !scratch(page)) store.insert("dialogs", { t: e.t, type: e.type, message: e.message, handled: dialogs, action_id: current() });
         (dialogs === "accept" ? d.accept() : d.dismiss()).catch(() => {});
-      },
-      framenavigated: (f: any) => { if (!silent && f === page.mainFrame()) store.insert("nav", { t: store.now(), kind: "navigated", url: f.url(), action_id: current() }); },
-      close: () => { if (!silent) store.insert("nav", { t: store.now(), kind: "closed", url: safeUrl(page), action_id: current() }); },
-      download: (d: any) => { if (!silent) store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }); },
+        emit("dialog", e);
+      }),
+      framenavigated: guard("framenavigated", (f: any) => { if (f !== page.mainFrame() || scratch(page)) return; const e = { url: f.url(), t: store.now() }; if (!silent) store.insert("nav", { t: e.t, kind: "navigated", url: e.url, action_id: current() }); emit("nav", e); }),
+      close: guard("close", () => { if (!silent && !scratch(page)) store.insert("nav", { t: store.now(), kind: "closed", url: safeUrl(page), action_id: current() }); }),
+      download: guard("download", (d: any) => { if (!silent && !scratch(page)) store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }); }),
     };
     for (const [ev, fn] of Object.entries(handlers)) page.on(ev as any, fn as any);
     track(watchSockets(page));
     pageCleanups.set(page, () => { for (const [ev, fn] of Object.entries(handlers)) page.off(ev as any, fn as any); });
   };
-  const onNewPage = (page: Page) => {
-    if (!silent) {
-      const seq = store.insert("nav", { t: store.now(), kind: "popup", url: safeUrl(page), action_id: current() });
-      // a popup's URL is usually still about:blank when the event fires; fill it in once it commits
-      track(page.waitForURL((u) => u.href !== "about:blank", { timeout: 3000, waitUntil: "commit" }).then(() => store.update("nav", { url: safeUrl(page) }, "seq=?", [seq])));
-    }
+  const onNewPage = guard("page", (page: Page) => {
     onPage(page);
-  };
+    // a popup's URL is usually still about:blank when the event fires; decide once it commits (a data: URL is a scratch page of ours)
+    track(page.waitForURL((u) => u.href !== "about:blank", { timeout: 3000, waitUntil: "commit" }).catch(() => {}).then(() => {
+      if (scratch(page)) return;
+      const e = { url: safeUrl(page) ?? "", page, t: store.now() };
+      if (!silent) store.insert("nav", { t: e.t, kind: "popup", url: e.url, action_id: current() });
+      emit("page", e);
+    }));
+  });
 
   context.on("request", onRequest); context.on("response", onResponse); context.on("requestfinished", onFinished); context.on("requestfailed", onFailed);
   const initial: Promise<unknown>[] = [];
@@ -135,9 +194,11 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       if (!pending.size) return;
       await Promise.race([Promise.allSettled([...pending]), new Promise((r) => setTimeout(r, maxMs))]);
     },
-    onFrame: (cb) => { frameCbs.add(cb); },
-    offFrame: (cb) => { frameCbs.delete(cb); },
+    on: (kind, cb) => { listeners[kind].add(cb as any); return () => { listeners[kind].delete(cb as any); }; },
     idOf: (req) => ids.get(req),
+    lastActivity: () => last,
+    flowing,
+    ignore: (page) => { ignored.add(page); },
     detach() {
       for (const c of cdpSessions) c.detach().catch(() => {});
       cdpSessions.clear();

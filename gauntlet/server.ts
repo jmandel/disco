@@ -209,6 +209,21 @@ class Holds {
 
 type WsData = { id: number };
 
+/** #29 the people table's data. */
+const PEOPLE = [
+  { name: "Ada Lovelace", role: "Analyst", dept: "Engines", since: "1843" },
+  { name: "Alan Turing", role: "Logician", dept: "Hut 8", since: "1939" },
+  { name: "Grace Hopper", role: "Rear Admiral", dept: "Compilers", since: "1952" },
+  { name: "Katherine Johnson", role: "Computer", dept: "Flight", since: "1953" },
+  { name: "Edsger Dijkstra", role: "Professor", dept: "Algorithms", since: "1962" },
+  { name: "Barbara Liskov", role: "Professor", dept: "Types", since: "1972" },
+];
+/** /big.html — 10,000 real rows in the DOM (not virtualised): the report-overhead ceiling target. */
+const BIG_HTML = `<!doctype html><meta charset="utf-8"><title>big</title><link rel="stylesheet" href="/style.css">
+<h1>10,000 rows</h1><button id="big-btn">Count</button> <span id="big-out">-</span>
+<table id="big"><tbody>${Array.from({ length: 10000 }, (_, i) => `<tr><td>${i + 1}</td><td>row ${i + 1}</td><td>${["alpha", "bravo", "charlie", "delta"][i % 4]}</td></tr>`).join("")}</tbody></table>
+<script>document.getElementById("big-btn").addEventListener("click", () => { document.getElementById("big-out").textContent = String(document.querySelectorAll("#big tr").length); });</script>`;
+
 export async function startGauntlet(opts: { port?: number; verbose?: boolean } = {}): Promise<Gauntlet> {
   const verbose = !!opts.verbose;
   const wantPort = opts.port ?? 4800;
@@ -320,6 +335,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       if (state.requireAuth && !authed) return redirect("/login.html?next=/");
       return staticFile("index.html");
     }
+    if (path === "/big.html") return text(BIG_HTML, "text/html; charset=utf-8");
     if (path === "/app.js") return text(appJs, "text/javascript; charset=utf-8");
     if (path === "/favicon.ico") return new Response(null, { status: 204, headers: NO_STORE }); // keep consoles clean
     if (path === "/secure.html") {
@@ -378,6 +394,10 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       const hits = needle ? MEDS.filter((n) => n.toLowerCase().includes(needle)) : MEDS;
       return json({ q: q.get("q") ?? "", hits });
     }
+    if (path === "/api/people") { await holds.sleep(Math.max(0, Number(q.get("hold") ?? 0) || 0)); return json({ people: PEOPLE }); }
+    const tab = path.match(/^\/api\/tab\/([ab])$/);
+    if (tab) return json({ tab: tab[1], items: tab[1] === "a" ? ["alpha", "apple", "anchor"] : ["bravo", "banana", "beacon"] });
+    if (path === "/api/slow-submit" && m === "POST") { await readJson(req); return json({ ok: true, at: Date.now() }); }
     if (path === "/api/rows") return text(ROWS_JSON, "application/json");
 
     if (path === "/api/iframe-submit" && m === "POST") {

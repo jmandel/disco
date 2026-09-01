@@ -160,6 +160,34 @@
 <section id="s-28"><h2>28. Fake stream (ordinary data mislabeled as an event-stream)</h2>
   <button id="load-fake-stream">Load fake stream</button> <span id="fake-stream-out">-</span>
 </section>
+<section id="s-29"><h2>29. Skeleton table (structure first, data later)</h2>
+  <button id="load-people">Load people</button>
+  <h3 id="people-title">--</h3>
+  <table id="people"><thead><tr><th>Name</th><th>Role</th><th>Dept</th><th>Since</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section id="s-30"><h2>30. Cached revisit (a second visit issues no request)</h2>
+  <div role="tablist"><button role="tab" id="tab-a" aria-selected="false">Tab A</button> <button role="tab" id="tab-b" aria-selected="false">Tab B</button></div>
+  <div id="tab-panel" role="tabpanel">(no tab open)</div>
+</section>
+
+<section id="s-31"><h2>31. Stacked panels (the one you leave is the signal)</h2>
+  <button id="open-panel">Open panel</button>
+  <div id="panel-host"></div>
+</section>
+
+<section id="s-32"><h2>32. Styled radios (the real input hides under a span)</h2>
+  <fieldset id="severity">
+    <label class="styled"><input type="radio" name="sev" id="sev-mild" value="Mild"><span class="fake-radio"></span> Mild</label>
+    <label class="styled"><input type="radio" name="sev" id="sev-moderate" value="Moderate"><span class="fake-radio"></span> Moderate</label>
+    <label class="styled"><input type="radio" name="sev" id="sev-severe" value="Severe"><span class="fake-radio"></span> Severe</label>
+  </fieldset>
+  severity: <span id="sev-value">-</span>
+</section>
+
+<section id="s-33"><h2>33. Blocking submit (the handler holds the main thread)</h2>
+  <button id="slow-submit">Submit (blocks 3.5 s)</button> <span id="slow-result">-</span>
+</section>
 </main>
 
 <script type="module" src="/app.js"></script>

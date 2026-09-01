@@ -382,3 +382,43 @@ Pages: `/` (`index.html`), `/app.js`, `/style.css`, `/iframe.html`, `/child.html
 `/away.html`, `/login.html`, `/secure.html` (cookie-gated), and `<xOrigin>/xframe.html`.
 Anything else: 404. `--verbose` logs one line per request (`METHOD path -> status ms`)
 plus WS open/close.
+
+### 29. Skeleton table (`#s-29`)
+
+`#load-people` immediately paints a **complete-looking** table: `#people` with 4 headers and 6 rows × 4 empty
+`td.skel` cells, and `h3#people-title` showing `--`. `GET /api/people?hold=800` answers 800 ms later; then the
+cells fill (names, roles…) and the title becomes `People (6)`. Structural predicates (`table`, `tr`, `td`) are
+satisfied by the skeleton; a real value (`#people-title:has-text("People (")`, a cell text) is the only honest
+anchor. Fields: `{people:[{name,role,dept,since}]}`.
+
+### 30. Cached revisit (`#s-30`)
+
+`button[role=tab]#tab-a` / `#tab-b` flip `aria-selected` synchronously. The **first** visit to a tab fetches
+`GET /api/tab/a` (or `/b`) → `{tab, items[3]}` and renders `#tab-panel` (`h3` "Tab A", `ul#tab-items`). Every
+later visit renders from an in-memory cache with **no request**: a wait on the request expires. The tab's
+own `aria-selected="true"` and the panel heading are the postconditions that hold both ways.
+
+### 31. Stacked panels (`#s-31`)
+
+`#open-panel` mounts `div#panel-1.panel` (fixed, right) with `#panel-next` and `#panel-close`. `#panel-next`
+mounts `div#panel-2.panel` **on top**; panel 1 stays in the DOM (visible, partly covered). `#panel-back`
+removes panel 2 only. After Back, a wait on `#panel-next` is already true — it never left; the element to
+wait for is panel 2 being gone.
+
+### 32. Styled radios (`#s-32`)
+
+Three `label.styled` each wrap an `input[type=radio][name=sev]` (`#sev-mild` / `#sev-moderate` / `#sev-severe`,
+`opacity:0`, 16×16, absolutely positioned) under a `span.fake-radio`. The pointer at the input's centre hits the
+span, so a real click on the input is intercepted; clicking the **label** (or `check({ force: true })`)
+works. `change` sets `#sev-value` to the value. No wire.
+
+### 33. Blocking submit (`#s-33`)
+
+`#slow-submit`'s click handler busy-waits **3.5 s on the main thread**, then sets `#slow-result` to
+`Submitted` and `POST /api/slow-submit` (200 `{ok, at}`). A click with a 3 s budget times out **after the
+click landed**; the result still arrives.
+
+### /big.html
+
+A separate document with 10,000 real `<tr>` rows (not virtualised), `#big-btn` and `#big-out`. Exists for the
+report-overhead ceiling: the aria snapshot and diff must stay bounded on a large DOM.
