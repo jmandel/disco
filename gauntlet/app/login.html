@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>gauntlet login</title></head>
+<body style="font-family: system-ui, sans-serif">
+<h1>Log in</h1>
+<form id="login-form" onsubmit="return false">
+  <label>User <input id="user" autocomplete="off"></label><br>
+  <label>Pass <input id="pass" type="password" autocomplete="off"></label><br>
+  <button id="login">Log in</button>
+  <span id="login-error"></span>
+</form>
+<script>
+  document.getElementById("login").addEventListener("click", async () => {
+    const user = document.getElementById("user").value, pass = document.getElementById("pass").value;
+    const r = await fetch("/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user, pass }),
+    });
+    if (!r.ok) { document.getElementById("login-error").textContent = "login failed"; return; }
+    const next = new URLSearchParams(location.search).get("next") || "/secure.html";
+    location.href = next.startsWith("/") ? next : "/secure.html";
+  });
+</script>
+</body></html>

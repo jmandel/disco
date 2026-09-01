@@ -1,0 +1,66 @@
+/* gauntlet — ugly on purpose, but every hostile widget needs a few rules */
+body { font-family: system-ui, sans-serif; margin: 0; padding: 12px 16px 80px; }
+header { border-bottom: 2px solid #333; margin-bottom: 8px; }
+h1 { margin: 0 0 4px; font-size: 20px; }
+h2 { font-size: 15px; margin: 0 0 6px; }
+section { border: 1px solid #ccc; padding: 8px; margin: 8px 0; }
+button { margin: 2px; }
+.mono { font-family: monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+
+/* #4 perpetual spinner */
+#spinner { width: 32px; height: 32px; border: 4px solid #ddd; border-top-color: #c00; border-radius: 50%;
+           animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* #2 / #12 modal overlays */
+.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: flex;
+           align-items: center; justify-content: center; z-index: 1000; }
+.modal-box { background: #fff; padding: 16px 24px; border: 2px solid #333; min-width: 280px; }
+
+/* #3 toast */
+.toast { position: fixed; right: 16px; bottom: 16px; padding: 10px 16px; background: #222; color: #fff;
+         border-radius: 4px; z-index: 1100; }
+.toast[data-kind="fail"] { background: #a00; }
+
+/* #8 virtualized list */
+#rows { height: 400px; overflow-y: auto; position: relative; border: 1px solid #999; }
+#rows-inner { position: relative; }
+.row { position: absolute; left: 0; right: 0; height: 24px; line-height: 24px; padding-left: 6px;
+       border-bottom: 1px solid #eee; box-sizing: border-box; font-family: monospace; font-size: 12px; }
+
+/* #9 re-render host hugs its button so a click "within the host" is a click on the button */
+#rerender-host { display: inline-block; }
+
+/* #10 iframes */
+iframe { width: 45%; height: 160px; border: 1px solid #999; vertical-align: top; }
+
+/* #16 canvas */
+#grid { border: 1px solid #333; display: block; }
+
+/* #17 combobox: options ignore the mouse */
+#med-list { pointer-events: none; list-style: none; margin: 0; padding: 0; border: 1px solid #999;
+            width: 260px; max-height: 160px; overflow-y: auto; background: #fff; }
+#med-list li { padding: 2px 6px; }
+#med-list li[aria-selected="true"] { background: #cde; }
+
+/* #7 search results */
+#search-results { max-height: 160px; overflow-y: auto; }
+
+/* #24 context menu */
+#ctx-target { display: inline-block; padding: 8px 14px; border: 1px dashed #666; user-select: none; }
+#ctx-menu { position: fixed; z-index: 1200; margin: 0; padding: 4px 0; list-style: none; background: #fff;
+            border: 1px solid #333; min-width: 130px; }
+#ctx-menu li { padding: 3px 14px; }
+#ctx-menu li:hover { background: #cde; }
+
+/* #25 double-click */
+#dbl-target { display: inline-block; padding: 6px 12px; border: 1px solid #999; min-width: 140px; user-select: none; }
+
+/* #26 drag widgets */
+#slider-track { position: relative; width: 300px; height: 20px; background: #ddd; border: 1px solid #999; }
+#slider-thumb { position: absolute; top: 0; left: 0; width: 20px; height: 20px; background: #369; cursor: grab; }
+#sort-list { list-style: none; margin: 8px 0; padding: 0; width: 140px; }
+#sort-list li { border: 1px solid #999; background: #f8f8f8; margin: 2px 0; padding: 3px 10px; cursor: grab; user-select: none; }
+#sort-list li.dragging { opacity: .5; }
+/* disabled controls usually get pointer-events:none, so elementFromPoint returns the ANCESTOR (§13, disabled-control diagnosis) */
+button:disabled { pointer-events: none; opacity: .5; }

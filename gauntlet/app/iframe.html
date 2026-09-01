@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>same-origin iframe</title></head>
+<body style="font-family: system-ui, sans-serif; font-size: 13px">
+<strong>Same-origin iframe</strong><br>
+<input id="if-name" placeholder="Name" autocomplete="off">
+<button id="if-submit">Submit</button>
+<p id="if-result"></p>
+<iframe id="nested2" src="/iframe2.html" style="width:95%;height:160px"></iframe>
+<script>
+  document.getElementById("if-submit").addEventListener("click", async () => {
+    const name = document.getElementById("if-name").value;
+    const r = await fetch("/api/iframe-submit", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    const j = await r.json();
+    document.getElementById("if-result").textContent = "Submitted: " + j.name;
+  });
+</script>
+</body></html>

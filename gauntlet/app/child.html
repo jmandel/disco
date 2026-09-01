@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>gauntlet child window</title></head>
+<body style="font-family: system-ui, sans-serif">
+<h1>Child window</h1>
+<button id="child-fetch">Fetch in child</button>
+<p id="child-result"></p>
+<script>
+  document.getElementById("child-fetch").addEventListener("click", async () => {
+    const j = await (await fetch("/api/child-ping")).json();
+    document.getElementById("child-result").textContent = j.pong ? "pong" : "??";
+  });
+</script>
+</body></html>
