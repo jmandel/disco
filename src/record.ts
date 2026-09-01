@@ -11,6 +11,10 @@ export interface Recorder {
   /** Wait (bounded) for in-flight async writes — response headers and bodies — so a report sees them. */
   flush(maxMs: number): Promise<void>;
   detach(): void;
+  /** Live WebSockets seen since recording began (for the `ws` predicate). */
+  sockets(): WebSocket[];
+  onSocket(cb: (ws: WebSocket) => void): void;
+  offSocket(cb: (ws: WebSocket) => void): void;
 }
 
 export function attachRecorder(context: BrowserContext, store: Store, current: () => string | null, dialogs: DialogPolicy): Recorder {
@@ -64,6 +68,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   };
 
   const pageCleanups = new Map<Page, () => void>();
+  const live = new Set<WebSocket>(); const socketCbs = new Set<(ws: WebSocket) => void>();
   const onPage = (page: Page) => {
     const handlers = {
       console: (m: any) => store.insert("console", { t: store.now(), level: m.type(), text: cap(m.text(), 2000), url: m.location()?.url ?? null, action_id: current() }),
@@ -77,10 +82,11 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       download: (d: any) => store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }),
       websocket: (ws: WebSocket) => {
         const url = ws.url();
+        live.add(ws); for (const cb of socketCbs) cb(ws);
         store.insert("ws_frames", { t: store.now(), url, dir: "open", action_id: current() });
         ws.on("framesent", (f) => store.insert("ws_frames", { t: store.now(), url, dir: "out", payload: cap(String(f.payload), WS_PAYLOAD_CAP), action_id: current() }));
         ws.on("framereceived", (f) => store.insert("ws_frames", { t: store.now(), url, dir: "in", payload: cap(String(f.payload), WS_PAYLOAD_CAP), action_id: current() }));
-        ws.on("close", () => store.insert("ws_frames", { t: store.now(), url, dir: "close", action_id: current() }));
+        ws.on("close", () => { live.delete(ws); store.insert("ws_frames", { t: store.now(), url, dir: "close", action_id: current() }); });
       },
     };
     for (const [ev, fn] of Object.entries(handlers)) page.on(ev as any, fn as any);
@@ -102,6 +108,9 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       if (!pending.size) return;
       await Promise.race([Promise.allSettled([...pending]), new Promise((r) => setTimeout(r, maxMs))]);
     },
+    sockets: () => [...live],
+    onSocket: (cb) => { socketCbs.add(cb); },
+    offSocket: (cb) => { socketCbs.delete(cb); },
     detach() {
       context.off("request", onRequest); context.off("response", onResponse); context.off("requestfinished", onFinished); context.off("requestfailed", onFailed);
       context.off("page", onNewPage);

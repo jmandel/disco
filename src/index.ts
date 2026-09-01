@@ -1,4 +1,4 @@
-export { open, Session, reached, describe, diffAria, DEFAULT_TIMEOUTS } from "./session.ts";
+export { open, Session, reached, describe, diffAria, urlMatches, DEFAULT_TIMEOUTS } from "./session.ts";
 export type { ActSpec, Pred, Report, Diagnosis, UntilResult, WireLine, OpenOptions, Timeouts, Kind } from "./session.ts";
 export { openApp, openStore, appDir, appStoreDir, appsRoot, Store, SCHEMA } from "./store.ts";
 export type { StoreReader, RequestRow } from "./store.ts";

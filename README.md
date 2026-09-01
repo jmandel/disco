@@ -28,6 +28,7 @@ waiting for, or you get the next 700 ms.
 | The state never arrives | `until.ok: false` after *your* budget (default 5 s), with a diagnosis and a screenshot | your budget |
 | Your predicate was already true before you acted | `until.alreadyTrue: true` — flagged, so you notice | 0 |
 | The page never read a response body | the row says `missing — body not read by the page`; the status is still there | 1.5 s after the headers |
+| The state never arrives and you asked for a request | the diagnosis says whether a matching request was issued at all, and with what status | your budget |
 | The app did something you did not ask about | it is in the log with a timestamp; the report shows the parts inside the window | — |
 
 No wait is longer than the number you wrote. Nothing in disco sleeps for you. Nothing in disco guesses
@@ -134,7 +135,10 @@ const s = await open("shop", {
 ```
 
 `open` reuses the browser recorded in `apps/<app>/store/browser.json` when it is alive, so a second
-script (or the CLI) joins the same browser and the same run. A new browser starts a new run.
+script (or the CLI) joins the same browser **and the same run** (`s.run`) — a run is one browser's life, not
+one script's. With `url`, a joining script navigates only if the page is somewhere else; a page already at
+that URL is left exactly as the last script left it (dialogs included). Omit `url` to join wherever it is.
+A new browser starts a new run.
 
 **Session fields.** `s.page` — the Playwright `Page`; use it directly whenever the wrapper is in your
 way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s.store` — the log reader
@@ -151,7 +155,7 @@ way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s
 | `s.press(key, { target?, ...o })` | `Enter`, `ArrowDown`, `Control+a` … on the target or the focused element |
 | `s.select(target, value, o)` | `<select>` by value/label |
 | `s.hover(target, o)` | |
-| `s.drag(target, to, o)` | mouse down on the target, move to `to`, release (Playwright `dragTo`). For sliders and reorderable lists; use `s.page.mouse` for custom paths |
+| `s.drag(target, to, o)` | mouse down on the target, move to `to`, release. `to` is an element (Playwright `dragTo`: one straight move, which reorders a list by one slot) or an offset `{ dx, dy }` from the target's centre (sliders). `s.page.mouse` for custom paths |
 | `s.scroll(target \| deltaY, o)` | scroll an element into view, or wheel the page |
 | `s.navigate(url, o)` | `goto`, waits for commit only |
 | `s.until(pred, { timeout })` | wait without acting (`kind: "noop"`) |
@@ -169,6 +173,7 @@ way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s
 | `window` | observation window when there is no `until` (default 700) |
 | `frame` | resolve the target inside an iframe: `"#frame"`, nested with `"#outer >> #inner"` |
 | `shot` | take a screenshot at the end (hash in `report.shot`) |
+| `position: { x, y }` | click/dblclick at an offset from the element's top-left — canvas cells, image maps. The report cannot see pixels; assert with `until: { fn }` or `shot: true` |
 | `js: true` | click: dispatch a DOM `click` event instead of moving the mouse. For widgets the app replaces faster than a real click can land, for fixed-position items outside the viewport, for anything whose handler is delegated to a parent. No actionability checks, no scrolling, no hover |
 | `button`, `deltaY`, `to`, `text`, `key`, `value`, `url` | per kind |
 
@@ -239,10 +244,14 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 | `{ request, landed? }` | a response arrives whose URL contains / matches — i.e. the status is known. `landed`: its body finished too, so `latestJson` is safe; waits at most 1 s past the headers | the fact you need travels on the wire; API-first apps; anything a spinner lies about |
 | `{ fn, arg? }` | `page.waitForFunction` returns truthy | everything else: `"document.querySelector('#x')?.dataset.state === 'ready'"` |
 | `{ any: [...] }` | the first arm that holds; `until.which` names it (`label` or its description) | success **or** the app's own failure: `any: [ok, errorBanner]` |
+| `{ page }` | a new page (popup, `window.open`) opens whose URL contains / matches | child windows, print views, documents |
+| `{ ws, dir? }` | a WebSocket frame is received (`dir: "out"`: sent) whose payload contains / matches | push channels — the notification itself, not its rendering |
 | `{ all: [...] }` | every arm holds | the screen *and* the request |
 
 Give arms a `label` and `until.which` reads well. The budget is `timeout` (default 5 s) for the whole
-predicate. A predicate that is already true when you act is flagged `alreadyTrue` — choose one that is
+predicate. The predicate is armed the instant you call `act`/`until`, before anything else happens — so to
+wait for something *you* trigger from outside the page, arm first and trigger second:
+`const p = s.until({ ws: "notify" }); await triggerIt(); reached(await p)`. A predicate that is already true when you act is flagged `alreadyTrue` — choose one that is
 false beforehand (the *new* record's heading, not "a heading"; `request` predicates only see responses
 that arrive after arming, so they are never already true).
 
@@ -255,7 +264,9 @@ status, or on the element the outcome renders (`any` of the success and failure 
 
 ### `reached(report, what?) → report`
 
-Throws unless `report.ok` and (`report.until` absent or `until.ok`). The message carries the diagnosis:
+Throws unless `report.ok` and (`report.until` absent or `until.ok`), **and** throws when the `until` was
+`alreadyTrue` — a predicate that held before the action is not a postcondition, whatever `which` says.
+`act` and `until` themselves never throw; they return reports. The message carries the diagnosis:
 `act:7: occluded — #record-3 is covered by div#record-modal.overlay (open: div#record-modal "Allergy Review Required") [shot afc670dce369]`.
 Wrap every step of a workflow in it and failures explain themselves.
 
@@ -268,6 +279,7 @@ Wrap every step of a workflow in it and failures explain themselves.
 | `s.note(text)` | append a timestamped line to `apps/<app>/NOTES.md` (and the `notes` table) |
 | `s.frame("#a >> #b")` | a `FrameLocator` for nested iframes |
 | `s.closeOtherPages()` | close every page but the driven one (popups left by earlier scripts) |
+| `s.uiIgnore` | strings/RegExps; aria-diff lines containing them are dropped from every report (live counters, clocks). Also `open(app, { uiIgnore })` |
 | `s.close({ browser? })` | disconnect; `browser: true` also kills a browser disco launched (an attached one is only forgotten) |
 | `formatReport(report)` | the report as the CLI prints it |
 
@@ -279,7 +291,7 @@ Wrap every step of a workflow in it and failures explain themselves.
 import { openApp } from "./src/index.ts";
 const st = openApp("shop");                       // read-only; same object as s.store
 st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[] — fields are the requests columns: id, t_start, method, url, path, status, mime, body_hash, body_size, body_state, req_body, resp_headers, action_id…
-st.latestJson("/api/me");                          // parsed body of the newest matching response
+st.latestJson("/api/me", "act:9");                 // parsed body of the newest matching response — scope it to the act whose report showed it
 st.json(hash) · st.body(hash) · st.bytes(hash)     // a body by hash or 16-char prefix
 st.action("act:9")                                 // the stored row, report parsed
 st.sql("SELECT …")                                 // anything
@@ -302,9 +314,17 @@ SELECT method, path, count(*) n, min(status), max(status) FROM requests WHERE re
 SELECT path, json_extract(resp_headers,'$."set-cookie"') FROM requests WHERE resp_headers LIKE '%set-cookie%';
 ```
 
-`body_state: missing` means Chromium no longer had the body when asked (large bodies the page never read,
-some redirects); `streaming` is an event-stream that never ends — its messages are not captured.
-WebSocket payloads are (`ws_frames`, capped at 16 KB each).
+`body_state: missing` means there is no body to fetch — the page never read it (the sweep runs 1.5 s after
+the headers, and again when a session closes or opens, so nothing rests at `pending` with a status);
+`streaming` is an event-stream that never ends — its messages are not captured. WebSocket payloads are
+(`ws_frames`, capped at 16 KB each).
+
+**"Newest" is per run.** `t` restarts at every run, so `ORDER BY t DESC` across runs is wrong; order by `seq`
+(or `run, t_start`), and scope wire reads to the act that produced them (`action: report.action`) — that is
+what makes a `check.ts` pass on a cold browser as well as a warm one.
+
+**Calling the app's API yourself.** `s.evaluate("fetch('/ctl', { method: 'POST', body: … })")` runs with the
+page's cookies *and* lands in the log like any other request; `s.page.request.post(...)` does neither.
 
 **What is recorded when.** A script records for as long as its `Session` is open. The CLI records only
 while a command runs — between commands, nothing is written. `./disco record` keeps recording until
@@ -381,9 +401,10 @@ virtualised table, the record behind a form, the outcome behind an optimistic "S
 "what's new", session warnings). Make them optional both ways: `until: { any: [{ selector: nextScreen,
 label: "next" }, { selector: "[role=dialog]", label: "dialog" }] }`, then handle `which === "dialog"`.
 
-**Keyboard-only widgets.** Comboboxes that ignore the mouse: `type` (keystrokes, not `fill`) with `until:
-{ request: "/api/suggest", landed: true }`, then `press("ArrowDown", { target })`, `press("Enter", { target,
-until: { selector: theSelectedState } })`. Record the recipe verbatim in the README.
+**Keyboard-only widgets.** Comboboxes that ignore the mouse (`unclickable`): `type` (keystrokes, not `fill`)
+with `until: { request: <the suggestions endpoint you saw in the bare report>, landed: true }`, then
+`press("ArrowDown", { target })`, `press("Enter", { target, until: { selector: theSelectedState } })`. Record
+the recipe verbatim in the README.
 
 **Auth and expiry.** Log in with an `until: { url }` (or `any` of the landing anchor and the error
 banner). Note the cookie name from `resp_headers`. Expiry usually arrives as a dialog or a redirect to
@@ -461,11 +482,11 @@ one slow, a conditional modal, optimistic UI with an async failure toast, perpet
 and long-poll traffic, WebSocket/SSE/long-poll push, a debounced search, virtualised rows, a re-render
 race, same- and cross-origin iframes, native dialogs, session timeout, a child window, canvas, a
 keyboard-only combobox, shadow DOM, GraphQL over POST, auth with a login page, and a disabled control
-that hit-tests to its parent. `bun gauntlet` serves it on :4800; `gauntlet/scenarios.md` documents every
-behaviour and the `/ctl` knobs that drive them.
+whose `pointer-events: none` makes hit tests land on its parent. `bun gauntlet` serves it on :4800.
 
-It is disco's test target (`npm test`) and the exam for agents: characterise it from the README alone,
-build `apps/gauntlet/`, and write down where the tool or the docs got in the way.
+It is disco's test target (`npm test`) and the exam for agents: characterise it from this README alone —
+`gauntlet/scenarios.md` is the answer key, so leave it closed — build `apps/gauntlet/`, and write down where
+the tool or the docs got in the way. `apps/gauntlet/` in this repo is the pack the last such agent left.
 
 ---
 

@@ -67,7 +67,8 @@ describe("act + report", () => {
     const r = await s.click("#load-chart", { until: { selector: "#chart-status:has-text('idle')" } });
     assert.equal(r.until?.ok, true);
     assert.equal(r.until?.alreadyTrue, true);
-    reached(await s.until({ request: "/api/slow", landed: true }, { timeout: 3000 }).catch(() => ({ ok: true } as any)));
+    assert.throws(() => reached(r), /already true/);
+    await s.until({ request: "/api/slow", landed: true }, { timeout: 3000 });
   });
   it("until that never comes: budget honoured, diagnosis with screenshot", async () => {
     const r = await s.until({ selector: "#never" }, { timeout: 600 });
@@ -204,6 +205,57 @@ describe("round-1 friction", () => {
   it("drag: the slider thumb moves and the drag report is posted", async () => {
     const r = reached(await s.drag("#slider-thumb", "#slider-track", { until: { request: "/api/drag-report" } }));
     assert.ok(r.requests.some((w) => w.path.includes("/api/drag-report") && w.method === "POST"));
+  });
+});
+
+describe("round-3 friction", () => {
+  it("until { page }: a popup opening is a postcondition", async () => {
+    const r = reached(await s.click("#open-child", { until: { page: "/child.html" } }));
+    assert.equal(r.until?.ok, true);
+    assert.equal(await s.closeOtherPages(), 1);
+  });
+  it("until { ws }: a pushed WebSocket frame is a postcondition; the diagnosis counts frames", async () => {
+    const p = s.until({ ws: "push" }, { timeout: 3000 });
+    await g.ctl.set({ wsPush: true });
+    const r = reached(await p);
+    assert.equal(r.until?.ok, true);
+    const miss = await s.until({ ws: "never-in-any-payload" }, { timeout: 300 });
+    assert.match(miss.until!.diagnosis!.message, /WebSocket frame/);
+  });
+  it("until { request } that never fires says whether the request was issued at all", async () => {
+    const r = await s.until({ request: "/api/does-not-exist" }, { timeout: 300 });
+    assert.match(r.until!.diagnosis!.message, /no request matching .* was issued/);
+  });
+  it("drag by offset: the slider moves", async () => {
+    const before = Number(await s.evaluate("document.getElementById('slider-value').textContent"));
+    const r = reached(await s.drag("#slider-thumb", { dx: 120, dy: 0 }, { until: { request: "/api/drag-report" } }));
+    const after = Number(await s.evaluate("document.getElementById('slider-value').textContent"));
+    assert.ok(after > before, `slider ${before} → ${after}`);
+    assert.ok(r.requests.some((w) => w.path.includes("/api/drag-report")));
+  });
+  it("click with position: a canvas cell", async () => {
+    reached(await s.click("#grid", { position: { x: 30, y: 30 }, until: { fn: "window.__gridSelected != null" } }));
+  });
+  it("uiIgnore drops noisy lines from the diff", async () => {
+    s.uiIgnore.push("ws: open");
+    const r = reached(await s.click("#record-4", { until: { request: "/api/record/4", landed: true } }));
+    assert.ok(!r.ui.added.some((l) => l.includes("ws: open")) && !r.ui.removed.some((l) => l.includes("ws: open")), JSON.stringify(r.ui));
+    s.uiIgnore.pop();
+  });
+  it("a second session joining the browser with the same url does not reload it; close sweeps unread bodies to missing", async () => {
+    await g.ctl.set({ modal: true, modalDelayMs: 0 });
+    try {
+      reached(await s.click("#save", { window: 0 }));
+      reached(await s.click("#record-5", { until: { selector: "#record-modal", visible: true } }));
+      const s2 = await open("t", { url: g.origin, appsDir });
+      assert.equal(await s2.page.locator("#record-modal").count(), 1, "open({url}) reloaded a page that was already there");
+      await s2.close();
+      const st = openApp("t", appsDir);
+      const pendingWithStatus = st.sql("SELECT count(*) n FROM requests WHERE run=? AND body_state='pending' AND status IS NOT NULL", s.run)[0].n;
+      assert.equal(pendingWithStatus, 0);
+      st.close();
+      reached(await s.click("#modal-ack", { until: { gone: "#record-modal" } }));
+    } finally { await g.ctl.reset(); }
   });
 });
 

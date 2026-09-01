@@ -10,16 +10,16 @@ export function formatReport(r: Report): string {
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
   if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.which ?? ""} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action — proves nothing; pick a predicate that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}${r.until.diagnosis ? "\n    " + fmtDiag(r.until.diagnosis) : ""}`);
   if (r.requests.length) {
-    const lines = r.requests.map((w) => `${w.method} ${w.path.length > 70 ? w.path.slice(0, 67) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state === "missing" ? "body missing" : w.state}]` : ""}`);
+    const lines = r.requests.map((w) => `${w.method} ${w.path.length > 70 ? w.path.slice(0, 67) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state === "missing" ? "body missing" : w.state === "pending" && w.status != null ? "body pending" : w.state}]` : ""}`);
     L.push("  wire (" + r.requests.length + "):"); for (const l of lines.slice(0, 25)) L.push("    " + l);
     if (lines.length > 25) L.push(`    … ${lines.length - 25} more (sql: SELECT * FROM requests WHERE action_id='${r.action}')`);
   }
   if (r.ui.added.length || r.ui.removed.length) {
     L.push("  ui:");
-    for (const l of r.ui.added.slice(0, 20)) L.push("    + " + l.slice(0, 120));
+    for (const l of r.ui.added.slice(0, 25)) L.push("    + " + l.slice(0, 120));
     for (const l of r.ui.removed.slice(0, 10)) L.push("    - " + l.slice(0, 120));
-    const hidden = Math.max(0, r.ui.added.length - 20) + Math.max(0, r.ui.removed.length - 10) + (r.ui.more ?? 0);
-    if (hidden) L.push(`    … ${hidden} more lines (--json for all)`);
+    const hidden = Math.max(0, r.ui.added.length - 25) + Math.max(0, r.ui.removed.length - 10) + (r.ui.more ?? 0);
+    if (hidden) L.push(`    … ${hidden} more (${r.ui.added.length + (r.ui.more ?? 0)} added, ${r.ui.removed.length} removed; report.ui has them all)`);
   }
   for (const c of r.console.slice(0, 5)) L.push(`  console ${c.level}: ${c.text.slice(0, 160)}`);
   for (const d of r.dialogs) L.push(`  dialog ${d.type} "${(d.message ?? "").slice(0, 100)}" → ${d.handled}`);
