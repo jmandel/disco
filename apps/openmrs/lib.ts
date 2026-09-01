@@ -20,7 +20,6 @@ export const FHIR = "/openmrs/ws/fhir2/R4";
 
 /** dev3 is a shared demo box. Chart routes routinely take 3-8 s; 20 s is the budget
  *  that made every step below deterministic over ~40 runs. Probes stay at 1500. */
-export const SLOW = 20000;
 export const PROBE = 1500;
 
 export const chartUrl = (patientUuid: string, tab = "patient-summary") =>
@@ -71,14 +70,14 @@ export async function where(s: Session): Promise<"login" | "home" | "chart" | "u
  */
 export async function login(s: Session, user = "admin", pass = "Admin123") {
   s.uiIgnore = uiIgnore;
-  reached(await s.navigate(LOGIN, { until: { selector: anchors.login.el }, timeout: SLOW }), "reach login");
+  reached(await s.navigate(LOGIN, { until: { selector: anchors.login.el } }), "reach login");
   reached(await s.fill(anchors.login.el, user), "username");
   reached(await s.click('role=button[name="Continue"]', { until: { selector: anchors.password.el, visible: true } }), "continue");
   reached(await s.fill(anchors.password.el, pass), "password");
   const r = await s.click('role=button[name="Log in"]', { until: { any: [
     { selector: anchors.home.el, label: "home" },
     { text: "Incorrect username or password", label: "error" },
-  ] }, timeout: SLOW });
+  ] }, timeout: 15000 /* login → shell: 3.7–7.5 s measured on dev3 */ });
   if (r.until?.which === "error") throw new Error("login: server rejected the credentials");
   reached(r, "log in");
   return { act: r.action, session: await sessionInfo(s) };
@@ -105,18 +104,18 @@ export async function sessionInfo(s: Session) {
 /** Documented, deliberately NOT used by check.ts: it destroys the shared session. */
 export async function logout(s: Session) {
   reached(await s.click('role=button[name="My Account"]', { until: { selector: 'role=button[name="Logout"]' } }), "open account menu");
-  return reached(await s.click('role=button[name="Logout"]', { until: { selector: anchors.login.el }, timeout: SLOW }), "logout");
+  return reached(await s.click('role=button[name="Logout"]', { until: { selector: anchors.login.el } }), "logout");
 }
 
 // ---------------------------------------------------------------- home shell
 
-/** Reach the home shell from anywhere. Login page is an arm so a refusal costs ms, not SLOW. */
+/** Reach the home shell from anywhere. Login page is an arm so a refusal costs ms, not the budget. */
 export async function goHome(s: Session) {
   s.uiIgnore = uiIgnore;
   const r = reached(await s.navigate(HOME, { until: { any: [
     { selector: anchors.home.el,  label: "home" },
     { selector: anchors.login.el, label: "login" },
-  ] }, timeout: SLOW }), "go home");
+  ] } }), "go home");
   if (r.until?.which === "login") throw new Error("goHome: bounced to the login page — call login() first");
   return { act: r.action };
 }
@@ -141,7 +140,7 @@ export async function openHomeApp(s: Session, name: keyof typeof HOME_APPS) {
   const r = reached(await s.click(`nav a[href$="${spec.path}"]`, { until: { any: [
     { request: spec.req, landed: true, label: "wire" },
     { url: spec.path, label: "route" },
-  ] }, timeout: SLOW }), `open ${name}`);
+  ] } }), `open ${name}`);
   return { act: r.action as string | undefined, which: r.until?.which };
 }
 
@@ -179,7 +178,7 @@ export async function patientLists(s: Session) {
 export async function openPatientList(s: Session, listUuid: string) {
   const r = reached(await s.navigate(`${HOME}/patient-lists/${listUuid}`, { until: {
     request: `${REST}/cohortm/cohortmember?cohort=${listUuid}`, landed: true,
-  }, timeout: SLOW }), "open patient list");
+  } }), "open patient list");
   const body = wire(s, `${REST}/cohortm/cohortmember?cohort=${listUuid}`, r.action);
   const members = (body?.results ?? []).map((m: Any) => ({
     patientUuid: m.patient?.uuid,
@@ -203,7 +202,7 @@ export async function searchPatients(s: Session, q: string) {
   }
   reached(await s.fill(anchors.search.el, ""), "clear search");
   const r = reached(await s.type(anchors.search.el, q, {
-    until: { request: `${REST}/patient?q=`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/patient?q=`, landed: true },
   }), `search "${q}"`);
   const body = wire(s, `${REST}/patient?q=`, r.action);
   const results = (body?.results ?? []).map((p: Any) => ({
@@ -245,7 +244,7 @@ export async function openChart(s: Session, patientUuid: string) {
   const r = reached(await s.navigate(chartUrl(patientUuid), { until: { any: [
     { request: `${FHIR}/Patient/${patientUuid}`, landed: true, label: "wire" },
     { selector: anchors.chart.el, label: "banner" },
-  ] }, timeout: SLOW }), "open chart");
+  ] }, timeout: 12000 /* cold chart open: 2.6–3.3 s measured */ }), "open chart");
   const p: Any = wire(s, `${FHIR}/Patient/${patientUuid}`, r.action);
   const name = p?.name?.[0];
   return {
@@ -272,7 +271,7 @@ export async function openChart(s: Session, patientUuid: string) {
  * wins the race and you read a stale body.
  *
  * O3 caches with SWR: a second visit to a tab can render with nothing on the wire. Then the
- * request predicate expires (cost: SLOW) and we fall back to the newest body in the log,
+ * request predicate expires (cost: the budget) and we fall back to the newest body in the log,
  * which is that same cached response. `which` says which happened.
  */
 export async function openChartTab(s: Session, patientUuid: string, tab: ChartTab) {
@@ -280,9 +279,9 @@ export async function openChartTab(s: Session, patientUuid: string, tab: ChartTa
   const spec = CHART_TABS[tab];
   if (s.page.url().includes(`/chart/${tab}`)) return { act: undefined as string | undefined, which: "already-there", body: wire(s, spec.req) };
   // If this run already has a 200 for that family the tab will very likely render from cache;
-  // spend 4 s on the request arm instead of SLOW, then fall back. (Cold: the full budget.)
+  // spend 4 s on the request arm instead of the full budget, then fall back. (Cold: the full budget.)
   const seen = s.store.requests({ url: spec.req, status: 200, run: s.run }).length > 0;
-  const r = await s.click(`nav a[href$="/chart/${tab}"]`, { until: { request: spec.req, landed: true }, timeout: seen ? 4000 : SLOW });
+  const r = await s.click(`nav a[href$="/chart/${tab}"]`, { until: { request: spec.req, landed: true }, timeout: seen ? 4000 : 12000 /* cold tab: chunk load + fetch, measured ≤ 3 s */ });
   if (!r.ok) throw new Error(`chart tab ${tab}: ${r.diagnosis?.reason} — ${r.diagnosis?.message}`);
   const landed = !!r.until?.ok;
   if (!landed && !s.page.url().includes(`/chart/${tab}`)) throw new Error(`chart tab ${tab}: neither the request nor the route arrived (${s.page.url()})`);
@@ -342,7 +341,7 @@ export async function visits(s: Session, patientUuid: string) {
 export async function clinicalForms(s: Session) {
   reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
   const r = reached(await s.click('role=button[name="Clinical forms"]', {
-    until: { request: `${REST}/form?v=`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/form?v=`, landed: true },
   }), "open clinical forms");
   const body = wire(s, `${REST}/form?v=`, r.action);
   const forms = (body?.results ?? []).map((f: Any) => ({ uuid: f.uuid, name: f.display ?? f.name, published: f.published }));
@@ -416,7 +415,7 @@ export async function registerPatient(s: Session, p: NewPatient = {}) {
   const given = p.given ?? "Discotest";
   const family = p.family ?? MARKER_FAMILY;
   reached(await s.navigate(`${SPA}/patient-registration`, {
-    until: { selector: 'role=textbox[name="First Name"]' }, timeout: SLOW,
+    until: { selector: 'role=textbox[name="First Name"]' },
   }), "reach registration");
   reached(await s.fill('role=textbox[name="First Name"]', given), "first name");
   reached(await s.fill('role=textbox[name="Family Name"]', family), "family name");
@@ -428,7 +427,7 @@ export async function registerPatient(s: Session, p: NewPatient = {}) {
   reached(await s.fill('role=textbox[name="City/Village (optional)"]', p.city ?? `${MARKER} ${stamp()}`), "city");
 
   const r = reached(await s.click('role=button[name="Register patient"]', {
-    until: { request: `${REST}/patient/`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/patient/`, landed: true }, timeout: 15000 /* identifier + patient POST: the slowest write measured */,
   }), "register patient");
   const row = writtenRow(s, `${REST}/patient/`, r.action);
   const body = written(s, `${REST}/patient/`, r.action);
@@ -459,11 +458,11 @@ export async function startVisit(s: Session, visitType = "Facility Visit") {
   reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
   reached(await s.click('role=button[name="Actions"]', { until: { selector: 'role=menuitem[name="Add visit"]' } }), "actions menu");
   reached(await s.click('role=menuitem[name="Add visit"]', {
-    until: { selector: `role=radio[name="${visitType}"]` }, timeout: SLOW,
+    until: { selector: `role=radio[name="${visitType}"]` },
   }), "open start-visit workspace");
   await tick(s, `role=radio[name="${visitType}"]`, "visit type");
   const r = reached(await s.click('role=button[name="Start visit"]', {
-    until: { request: `${REST}/visit`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/visit`, landed: true },
   }), "start visit");
   const body = written(s, `${REST}/visit`, r.action);
   if (!body?.uuid) throw new Error(`startVisit: no POST /visit response in ${r.action}`);
@@ -485,13 +484,13 @@ export type VitalValues = Partial<Record<"Temperature" | "systolic" | "diastolic
 export async function recordVitals(s: Session, values: VitalValues = {}, note = `${MARKER} synthetic vitals ${stamp()}`) {
   reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
   reached(await s.click('role=button[name="Record vital signs"]', {
-    until: { selector: 'role=spinbutton[name="Temperature"]' }, timeout: SLOW,
+    until: { selector: 'role=spinbutton[name="Temperature"]' },
   }), "open vitals workspace");
   const v: VitalValues = { Temperature: "37.2", systolic: "118", diastolic: "76", Pulse: "72", "Respiration rate": "16", "Oxygen saturation": "98", Weight: "61", Height: "165", ...values };
   for (const [name, val] of Object.entries(v)) reached(await s.fill(`role=spinbutton[name="${name}"]`, val!), `vitals ${name}`);
   reached(await s.fill('role=textbox[name="Notes"]', note), "vitals note");
   const r = reached(await s.click('role=button[name="Save and close"]', {
-    until: { request: `${REST}/encounter`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/encounter`, landed: true },
   }), "save vitals");
   const body = written(s, `${REST}/encounter`, r.action);
   if (!body?.uuid) throw new Error(`recordVitals: no POST /encounter response in ${r.action}`);
@@ -513,10 +512,10 @@ export async function recordVitals(s: Session, values: VitalValues = {}, note = 
 export async function addCondition(s: Session, concept = "Headache", onset: [string, string, string] = ["15", "08", "2026"]) {
   reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
   reached(await s.click('role=button[name="Record conditions"]', {
-    until: { selector: 'role=searchbox[name="Enter condition"]' }, timeout: SLOW,
+    until: { selector: 'role=searchbox[name="Enter condition"]' },
   }), "open conditions workspace");
   reached(await s.type('role=searchbox[name="Enter condition"]', concept, {
-    until: { request: `${REST}/concept?name=`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/concept?name=`, landed: true },
   }), "concept search");
   reached(await s.click(`role=menuitem[name="${concept}"]`, { until: { gone: `role=menuitem[name="${concept}"]` } }), "pick concept");
   const [d, m, y] = onset;
@@ -524,7 +523,7 @@ export async function addCondition(s: Session, concept = "Headache", onset: [str
   reached(await s.fill('role=spinbutton[name="month, Onset date"]', m), "onset month");
   reached(await s.fill('role=spinbutton[name="year, Onset date"]', y), "onset year");
   const r = reached(await s.click('role=button[name="Save & close"]', {
-    until: { request: `${FHIR}/Condition`, landed: true }, timeout: SLOW,
+    until: { request: `${FHIR}/Condition`, landed: true },
   }), "save condition");
   const body = written(s, `${FHIR}/Condition`, r.action);
   if (!body?.id) throw new Error(`addCondition: no POST FHIR Condition response in ${r.action}`);
@@ -545,15 +544,15 @@ export async function addCondition(s: Session, concept = "Headache", onset: [str
 export async function recordAllergy(s: Session, patientUuid: string, allergen = "ACE inhibitors", reaction = "Rash", severity: "Mild" | "Moderate" | "Severe" = "Mild", comment = `${MARKER} synthetic allergy ${stamp()}`) {
   await openChartTab(s, patientUuid, "allergies");
   reached(await s.click('role=button[name="Record allergy intolerances"]', {
-    until: { selector: 'role=combobox[name="Allergen"]' }, timeout: SLOW,
+    until: { selector: 'role=combobox[name="Allergen"]' },
   }), "open allergy workspace");
-  reached(await s.click('role=combobox[name="Allergen"]', { until: { selector: `role=option[name="${allergen}"]` }, timeout: SLOW }), "open allergen list");
+  reached(await s.click('role=combobox[name="Allergen"]', { until: { selector: `role=option[name="${allergen}"]` } }), "open allergen list");
   reached(await s.click(`role=option[name="${allergen}"]`, { until: { gone: `role=option[name="${allergen}"]` } }), "pick allergen");
   await tick(s, `role=checkbox[name="${reaction}"]`, "reaction");
   await tick(s, `role=radio[name="${severity}"]`, "severity");
   reached(await s.fill('role=textbox[name="Comments"]', comment), "allergy comment");
   const r = reached(await s.click('role=button[name="Save and close"]', {
-    until: { request: `/allergy`, landed: true }, timeout: SLOW,
+    until: { request: `/allergy`, landed: true },
   }), "save allergy");
   const body = written(s, `/patient/${patientUuid}/allergy`, r.action);
   if (!body?.uuid) throw new Error(`recordAllergy: no POST allergy response in ${r.action}`);
@@ -572,12 +571,12 @@ export async function createPatientList(s: Session, name = `${MARKER} list ${sta
   await goHome(s);
   await openHomeApp(s, "Patient lists");
   reached(await s.click('role=button[name="New list"]', {
-    until: { selector: 'role=textbox[name="List name"]' }, timeout: SLOW,
+    until: { selector: 'role=textbox[name="List name"]' },
   }), "open new-list workspace");
   reached(await s.fill('role=textbox[name="List name"]', name), "list name");
   reached(await s.fill('role=textbox[name="Describe the purpose of this list in a few words"]', description), "list description");
   const r = reached(await s.click('role=button[name="Create list"]', {
-    until: { request: `${REST}/cohortm/cohort/`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/cohortm/cohort/`, landed: true },
   }), "create list");
   const body = written(s, `${REST}/cohortm/cohort/`, r.action);
   if (!body?.uuid) throw new Error(`createPatientList: no POST cohort response in ${r.action}`);
@@ -594,14 +593,14 @@ export async function addPatientToList(s: Session, listName: string) {
   reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
   reached(await s.click('role=button[name="Actions"]', { until: { selector: 'role=menuitem[name="Add to list"]' } }), "actions menu");
   reached(await s.click('role=menuitem[name="Add to list"]', {
-    until: { selector: 'role=searchbox[name="Search for a list"]' }, timeout: SLOW,
+    until: { selector: 'role=searchbox[name="Search for a list"]' },
   }), "open add-to-list modal");
   reached(await s.type('role=searchbox[name="Search for a list"]', listName, {
-    until: { selector: `role=checkbox[name="${listName}"]` }, timeout: SLOW,
+    until: { selector: `role=checkbox[name="${listName}"]` },
   }), "filter lists");
   await tick(s, `role=checkbox[name="${listName}"]`, "tick list");
   const r = reached(await s.click('role=button[name="Save"]', {
-    until: { request: `${REST}/cohortm/cohortmember`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/cohortm/cohortmember`, landed: true },
   }), "add to list");
   const body = written(s, `${REST}/cohortm/cohortmember`, r.action);
   if (!body?.uuid) throw new Error(`addPatientToList: no POST cohortmember response in ${r.action}`);
@@ -624,16 +623,16 @@ export async function addPatientToList(s: Session, listName: string) {
 export async function orderLabTest(s: Session, test = "Complete blood count", reference = `${MARKER}-REF-${stamp()}`, instructions = `${MARKER} synthetic lab order — automated characterization run`) {
   reached(await s.until({ selector: anchors.chart.el }, { timeout: PROBE }), "on a chart");
   reached(await s.click('role=button[name="Order basket"]', {
-    until: { selector: 'role=button[name="Sign and close"]' }, timeout: SLOW,
+    until: { selector: 'role=button[name="Sign and close"]' },
   }), "open order basket");
   reached(await s.click('role=button[name="Add"] >> nth=1', {
-    until: { selector: 'role=searchbox[name="Search for a test type"]' }, timeout: SLOW,
+    until: { selector: 'role=searchbox[name="Search for a test type"]' },
   }), "add lab order");
   reached(await s.type('role=searchbox[name="Search for a test type"]', test, {
-    until: { text: `1 result for "${test}"` }, timeout: SLOW,
+    until: { text: `1 result for "${test}"` },
   }), "search test type");
   reached(await s.click('role=button[name="Order form"]', {
-    until: { selector: 'role=textbox[name="Reference number"]' }, timeout: SLOW,
+    until: { selector: 'role=textbox[name="Reference number"]' },
   }), "open order form");
   reached(await s.fill('role=textbox[name="Reference number"]', reference), "reference");
   reached(await s.fill('role=textbox[name="Additional instructions"]', instructions), "instructions");
@@ -641,10 +640,10 @@ export async function orderLabTest(s: Session, test = "Complete blood count", re
   // order form, so that button is visible the whole time (already-true). The order form
   // going away is the thing that is false before and true after.
   reached(await s.click('role=button[name="Save order"]', {
-    until: { gone: 'role=button[name="Save order"]' }, timeout: SLOW,
+    until: { gone: 'role=button[name="Save order"]' },
   }), "save order to basket");
   const r = reached(await s.click('role=button[name="Sign and close"]', {
-    until: { request: `${REST}/encounter`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/encounter`, landed: true },
   }), "sign orders");
   const body = written(s, `${REST}/encounter`, r.action);
   const order = (body?.orders ?? [])[0];
@@ -670,19 +669,19 @@ export async function addToQueue(s: Session, patientNameOrId: string, service = 
   await goHome(s);
   await openHomeApp(s, "Service queues");
   reached(await s.click('role=button[name="Add a patient to this list"]', {
-    until: { selector: 'role=searchbox[name="Search for a patient by name or identifier number"]' }, timeout: SLOW,
+    until: { selector: 'role=searchbox[name="Search for a patient by name or identifier number"]' },
   }), "open add-to-queue workspace");
   reached(await s.type('role=searchbox[name="Search for a patient by name or identifier number"] >> nth=0', patientNameOrId, {
-    until: { request: `${REST}/patient?q=`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/patient?q=`, landed: true },
   }), "queue patient search");
   reached(await s.click(`role=button[name*="${patientNameOrId}"]`, {
-    until: { selector: `select:has(option:text-is("${service}"))` }, timeout: SLOW,
+    until: { selector: `select:has(option:text-is("${service}"))` },
   }), "pick patient");
   reached(await s.select(`select:has(option:text-is("${service}"))`, service, {
-    until: { selector: 'role=radio[name="Not Urgent"]' }, timeout: SLOW,
+    until: { selector: 'role=radio[name="Not Urgent"]' },
   }), "pick service");
   const r = reached(await s.click('role=button[name="Add patient to queue"]', {
-    until: { request: `${REST}/visit-queue-entry`, landed: true }, timeout: SLOW,
+    until: { request: `${REST}/visit-queue-entry`, landed: true },
   }), "add to queue");
   const row = writtenRow(s, `${REST}/visit-queue-entry`, r.action);
   if (row?.status !== 201) throw new Error(`addToQueue: POST visit-queue-entry status ${row?.status} in ${r.action}`);

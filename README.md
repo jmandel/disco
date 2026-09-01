@@ -409,10 +409,21 @@ you found it.
 | (fixed) 1000 | | how long `act` waits for a missing element to attach before `not-found` |
 | (fixed) 300 | | how long the report waits for in-flight bodies before printing |
 
-Set them per session (`open(app, { timeouts })`), per act (`timeout`, `window`). Raise a budget when the
-app is genuinely slow *for that step*, and write the number down in the app's README; never raise the
-defaults to make a flaky predicate pass. While *exploring*, pass a short `timeout` (1000–1500) to probes
-whose outcome you are unsure of — an expired 5 s budget is the most expensive thing in a session.
+A budget only ever costs you on the failure path: a correct predicate returns the moment the state
+arrives, however large the budget. So the rule for budgets is short:
+
+1. **Don't set them.** Use the default everywhere; never name a constant like `SLOW`.
+2. **Raise one only on the step you watched exceed it**, inline, with the measurement as the comment:
+   `timeout: 15000 // cold chart open: 3–4 s on this server`. Two or three per app is normal; thirty
+   means you were compensating for predicates you hadn't looked at first.
+3. **Where the app shows its own failure, wait for both**: `any: [{ selector: nextScreen }, { text:
+   "Invalid username" }]` — a refusal then costs milliseconds, and the budget is paid only when
+   something unexpected happens.
+4. **Start every workflow from an anchor**, so one failure fails one step instead of the next twelve;
+   run checks with `--bail`.
+
+While *exploring*, the opposite: pass a short `timeout` (1000–1500) to probes whose outcome you are
+unsure of — an expired 5 s budget is the most expensive thing in a session.
 
 ---
 
