@@ -1,344 +1,323 @@
-# gauntlet
+# gauntlet — how it works and how to drive it
 
-`bun gauntlet/server.ts --port 4800` → `http://localhost:4800` (and a second origin on `:4801`).
-Drive it with `lib.ts`; `node scripts/run-check.ts gauntlet` proves lib.ts still works (30/30).
+`bun gauntlet/server.ts --port 4800` (a second origin, **:4801**, comes up with it and serves only the
+cross-origin iframe). Then `./disco open gauntlet http://localhost:4800`.
 
 ## 1. What it is
 
-A single-page app served from one HTML shell (`GET /`) plus one ES module (`GET /app.js`). No routing,
-no framework: every one of the ~26 numbered `<section>`s on that one page is an independent hazard —
-concurrent fetches, a conditional modal, optimistic UI, a perpetual spinner, three push channels, a
-debounced search, a virtualised list, a re-render race, three iframes (one cross-origin), native
-dialogs, a session timer, a child window, a canvas, a keyboard-only combobox, shadow DOM, SSE,
-GraphQL, and an auth wall. Facts live on the wire: almost every section is *one* `/api/*` call whose
-JSON is the truth, and the DOM is a lossy rendering of it (sometimes a lying one — see §3 Save).
-There is a standing WebSocket and a standing EventSource from page load. Auth is off by default; when
-`ctl.requireAuth` is on, **every** HTML page 302s to `/login.html?next=…` and any credentials are
-accepted, setting `gauntlet_auth=<user>; HttpOnly`.
+One **static HTML page** at `/` — no router, no framework, no SPA shell — with 27 numbered
+`<section>`s, each demonstrating one loading/interaction pattern, plus a 20.5 KB ES module `/app.js`
+that wires them up. Every id is literal and stable (`#load-chart`, `#record-3`, `#med-list`), so
+selectors never need `nth`. Facts live in three places: **the wire** (a small JSON API under `/api/`,
+plus GraphQL over `POST /api/graphql`), **the DOM**, and — for the canvas — **pixels only**. Three push
+channels (WebSocket, SSE, long-poll) run alongside the request/response API.
 
-The app is **fully deterministic and remote-controlled** by a control plane, `GET/POST /ctl`
-(see `wire.md`). That is the single most useful thing to know: you do not wait for a hazard to
-happen by chance, you switch it on. `POST /ctl/reset` puts everything back.
+The important structural fact: **every "sometimes" behaviour is a knob, not randomness.**
+`GET /ctl` returns the effective configuration, `POST /ctl` patches it, `POST /ctl/reset` restores
+defaults. Modal or no modal, save succeeds or fails, background traffic on or off, auth required or
+not, how slow "slow" is — all of it is `ctl`. Drive the app deterministically by setting the knob you
+want before the step that depends on it (`lib.ts:ctl()` does this from inside the page, so the POST
+lands in the log with the page's cookies).
+
+Auth is a single `HttpOnly` cookie, `gauntlet_auth`. When `ctl.requireAuth` is on it guards the shell
+too, not just `/secure.html`.
 
 ## 2. Glossary
 
 | The app's word | On screen | On the wire |
 |---|---|---|
-| **ctl** | `#ctl-state` in the header (what the *page* believes) | `GET /ctl`, `POST /ctl`, `POST /ctl/reset` |
-| **record** | `#record` after clicking `#record-N` | `GET /api/record/N` → `{id,name,dob,mrn,allergies[]}` |
-| **chart** | `#chart` "Chart loaded (3 responses)" | `GET /api/slow?ms=` + `/api/chart/a` + `/api/chart/b` |
-| **row** | one `.row[data-id]` inside `#rows-inner` | one element of the 10 000-item array from `GET /api/rows` |
-| **notification** | `#notif-count` / `#notif-list` "Result N via ws" | a WS frame, an SSE message, or `GET /api/notify-poll` |
-| **heartbeat / poll** | `#heartbeat-count` / `#poll-count` | `GET /api/heartbeat` / `GET /api/poll` (ambient) |
-| **action frame** | `#ws-count`, `#ws-last` | WS out `{"type":"action","id":"<element id>","t":…}` |
-| **toast** | `[role=status]`, lives `ctl.toastMs` | — (rendered, never fetched) |
-| **the x-origin** | `#x-origin` in the header | `http://localhost:4801` — the cross-origin iframe's origin |
+| **ctl** | `effective ctl:` in the header, `#ctl-state` | `GET/POST /ctl`, and the WS `hello` frame's `state` |
+| **record** | §2, `#record` — an `<h3>Record N</h3>` and one `<li>` per field | `GET /api/record/:id` → `{id,name,dob,mrn,allergies[]}` |
+| **allergy review** | the "Allergy Review Required" dialog `div#record-modal.overlay` | nothing — it is client-side, gated by `ctl.modal` |
+| **chart** | §1, `#chart` = "Chart loaded (N responses)" | `/api/slow?ms=` + `/api/chart/a` + `/api/chart/b` (3 concurrent) |
+| **save** | §3, `#save-state` = `unsaved` → `Saved ✓`; a toast in `[role=status]` | `POST /api/save` (202) then `GET /api/save/status?id=` (**200 or 500**) |
+| **row** | §8, `#rows .row[data-id]` — only ~24 exist | `GET /api/rows` — all 10 000 |
+| **notification** | §23, `#notif-list li` = "Result N via ws\|sse\|poll" | a WS `notify` frame, an SSE message, or a `/api/notify-poll` response |
+| **ambient** | header "ambient: on (heartbeats N / polls N)" | `GET /api/heartbeat` + reissuing `GET /api/poll` |
 
 ## 3. Anchors
 
-| Screen | URL | Anchor |
+| Screen | URL | Element |
 |---|---|---|
-| the shell | `http://localhost:4800/` | `#load-chart` (**not** `{url:"/"}` — that predicate is always true) |
-| away page | `/away.html` | `h1:text-is("You navigated away")` |
-| login | `/login.html?next=…` | `#login-form` (visible controls: `#user`, `#pass`, `#login`) |
-| secure area | `/secure.html` | `#who` → `Welcome, <user>` |
-| child window | `/child.html` (a second page) | `#child-fetch` on that page object |
-| allergy modal | — | `#record-modal[role=dialog]`, button `#modal-ack` |
-| session dialog | — | `#session-timeout[role=dialog]`, button `#stay` |
+| shell | `/` | `#load-chart` |
+| login | `/login.html` (`?next=…`) | `#login` (the button) |
+| secure area | `/secure.html` | `#who` ("Welcome, `<user>`") |
+| "navigated away" | `/away.html` | `a#back` |
+| child window (popup) | `/child.html` | `#child-fetch` |
+| allergy modal (interstitial) | — | `#record-modal` |
+| session-expiry dialog (interstitial) | — | `[role=dialog]` with text "Session expiring" |
 
-`lib.ts` exports `atShell(s)` (assert, else navigate) and `SHELL`/`LOGIN`/`SECURE`.
+`lib.ts` exports these as `anchors`. **Always give the shell anchor a `#login` arm** — see §5.
 
 ## 4. Workflows
 
-Each one is a function in `lib.ts`; the act ids are the evidence in `NOTES.md`.
+Every one of these is a function in `lib.ts`, and `check.ts` runs all of them
+(`node scripts/run-check.ts gauntlet` → 33/33, ~26 s, cold or warm).
 
-### Load chart — three concurrent fetches, one slow (§1) · `loadChart` · act:3, act:13, act:123
-
-```ts
-await s.click("#load-chart", { until: { selector: "#chart:has-text('Chart loaded')" }, timeout: 8000 });
-```
-One click fans out to `GET /api/slow?ms=<ctl.slowMs>`, `/api/chart/a`, `/api/chart/b`; the render waits
-for all three. **The status span is a trap**: `#chart-status` goes `loading…` → back to `idle`, so any
-predicate on it is already-true before *and* after. Varies with `ctl.slowMs` (400 default; at 1500 the
-until took 1799 ms) and with `ctl.renderDelayMs`, which delays *only this* render past the wire by that
-much (act:139: `#chart` still empty when `/api/slow` landed, filled 1285 ms later).
-
-### Open a record, with the interstitial modal (§2) · `openRecord` · act:4, act:56, act:76
+### 4.1 Load the chart — three concurrent fetches, one slow (`loadChart`, act:2, act:86)
 
 ```ts
-const rep = await s.click(`#record-${id}`, { until: { any: [
-  { selector: "[role=dialog]", label: "dialog" },
-  { selector: `#record h3:text-is("Record ${id}")`, label: "record" } ] } });
-await dismissRecordModal(s);                       // idempotent; also catches a *late* modal
+s.click("#load-chart", { until: { selector: "#chart:has-text('Chart loaded')" }, timeout: 4000 })
 ```
-Postcondition: `#record h3:text-is("Record N")` and no `#record-modal`. The record itself is read from
-`store.latestJson("/api/record/N")`, never scraped. **What varies:** the modal appears for *every*
-record when `ctl.modal` is true and for none when it is false — it is not a property of the record
-(all five have allergies). With `ctl.modalDelayMs`, `until.which === "record"` and the overlay lands
-*afterwards*; the next click then fails `occluded — over div#record-modal.overlay` (act:80).
 
-### Save — optimistic UI whose screen never corrects itself (§3) · `save` · act:11, act:74
+Fans out `GET /api/slow?ms=<ctl.slowMs>`, `/api/chart/a`, `/api/chart/b` at once and renders when the
+last one lands. **Postcondition: `#chart`, never `#chart-status`** — the status span says `idle` before,
+during and after; it is a spinner that lies (act:86 with `ctl.slowMs=1200`: 1787 ms, still "idle").
+*Varies:* `ctl.slowMs` is the whole latency. The aria diff glues both spans into one line
+(`text: "status: idle Chart loaded (3 responses)"`) — anchor on the element, not the line.
+
+### 4.2 Open a record, with an optional and possibly delayed modal (`openRecord`, act:7, act:8, act:93)
 
 ```ts
-await s.until({ gone: "[role=status]" });          // the previous toast makes the next one already-true
-await s.click("#save", { until: { any: [
-  { selector: "[role=status]:has-text('Save failed')", label: "failed" },
-  { selector: "[role=status]:has-text('Saved')",       label: "saved"  } ] } });
-const status = s.store.requests({ url: "/api/save/status" }).pop().status;   // 200 | 500
+s.click(`#record-${id}`, { until: { any: [
+  { selector: "#record-modal", label: "modal" },
+  { selector: `#record h3:text-is("Record ${id}")`, label: "record" } ] } })
+// if which === "record", look once more for #record-modal (grace window), then:
+s.click("#record-modal button", { until: { gone: "#record-modal" } })
 ```
-`POST /api/save` → **202**, then `GET /api/save/status?id=N`. `#save-state` flips to `Saved ✓`
-immediately and **stays `Saved ✓` even when the save fails** — I waited 4 s for it to correct itself and
-it never did (act:75). The only durable truth is the status code; the page never reads that body, so the
-row is `body_state: pending/missing` and the status code is all disco can offer — which is enough.
-The toast is the transient signal and disappears after `ctl.toastMs` (measured 788 ms at `toastMs:600`).
 
-### Perpetual spinner (§4) · `spinnerNeverResolves` · act:126
+Fields come from `GET /api/record/:id` — read them from the log, not the `<li>`s.
+*Varies:* `ctl.modal` decides whether the dialog appears at all; `ctl.modalDelayMs` pushes it **after**
+the record renders, so the `any` resolves on `record` and the dialog arrives later and occludes the
+whole page. There is no signal for "no dialog is coming", so a delayed interstitial costs a grace
+window once — `openRecord(s, id, { modalGraceMs: 1200 })`. Getting this wrong is what turned one
+failing step into 12 in my first `run-check`.
 
-`#spinner` is a CSS `animation: spin` with **no request behind it** (`SELECT … WHERE path LIKE '%spin%'`
-→ 0 rows). `until: { gone: "#spinner" }` always burns the whole budget. Never wait on it.
-
-### Ambient traffic (§5/22) · `runAmbient` · act:… (see NOTES)
-
-`POST /ctl {"ambient":true,"heartbeatMs":700,"pollHoldMs":400,"wsPushMs":900}` **then reload** — the
-client reads these at load. `GET /api/heartbeat` every `heartbeatMs`, a reissuing long-poll
-`GET /api/poll` held `pollHoldMs`, and a WS push every `wsPushMs`. Counters: `#heartbeat-count`,
-`#poll-count`, `#ambient-status`. These rows carry `action_id IS NULL` between acts and land inside
-whatever act window they overlap — recognise them because they are in *every* report.
-
-### WebSocket action frames (§6) · `wsActionFrame` · act:114–116
-
-Every button click **except `#noop`** sends `{"type":"action","id":"<element id>","t":<epoch>}`.
-Verified by counting `ws_frames WHERE dir='out'` around a `#noop` click (unchanged) and an `#alert`
-click (+1). The header's `#ws-count` counts *incoming* frames.
-
-### Debounced search (§7) · `search` · act:14
+### 4.3 Save — optimistic UI whose failure lives only on the wire (`save`, act:3, act:49)
 
 ```ts
-await s.fill("#search", "");                                            // clear first
-await s.type("#search", "ada", { until: { request: "/api/search", landed: true } });
-const hits = s.store.latestJson("/api/search").hits;
+const r = s.click("#save", { until: { request: "/api/save/status" }, timeout: 6000 });
+const status = s.store.requests({ url: "/api/save/status", action: r.action }).at(-1).status; // 200 | 500
 ```
-250 ms trailing debounce. `type` (keystrokes), not `fill`. Results render synchronously with the response.
 
-### Virtualised rows (§8) · `loadRows`, `scrollRowsTo` · act:88
+`POST /api/save` → **202**, and the UI flips to `Saved ✓` immediately and **never flips back**. The
+outcome arrives on `GET /api/save/status?id=N`: **200 = saved, 500 = failed**. The page never reads
+that body (`body_state: pending → missing`), so **the status code is the only fact**. The sole UI
+signal of failure is a `[role=status]` toast "Save failed (async)" that vanishes after `ctl.toastMs`
+(2000 ms) — do not build on it. *Varies:* `ctl.saveFails`.
+
+### 4.4 The spinner that never resolves (`spinnerStillSpinning`, act:51)
+
+`#spinner` is perpetual. `until: { gone: "#spinner" }` costs exactly the budget you name and comes
+back with a diagnosis and a shot. Assert its *presence*; never wait for it.
+
+### 4.5 Debounced search (`search`, act:11)
+
+`s.type("#search", "ada")` produces **one** `GET /api/search?q=ada` — a 250 ms trailing debounce.
+`until: { request: "/api/search?q=ada", landed: true }`, then read `hits` from the body.
+
+### 4.6 Keyboard-only combobox (`pickMed`, act:72‑74)
 
 ```ts
-await s.click("#load-rows", { until: { selector: "#rows-count:has-text('rows')" }, timeout: 8000 });
-const rows = s.store.latestJson("/api/rows");        // all 10 000, 484.7 KB, fully captured
-await s.evaluate("document.getElementById('rows').scrollTop = 5000*24");
-await s.until({ fn: `document.querySelector('#rows .row[data-id="5000"]') !== null` });
+s.fill("#med", "");                                                   // s.type APPENDS — always clear
+s.type("#med", "asp", { until: { request: "/api/meds?q=asp", landed: true } });
+s.press("ArrowDown", { target: "#med", until: { fn: "…getAttribute('aria-activedescendant')" } });
+s.press("Enter",     { target: "#med", until: { selector: "#med-selected:has-text('Selected:')" } });
 ```
-`#rows-count` **exists but is empty** before the click, so `{ selector: "#rows-count" }` is already-true.
-~23 of 10 000 rows are in the DOM at any time inside `#rows-inner` (height 240000px, 24px each).
-Scrolling is a *cause*: wait on the effect (the row you want being present), never read straight after.
 
-### Re-render race (§9) · `clickRerender` · act:16 (fail), act:19 (pass)
+`#med` is **not** debounced (typing `asp` issues `q=a`, `q=as`, `q=asp`), so wait on the request for
+the *full* prefix. Options are `ul#med-list[role=listbox] > li#med-opt-N`; `ArrowDown` sets
+`aria-activedescendant`; `Enter` commits and hides the list. See §6 for why the mouse is not an option.
 
-A real mouse click times out after 3 s with `diagnosis: detached` (the button is rebuilt on every
-mousemove — `ctl.rerenderOnHover`, and its `data-gen` counter climbs). `{ js: true }` lands in 108 ms.
+### 4.7 Virtualised rows (`loadRows`, `scrollRowsTo`, act:83, act:85)
 
-### Frames — same-origin, depth-2, cross-origin (§10) · `iframeSubmit`, `deepIframeSubmit`, `xframeSubmit` · act:48, act:144, act:50
+`#load-rows` fetches **all 10 000 rows once** (484.7 KB) and renders 23‑28 `.row` nodes over a
+240 000 px inner div (24 px each). Row 5000 is on the wire, not in the DOM.
 
 ```ts
-await s.fill("#if-name", "Grace",  { frame: "#same-origin" });
-await s.click("#if-submit",        { frame: "#same-origin", until: { request: "/api/iframe-submit", landed: true } });
-await s.click("#deep-submit",      { frame: "#same-origin >> #nested2", until: { request: "/api/iframe-submit", landed: true } });
-await s.click("#xf-submit",        { frame: "#cross-origin",  until: { request: "/api/xframe-submit",  landed: true } });
+await s.evaluate("document.querySelector('#rows').scrollTop = 24*5000");
+s.until({ fn: "document.querySelector('#rows .row')?.dataset.id !== '<previous>'" })  // wait on the EFFECT
 ```
-The cross-origin frame is `http://localhost:4801/xframe.html` and posts to **its own** origin; those
-requests are in the log under the `:4801` URL and the response says `"origin":"x"`. Note the report's
-`ui` diff is the main frame only — an iframe shows up as a node, its contents never do, so a frame
-transition must be asserted through `frame:`, `s.frame(...)` or the wire.
 
-### Native dialogs (§11) · `nativeAlert`, `nativeConfirm`, `armAndNavigateAway` · act:42–45, act:157
+### 4.8 The re-render race (`clickRerender`, act:13 → act:16)
 
-`#alert` → `alert "Hello from gauntlet"` → `#alert-result` "alerted".
-`#confirm` → `confirm "Proceed?"` → `#confirm-result` "confirmed" (session `dialogs:"accept"`, the
-default) or "cancelled" (`dialogs:"dismiss"`).
-`#arm-unload` → `#unload-armed:text-is('armed')`, then `#nav-away` raises a **beforeunload** dialog:
-accepted → `/away.html`; dismissed → the page stays. Every dialog is recorded on the report
-(`dialog confirm "Proceed?" → accept`) whichever way it is handled.
+`#rerender` is replaced on hover (`ctl.rerenderOnHover`). A real mouse click burns the full 3 s
+actionability budget and is diagnosed `detached`. `{ js: true }` does it in 33 ms.
 
-### Session timeout (§12) · `sessionTimeoutAndStay` · act:118, act:132
+### 4.9 Iframes, three depths (`submitSameFrame` / `submitCrossFrame` / `submitDeepFrame`, act:24‑29)
 
-`POST /ctl {"timeoutMs":1200}` **then reload** → `#timeout-state` "armed (1200 ms)". After that much
-idle: "expired" plus `#session-timeout[role=dialog]` "Session expiring". `#stay` closes it and
-**re-arms** the timer (it fired again 1284 ms later). This overlay covers the whole page — it is the
-usual cause of a surprise `occluded` several steps later.
+`{ frame: "#same-origin" }` → `#if-name`/`#if-submit`/`#if-result` → `POST /api/iframe-submit`.
+`{ frame: "#cross-origin" }` (served from **:4801**) → `#xf-name`/`#xf-submit` → `POST /api/xframe-submit`
+**to :4801**, in the same log with `host=localhost:4801`.
+`{ frame: "#same-origin >> #nested2" }` → `#deep-name`/`#deep-submit` in `/iframe2.html`.
+Iframe contents never appear in the aria diff — a `not-found` inside a frame lists that *frame's*
+controls, which is how the ids above were discovered in the first place.
 
-### No-op and the disabled control (§13) · act:7, act:8
+### 4.10 Native dialogs (`nativeDialog`, `armUnloadAndNavigateAway`, act:37‑40)
 
-`#noop` does nothing at all — no request, no WS frame, no DOM change; it is the 700 ms bare-act
-baseline. `#noop-disabled` is `disabled` *and* `pointer-events: none` inside `div.field-wrap`, so
-`document.elementFromPoint` over it returns the parent — disco reports the more useful
-`diagnosis: disabled` in ~100 ms rather than `occluded`.
+`#alert` → alert "Hello from gauntlet"; `#confirm` → confirm "Proceed?"; `#arm-unload` then the
+`#nav-away` link → a `beforeunload`. All are handled by the session policy
+(`open(app, { dialogs: "accept" | "dismiss" })`, default accept) and land in the `dialogs` table with
+type/message/handling. With `accept`, the navigation goes through and you land on `/away.html`;
+come back via `a#back`.
 
-### Delete (§14) · `deleteItem` · act:35
+### 4.11 Child window (`openChildWindow`, act:31/48)
 
-`#delete` → `DELETE /api/item/1` → `{"deleted":1}` → `#delete-result` "deleted 1".
+`s.click("#open-child", { until: { page: "child.html" } })` → ~145 ms. Drive it as an ordinary
+Playwright page from `s.context.pages()`. **Always `s.closeOtherPages()` afterwards** — the report
+header says `(+1 other page open)` and a backgrounded page is throttled to one frame per second.
 
-### Child window (§15) · `openChildAndPing` · act:51, act:145
+### 4.12 Canvas: pixels are the only evidence (`pickCanvasCell`, act:30/36)
 
-`#open-child` opens `/child.html` as a real second page. There is **no `until` predicate for "a page
-appeared"** — act bare with a `window`, then read `report.pages` / `s.context.pages()`, drive the child
-with plain Playwright, and `s.closeOtherPages()` afterwards (a background page is throttled to ~1 fps
-and makes the driven page mysteriously slow; the report header says `(+1 other page open)`).
-The child's own traffic (`GET /api/child-ping` → `{"pong":true}`) is in the same log.
-
-### Canvas grid (§16) · `selectGridCell` · act:55
-
-Pixels only: nothing in the DOM changes, and the aria diff is empty. The grid is seeded by
-`GET /api/grid` (4 rows × 8 cols → 50 px cells on a 400×200 canvas). `act` has no *position* option, so
-address a cell with raw coordinates: `s.page.mouse.click(box.x+1+x, box.y+1+y)` (the `+1` is the canvas
-border). Readback: `window.__gridSelected === {r,c}` and the cell pixel becoming `255,213,79`.
-
-### Keyboard-only combobox (§17) · `pickMedication` · act:24, act:28, act:29–31
+400×200, 4 rows × 8 cols, 50 px cells. `s.click("#grid", { position: { x: col*50+25, y: row*50+25 } })`
+paints that cell `#ffd54f` (`255,213,79,255`). **No DOM change, no request, no WS frame.** Assert by
+reading the pixel back:
 
 ```ts
-await s.type("#med", "as", { until: { request: "/api/meds", landed: true } });
-const idx = s.store.latestJson("/api/meds").hits.indexOf("Aspirin");    // the order is the wire's
-for (let i = 0; i <= idx; i++)
-  await s.press("ArrowDown", { target: "#med", until: { selector: `#med-opt-${i}[aria-selected="true"]` } });
-await s.press("Enter", { target: "#med", until: { selector: `#med-selected:has-text("Aspirin")` } });
+until: { fn: "…#grid.getContext('2d').getImageData(275,125,1,1).data … !== <before>" }
 ```
-Clicking an option gives `diagnosis: unclickable — pointer-events: none on li#med-opt-1`. `/api/meds`
-matches a **subsequence**, not a prefix ("as" → Atorvastatin, Aspirin, Montelukast, Simvastatin), so
-compute the arrow count from the response rather than assuming.
 
-### Shadow DOM (§18) · `clickShadowButton` · act:32
+The cell *labels* (`"2,5"`) come from `GET /api/grid`, fetched once on load.
 
-Open shadow root; Playwright pierces it: `s.click("#shadow-host >> #shadow-btn")`. The counter is only
-reachable through `shadowRoot`, so the postcondition is an `until: { fn }`.
+### 4.13 Context menu and double-click-to-edit (`contextMenuPick`, `doubleClickToEdit`, act:18‑20)
 
-### Server-sent events (§19) · `runSse` · act:148
+`s.rightclick("#ctx-target", { until: { selector: "#ctx-menu li", visible: true } })` — the `visible`
+matters, the `<li>`s exist in the DOM while the `<ul hidden>` is closed. Then `#ctx-open|rename|delete`
+sets `#ctx-result` to `ctx: Rename`. `s.dblclick("#dbl-target")` swaps the div for an `<input>` and
+`#dbl-state` goes `idle` → `editing`.
 
-`#start-sse` → `GET /api/sse`; `#sse-status` idle → **open** → **done**; 5 events ~500 ms apart, ~2.7 s
-total. The request row is `body_state: streaming` while open and **`missing`** once it closes: SSE
-messages are not captured, so `#sse-log` `<li>`s are the only record.
+### 4.14 Drag: slider and reorder (`setSlider`, `moveItemDownOneSlot`, act:69, act:70, act:80)
 
-### GraphQL over POST (§20) · `graphql` · act:36, act:37
+Slider: `s.drag("#slider-thumb", { dx: 120, dy: 0 })` → `value: 43` (302 px track, 22 px thumb,
+value = percent of travel). Reorder: **`s.drag("#sort-a", "#sort-b")` does nothing** — one straight
+move to the *adjacent* item's centre never crosses its midpoint — while `s.drag("#sort-a", "#sort-c")`
+moves it one slot (`a,b,c` → `b,a,c`). Both releases `POST /api/drag-report`, *including the one that
+changed nothing*, so the request is not evidence. A hand-rolled `s.page.mouse` path with
+`{ steps: 25 }` and an overshoot past the last item moves it to the end (`b,c,a`).
 
-Both operations use the *same* `POST /api/graphql` and both return 200 — a `{ request }` predicate
-cannot tell them apart. The operation is in `requests.req_body`; the response echoes
-`"operation"` and `"sawMutation"`.
+### 4.15 Shadow DOM (`clickShadowButton`, act:95)
 
-### Auth (§21) · `reachSecureArea`, `login`, `logout` · act:92, act:97, act:98, act:99
+The root is **open**, so an ordinary CSS descendant selector pierces it: `#shadow-host #shadow-btn`.
+The counter inside it is invisible to the aria diff — assert through `.shadowRoot` in an `until: { fn }`.
+
+### 4.16 GraphQL over POST (`graphql`, act:21/22)
+
+One endpoint, `POST /api/graphql`, body `{query}`. The response echoes `operation` and `sawMutation`,
+so the server really parses it. **Both are 200** — a GraphQL-level failure would not show as a 4xx;
+check the body.
+
+### 4.17 The fake stream (`loadFakeStream`, act:23)
+
+`GET /api/fake-stream` is served as `text/event-stream` but is a finite 97-byte XML document. It is
+captured normally (`body_state: ok`). Only the genuinely endless `/api/notify-sse` shows
+`body_state: streaming`. **Mime is not evidence of streaming — `body_state` is.**
+
+### 4.18 Push channels (`pushNotification`, act:59‑63)
+
+Arm first, trigger second (the trigger is outside the page's own event flow):
 
 ```ts
-await ctl(s, { requireAuth: true });
-const rep = await s.navigate("/secure.html", { until: { any: [
-  { selector: "#who", label: "secure" }, { selector: "#login-form", label: "login" } ] } });
-if (rep.until.which === "login") await login(s, "demo", "s3cret");
+const p = s.until({ all: [ {ws:"notify"}, {fn:"…#notif-list li.length > N"} ] }, { timeout: 8000 });
+await ctl(s, { push: "ws" });                  // POST /ctl {"push":…}
+reached(await p);
 ```
-With `requireAuth`, **every** HTML page (including `/`) 302s to `/login.html?next=<path>`. Any
-user/pass is accepted (`POST /api/login` → 200, `set-cookie: gauntlet_auth=<user>; Path=/; HttpOnly`),
-and the login page then does `location.href = next` — so do **not** wait on `{url:"/secure.html"}`
-after logging in from `/`: you land wherever `next` said (act:97 cost 5 s learning that). Logout is
-`s.context.clearCookies()`. The login page checks only `r.ok`, so `/api/login`'s body is `missing` in
-the log unless you fetch it yourself.
 
-### Push channels (§23) · `push`, `enablePollChannel` · act:107–112
+| Channel | Where the evidence is | Latency |
+|---|---|---|
+| `ws` | a `ws_frames` row `{"type":"notify","n":4,"via":"ws",…}` **and** the DOM | ~13 ms |
+| `sse` | **the DOM only** — `/api/notify-sse` is `body_state: streaming`, messages are never captured | ~8 ms |
+| `poll` | the `GET /api/notify-poll` response (`landed: true`) **and** the DOM | ~126 ms |
 
-`POST /ctl {"push":"ws"|"sse"|"poll"}` delivers one notification down the named channel;
-`#notif-count` increments and `#notif-list` gains `Result N via <channel>`. ws and sse arrive in
-under 5 ms on channels that are standing from page load. **The poll channel does not exist unless
-`ctl.notify` is true** (client-side knob → reload); with it off, `{"push":"poll"}` is silently
-dropped — I burned 30 s of budget on that before checking `SELECT … WHERE path LIKE '%notify%'`.
+The long-poll channel only exists when `ctl.notify` is on: the page then holds a `GET /api/notify-poll`
+(pending up to `ctl.notifyPollHoldMs` = 25 s) and reissues it the instant it lands — so the wire line
+in your report shows the *new* pending poll, not the one that answered you.
 
-### Context menu (§24) · `contextMenuPick` · act:20, act:21
+### 4.19 Ambient traffic (`observeAmbient`, act:65)
 
-`s.rightclick("#ctx-target", { until: { selector: "#ctx-menu[role=menu]" } })` then click
-`#ctx-open|#ctx-rename|#ctx-delete` with `until: { gone: "#ctx-menu" }` → `#ctx-result` "ctx: Rename".
+`ctl.ambient` turns on `GET /api/heartbeat` every `ctl.heartbeatMs` (5 s) and a `GET /api/poll` that
+holds `ctl.pollHoldMs` (3 s) and reissues, plus a server WS push every `ctl.wsPushMs` (7 s). They land
+inside whatever act happens to be open — this is the "poll that is in every report". Header counters
+`#heartbeat-count` / `#poll-count` are the cheap assertion.
 
-### Double-click to edit (§25) · `editValue` · act:22, act:151–153
+### 4.20 Session timeout (`sessionTimeoutAndRecover`, act:67/68)
 
-`dblclick #dbl-target` → `until { selector: "#dbl-input" }` (the div is *replaced* by an input) →
-`fill` → `press Enter` → `#dbl-state` becomes **`committed: <value>`** (not "saved" — I guessed "saved"
-and paid 5 s) and `#dbl-target` shows the new text.
+`ctl.timeoutMs` of idleness raises a `[role=dialog]` "Session expiring / Your session will expire due
+to inactivity / Stay signed in" and sets `#timeout-state` to `expired`. Clicking **Stay signed in**
+(`until: { gone: "[role=dialog]" }`) resets the state to `off`.
 
-### Slider and list reorder (§26) · `setSlider`, `moveItemToEnd` · act:33, act:34
+### 4.21 Auth (`gotoSecure`, `login`, `logout`, act:52/53)
 
-`s.drag(target, to)` only accepts a **selector** as the destination — passing `{x,y}` fails with
-`error — locator.dragTo: target: expected string, got undefined`, so a slider needs raw
-`s.page.mouse.move/down/move({steps})/up`. 75 % of the track → `#slider-value` 77.
-For `#sort-list`, `s.drag("#sort-a","#sort-c")` moves the item exactly **one** slot (`a,b,c` → `b,a,c`);
-a stepped path past the bottom edge of `#sort-c` gives `b,c,a`. Every drop POSTs
-`/api/drag-report {"widget":"sort","order":"b,c,a"}`.
-
-### Fake stream (§28) · `loadFakeStream` · act:38
-
-`GET /api/fake-stream` is served as `text/event-stream` but is an ordinary finite 97-byte body
-(`<envelope>…</envelope>`) which the page reads with `.text()`. It is captured normally
-(`body_state: ok`) — an event-stream mime is not evidence of a stream.
+With `ctl.requireAuth`, `GET /secure.html` **and `GET /`** become `302 → /login.html?next=<path>`.
+The form is `#user` / `#pass` / `#login`, errors in `#login-error`. `POST /api/login` accepts **any
+non-empty user and pass** (`admin`/`admin` is not a credential, just the first pair I tried) and sets
+`gauntlet_auth=<user>; HttpOnly`; only an empty field is a 401. After login you go wherever `?next=`
+said. Read the cookie from `resp_headers` or `s.context.cookies()` — `document.cookie` is empty.
+`s.context.clearCookies()` is the logout.
 
 ## 5. Interstitials and recovery
 
 | Interstitial | When | Handling |
 |---|---|---|
-| `#record-modal` "Allergy Review Required" | any record while `ctl.modal`; possibly `ctl.modalDelayMs` **after** the record renders | `any`-of `[dialog, record]`, then `dismissRecordModal(s)` (click `#modal-ack`, `until: { gone: "#record-modal" }`) |
-| `#session-timeout` "Session expiring" | `ctl.timeoutMs` ms of idle | `#stay` with `until: { gone: "#session-timeout" }`; it re-arms, so expect it again |
-| native `alert` / `confirm` | `#alert` / `#confirm` | handled by the session's `dialogs` mode; they appear in `report.dialogs` |
-| native `beforeunload` | any navigation once `#arm-unload` is armed | accept → you leave; dismiss → you stay |
-| `/login.html?next=…` | any page while `ctl.requireAuth` | add `{ selector: "#login-form", label: "login" }` as an arm of your anchors; `login()` costs ~200 ms |
-| a leftover child window | after `#open-child` | `s.closeOtherPages()` — otherwise the driven page is throttled |
+| `#record-modal` "Allergy Review Required" | opening any record while `ctl.modal`; possibly `ctl.modalDelayMs` late | `any` arm + a grace window, then `#record-modal button` with `until: { gone }` |
+| `[role=dialog]` "Session expiring" | `ctl.timeoutMs` of idle | click "Stay signed in", `until: { gone: "[role=dialog]" }` |
+| `/login.html?next=…` | `ctl.requireAuth` and no cookie — on **any** page including `/` | make `#login` an arm of the home anchor; log in and continue |
+| native `alert` / `confirm` / `beforeunload` | §11 buttons and the away link | session policy (`dialogs: "accept"`), recorded in `dialogs` |
+| a leftover popup | after §15 | `s.closeOtherPages()` |
 
-**Recovery, in order:** `POST /ctl/reset` (kills every knob-driven hazard) → `s.context.clearCookies()`
-→ `s.navigate("http://localhost:4800/", { until: { selector: "#load-chart" } })`. A reload clears any
-open overlay, the WS reconnects and every counter resets. That is exactly `atShell(s, {reload:true})`.
+**Recovery from anywhere:** `goHome(s)` — `s.navigate("http://localhost:4800/")` with
+`until: { any: [ {selector:"#load-chart"}, {selector:"#login"} ] }`. It always navigates, on purpose:
+a reload is ~150 ms and it is the only way to make the page's WebSocket visible to your session (§7).
+`ctlReset(s)` puts the knobs back.
 
 ## 6. Input recipes
 
-- **Combobox `#med`** — `type`, wait for `/api/meds`, `press("ArrowDown")` once per option down the
-  wire's ordering, `press("Enter")`. Never click an option (`pointer-events: none`).
-- **Search `#search`** — `fill("")` to clear, then `type` (a `fill` does not produce the keystrokes the
-  250 ms debounce listens for reliably), wait on `{ request: "/api/search", landed: true }`.
-- **`#rerender`** — `{ js: true }` always; a real click is `detached`.
-- **Slider `#slider-thumb`** — raw `page.mouse` with `steps: 12`; then `until: { fn }` on
-  `#slider-value`, because the drop is applied on the next event.
-- **`#sort-list`** — a stepped mouse path past the target's far edge; `s.drag()` moves one slot only.
-- **Canvas `#grid`** — `s.scroll("#grid")` first, then `page.mouse.click(box.x+1+cx, box.y+1+cy)`.
-- **Edit `#dbl-target`** — `dblclick` → `#dbl-input` → `fill` → `Enter`.
-- **Child window** — bare click + `window: 1200`, then plain Playwright on the page object.
+- **`s.type` appends.** Typing `asp` into a `#med` that already held `Aspirin` produced
+  `GET /api/meds?q=Aspirinasp` and a 5 s timeout. `s.fill(target, "")` first, every time.
+- **Combobox:** clear → `type` with `until: { request: <full prefix>, landed: true }` → `press("ArrowDown")`
+  → `press("Enter")`. The mouse is never needed and is unreliable: the list is re-rendered on every
+  keystroke and removed on selection, so a click on `#med-opt-0` usually lands on nothing.
+- **Re-render race:** `{ js: true }`.
+- **Reorder drag:** target the item **two** slots away, not the adjacent one.
+- **Slider:** offset drag `{ dx, dy: 0 }` from the thumb; assert with
+  `until: { all: [ <value changed>, { request: "/api/drag-report" } ] }` — the DOM value updates on
+  mousemove, *before* the POST is issued on mouseup, so a value-only `until` returns too early for an
+  act-scoped store read.
+- **Hidden menus:** `until: { selector: "#ctx-menu li", visible: true }` — the nodes exist while hidden.
+- **Canvas:** `position: { x, y }` + a `getImageData` `until: { fn }`.
+- **Login twice:** reload the form between attempts, or the stale `#login-error` makes your error arm
+  `alreadyTrue`.
 
 ## 7. Gotchas
 
-1. **`#chart-status` returns to `idle`.** Never a postcondition. Same shape: `#rows-count` exists but
-   is empty before loading; `[role=status]` still holds the *previous* toast; `#load-chart` is already
-   true for "we stayed on the shell". Pick something that is false beforehand or the report says
-   `⚠ already true — proves nothing` (it did, four times, and it was right every time).
-2. **`#save-state` lies permanently.** A failed save still reads `Saved ✓`. Use
-   `requests.status` on `/api/save/status`.
-3. **Optimistic body-less responses.** `/api/save/status`, `/api/login` and `/api/drag-report` are
-   never read by the page → `body_state: missing/pending`. The status code is the signal.
-4. **`text/event-stream` ≠ streaming** (`/api/fake-stream`), and a real stream's messages are *not*
-   in the log (`/api/sse`, `/api/notify-sse`) — read the DOM for those.
-5. **Client-side ctl knobs need a reload**: `ambient`, `heartbeatMs`, `pollHoldMs`, `wsPushMs`,
-   `timeoutMs`, `notify`, `notifyPollHoldMs`, `renderDelayMs`. `#ctl-state` shows what the page believes.
-6. **`ctl.renderDelayMs` decouples the DOM from the wire** — for the chart only. A `{ request, landed }`
-   postcondition can be true while the screen is still empty.
-7. **Ambient rows appear in unrelated reports.** They carry `action_id IS NULL` between acts;
-   attribution is a time window, not a classifier.
-8. **The aria diff is main-frame only.** iframe contents never appear in `report.ui`.
-9. **State leaks between scripts.** An overlay, a logged-in cookie, a flipped knob and an open child
-   window all survive. Every `lib.ts` entry point starts with `atShell(s)`.
-10. **`{ url: "/" }` is always true**, and after a login from `/` you land on `next`, not `/secure.html`.
-11. **Read the wire by act id, not by "latest".** `apps/gauntlet/store/` outlives browsers, and `t` /
-    `t_start` restart with every run — so `latestJson(...)` and `ORDER BY t DESC` can hand you a row
-    from a previous session. `lib.ts` uses `jsonFrom(s, rep, url)` / `statusFrom(s, rep, url)`, which
-    scope to `rep.action`; for `ws_frames` use `seq` (a global AUTOINCREMENT), never `t`. This is what
-    turned a warm-green check red the first time I ran it against a fresh browser.
+1. **`#chart-status` never changes.** The spinner lies; anchor on `#chart`.
+2. **`Saved ✓` is a lie too**, and permanent. The truth is `GET /api/save/status`'s **status code**;
+   its body is never read (`body_state: missing`).
+3. **WebSocket frames are only captured for sockets opened while your session was attached.** The
+   socket opens on page load, so a script that *joins* an already-loaded page sees **zero** frames and
+   `until: { ws }` silently burns its whole budget. Navigate (reload) inside your session first. This
+   cost me a confused ten minutes and is the single most surprising thing in the pack.
+4. **`text/event-stream` ≠ streaming.** `/api/fake-stream` is captured; `/api/notify-sse` is not.
+   Check `body_state`.
+5. **`POST /api/drag-report` fires even when the drag did nothing.** A 200 on the wire is not proof of
+   a reorder; assert `#sort-order`.
+6. **The header statusbar changes on nearly every act** (ws/frames/heartbeats/last frame/ctl). Set
+   `s.uiIgnore = [/ws: open/, /last ws frame/, /effective ctl/, /heartbeats/]` or every report is noise.
+7. **The aria diff glues adjacent elements** into one line (`"status: idle Chart loaded (3 responses)"`,
+   `"Right-click me result: ctx: Rename"`). Anchor on ids.
+8. **`ctl.requireAuth` guards `/` too**, not just `/secure.html`.
+9. **`#noop-disabled` is diagnosed `disabled` in ~100 ms**, before any hit test — so the
+   `pointer-events: none` trap on its `.field-wrap` parent never actually fires through disco.
+10. **`#noop` is a true no-op**: it costs exactly the 700 ms window and produces nothing — not even a
+    WS frame (it is the one button excluded from the `action` frame).
+11. **Two different "Back to the gauntlet" links**: `a#back` on `/away.html`, `a#home` on
+    `/secure.html`. Anchor on the id.
+12. **State leaks between scripts.** A second script joins the browser where the last one left it —
+    mid-modal, on `/away.html`, with knobs flipped. Start with `goHome` + `ctlReset`.
 
 ## 8. Open questions
 
-- `ctl.renderDelayMs` only visibly delayed the chart. Does it gate anything else? Experiment: set it
-  to 2000, reload, and walk every section with `{ request, landed: true }` postconditions, timing the
-  gap to each section's DOM anchor.
-- `ctl.rerenderOnHover: false` — is `#rerender` then clickable with a real mouse? Experiment: set it,
-  reload, `s.click("#rerender")` without `js:true` and expect no `detached`.
-- Does user activity (not just `#stay`) reset the idle timer? Experiment: `timeoutMs: 3000`, reload,
-  click `#noop` every second and assert `#session-timeout` never appears within 8 s.
-- Is `#alert`'s dialog ever `dismiss`-able into a different `#alert-result`? (An alert has no cancel;
-  I expect "alerted" either way, untested.)
-- Section 27 is missing from the page (sections run 1–26 then 28). Something is either unimplemented
-  or hidden behind a knob I did not find; `GET /ctl` has no obviously matching key.
-- `/api/grid`'s `cells[].label` never appears on screen. Is it drawn at a zoom level, or dead payload?
+- **Does the modal depend on the record, or only on `ctl.modal`?** All five records carry allergies,
+  so I could not separate them (act:88‑92 — with `modal:true` all five raise it, with `modal:false`
+  none do). The experiment: add a record with `allergies: []` server-side, or find one — I did not.
+- **`ctl.renderDelayMs`** — I set it to 600 together with `modalDelayMs` (act:93) and never isolated
+  what it delays on its own. Experiment: set only `renderDelayMs` and time `#record h3` against
+  `GET /api/record/:id`'s `t_end`.
+- **`dialogs: "dismiss"`** — I only ever ran the default `accept`. With `dismiss`, `#nav-away` should
+  leave you on `/`. Experiment: `open(app, { dialogs: "dismiss" })`, then `armUnloadAndNavigateAway`.
+- **The child window's `#child-fetch`** — I read `/child.html` and its `GET /api/child-ping` handler
+  but never clicked it, so I have not confirmed a popup's requests are attributed to the driving act.
+- **`ctl.wsPushMs`** (server-initiated WS push under `ambient`) — I confirmed heartbeat and poll but
+  did not wait out the 7 s push. Experiment: `observeAmbient` with an `until: { ws: "notify" }` arm and
+  a 9 s budget.
+- **`#ws-count` vs `ws_frames`** — the header counts frames the *page* saw; whether it ever disagrees
+  with the log (dropped frames, reconnects) is untested.

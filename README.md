@@ -91,7 +91,14 @@ await s.close();                                     // disconnect; the browser 
 
 `reached(report)` throws with the diagnosis unless the action was performed *and* its `until` held.
 Everything else is the report, returned as data; `formatReport(report)` renders it as the text the CLI prints —
-log it while exploring.
+log it while exploring. When either outcome is fine — an interstitial that may or may not appear — don't
+`reached` the `any`; branch on it:
+
+```ts
+const r = await s.click("#open-record", { until: { any: [{ selector: "#record h3", label: "record" }, { selector: "[role=dialog]", label: "dialog" }] } });
+if (!r.until?.ok) throw new Error(r.until?.diagnosis?.message);
+if (r.until.which === "dialog") reached(await s.click("#modal-ack", { until: { gone: "[role=dialog]" } }));
+```
 
 ---
 
@@ -150,12 +157,12 @@ way (`s.page.getByRole(…)`, `s.page.route(…)`). `s.context`, `s.browser`. `s
 |---|---|
 | `s.click(target, o)` | `act({ kind: "click", target, ...o })` |
 | `s.dblclick(target, o)` · `s.rightclick(target, o)` | `kind: "dblclick"` · `kind: "click", button: "right"` |
-| `s.fill(target, text, o)` | sets the value (one input event) |
-| `s.type(target, text, o)` | keystrokes — for debounced/keyboard widgets |
+| `s.fill(target, text, o)` | **replaces** the value (one input event) |
+| `s.type(target, text, o)` | keystrokes **appended** to the current value — for debounced/keyboard widgets; `fill(target, "")` first to start clean |
 | `s.press(key, { target?, ...o })` | `Enter`, `ArrowDown`, `Control+a` … on the target or the focused element |
 | `s.select(target, value, o)` | `<select>` by value/label |
 | `s.hover(target, o)` | |
-| `s.drag(target, to, o)` | mouse down on the target, move to `to`, release. `to` is an element (Playwright `dragTo`: one straight move, which reorders a list by one slot) or an offset `{ dx, dy }` from the target's centre (sliders). `s.page.mouse` for custom paths |
+| `s.drag(target, to, o)` | mouse down on the target, move to `to`, release. `to` is an element (Playwright `dragTo`: one straight move to its centre — a sortable list often needs the pointer past the *next* item's midpoint, so drop on the item two slots away) or an offset `{ dx, dy }` from the target's centre (sliders). `s.page.mouse` for custom paths |
 | `s.scroll(target \| deltaY, o)` | scroll an element into view, or wheel the page |
 | `s.navigate(url, o)` | `goto`, waits for commit only |
 | `s.until(pred, { timeout })` | wait without acting (`kind: "noop"`) |
@@ -205,7 +212,7 @@ act:6 click #record-2  ok  299ms (act 78 · until 200 · report 10)  http://loca
 | `until` | `{ ok, elapsedMs, which?, error?, diagnosis?, alreadyTrue? }` |
 | `url` | the page URL after the window |
 | `ui` | `{ added, removed }` lines of the aria snapshot (the page's accessibility tree) that changed. The main frame only — iframes appear as nodes, their contents do not |
-| `requests` | every request started in the window: `method path status ms mime body(hash prefix) size [state]`. `[pending]` = still in flight at report time; the log row is completed later |
+| `requests` | every request started in the window — plus any that started *earlier* and answered inside it (`(started earlier)`: the long-poll that just delivered). `← until` marks the response a `request` predicate matched (`until.request` is its id). `[pending]` = still in flight at report time; `[body pending]` = headers in, body not yet |
 | `console` | errors, exceptions and warnings inside the window |
 | `dialogs` | native dialogs inside the window and how they were handled |
 | `pages` | URLs of pages opened inside the window (popups, `window.open`) |
@@ -237,7 +244,7 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 
 | Predicate | Holds when | Use it for |
 |---|---|---|
-| `{ selector, visible?, frame? }` | an element matches (and is visible) | the landmark of the next screen: a heading, a specific row, a status text — `#status:has-text("idle")` |
+| `{ selector, visible?, frame? }` | a matching element is **visible** (`visible: false`: merely attached, hidden or not) | the landmark of the next screen: a heading, a specific row, a status text — `#status:has-text("idle")` |
 | `{ gone: selector, frame? }` | no visible match | a spinner, a modal, a "loading" row |
 | `{ text }` | visible text anywhere | when you only know the words |
 | `{ url }` | a string: the URL *without its query string* contains it (a string containing `?` matches the whole href); a RegExp: tests the whole href | navigations, logins, route changes. The query-string rule exists because `login?next=/account` contains `/account`. `{ url: "/" }` is always true — for "back to the shell", wait on the shell's element |
@@ -245,7 +252,7 @@ Every diagnosis carries `url`, the open `dialogs` (`[role=dialog]`, `aria-modal`
 | `{ fn, arg? }` | `page.waitForFunction` returns truthy | everything else: `"document.querySelector('#x')?.dataset.state === 'ready'"` |
 | `{ any: [...] }` | the first arm that holds; `until.which` names it (`label` or its description) | success **or** the app's own failure: `any: [ok, errorBanner]` |
 | `{ page }` | a new page (popup, `window.open`) opens whose URL contains / matches | child windows, print views, documents |
-| `{ ws, dir? }` | a WebSocket frame is received (`dir: "out"`: sent) whose payload contains / matches | push channels — the notification itself, not its rendering |
+| `{ ws, dir? }` | a WebSocket frame is received (`dir: "out"`: sent) whose payload contains / matches — on any socket of any page, including sockets opened before this session joined | push channels — the notification itself, not its rendering |
 | `{ all: [...] }` | every arm holds | the screen *and* the request |
 
 Give arms a `label` and `until.which` reads well. The budget is `timeout` (default 5 s) for the whole
@@ -294,13 +301,14 @@ st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, r
 st.latestJson("/api/me", "act:9");                 // parsed body of the newest matching response — scope it to the act whose report showed it
 st.json(hash) · st.body(hash) · st.bytes(hash)     // a body by hash or 16-char prefix
 st.action("act:9")                                 // the stored row, report parsed
-st.sql("SELECT …")                                 // anything
+st.sql("SELECT … WHERE path=? AND status=?", "/api/me", 200)   // anything, with bind arguments
 ```
 
 Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (headers as JSON, `req_body`,
 `body_hash`, `body_state` = `ok | truncated | missing | streaming | error | pending`, `action_id`) ·
 `bodies` (text under 512 KB, FTS5 as `bodies_fts`) · `ws_frames` · `console` · `dialogs` · `nav` ·
-`shots` · `notes`. Every row has `run`; time is `t` (ms since the run started) — except `requests`, which has
+`shots` · `notes`. `requests` is keyed by `id` (`r<run>-<n>`); every other table by `seq`. A screenshot's
+hash is content-addressed — two identical screens give the same hash. Every row has `run`; time is `t` (ms since the run started) — except `requests`, which has
 `t_start`, `t_response`, `t_end`. The report's wire line prints `body_size` as "size". Useful one-liners:
 
 ```sql
@@ -363,7 +371,10 @@ export async function check(s, step) {
 ```
 
 `node scripts/run-check.ts shop` (or `npm run check -- shop`) prints `PASS/FAIL name (ms)` per step and
-exits non-zero on any failure. `--headed` to watch, `--close` to kill the browser afterwards.
+exits non-zero on any failure. `--headed` to watch, `--close` to kill the browser afterwards, `--bail` to
+stop at the first failure. Steps run in order and share the browser, so a step that leaves a dialog open
+fails every step after it: start each step from an anchor (reach the shell) and end each with the app as
+you found it.
 
 ---
 
@@ -380,7 +391,8 @@ exits non-zero on any failure. `--headed` to watch, `--close` to kill the browse
 
 Set them per session (`open(app, { timeouts })`), per act (`timeout`, `window`). Raise a budget when the
 app is genuinely slow *for that step*, and write the number down in the app's README; never raise the
-defaults to make a flaky predicate pass.
+defaults to make a flaky predicate pass. While *exploring*, pass a short `timeout` (1000–1500) to probes
+whose outcome you are unsure of — an expired 5 s budget is the most expensive thing in a session.
 
 ---
 
@@ -407,7 +419,9 @@ with `until: { request: <the suggestions endpoint you saw in the bare report>, l
 the recipe verbatim in the README.
 
 **Auth and expiry.** Log in with an `until: { url }` (or `any` of the landing anchor and the error
-banner). Note the cookie name from `resp_headers`. Expiry usually arrives as a dialog or a redirect to
+banner). The endpoint tells you more than the form: `requests({ url: "/login", method: "POST" })` shows the
+credential shape in `req_body` and the cookie in `resp_headers`; `s.evaluate("fetch(…)")` lets you probe it
+(wrong password, empty fields) in seconds, and the probes land in the log. Expiry usually arrives as a dialog or a redirect to
 the login URL — add the login URL as an arm of your workflow anchors so a refusal costs milliseconds.
 
 **When a report surprises you,** the log has more than the report: `SELECT * FROM requests WHERE
@@ -419,6 +433,10 @@ action_id='act:n'` for headers and bodies, `SELECT * FROM console WHERE t BETWEE
 
 **Never:** `sleep`; raise a timeout to hide a wrong predicate; assert a fact off the screen when the
 response that carried it is in the log; retry a diagnosis without reading it.
+
+**Frames and shadow roots.** Iframes need `frame:` (`frame: "#outer >> #inner"` when nested); shadow DOM
+needs nothing — Playwright's css pierces open shadow roots, so `s.click("#shadow-btn")` and
+`until: { selector: "#shadow-count:has-text('1')" }` work as if there were no boundary.
 
 **Selector gotchas.** `:has-text("armed")` is a case-sensitive *substring* match — it matches "unarmed";
 use `:text-is("armed")` or `text="armed"` for whole strings. A lingering toast from the previous step

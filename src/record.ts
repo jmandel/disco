@@ -1,6 +1,6 @@
 // The recorder: Playwright context/page events → store rows. Passive; nothing in the page is touched.
 // Records while the Session is open (a script) or while a CLI command runs (`disco record` for longer).
-import type { BrowserContext, Page, Request, Response, WebSocket } from "playwright-core";
+import type { BrowserContext, CDPSession, Page, Request, Response } from "playwright-core";
 import { Store, REQ_BODY_CAP, WS_PAYLOAD_CAP } from "./store.ts";
 
 export type DialogPolicy = "accept" | "dismiss";
@@ -11,11 +11,15 @@ export interface Recorder {
   /** Wait (bounded) for in-flight async writes — response headers and bodies — so a report sees them. */
   flush(maxMs: number): Promise<void>;
   detach(): void;
-  /** Live WebSockets seen since recording began (for the `ws` predicate). */
-  sockets(): WebSocket[];
-  onSocket(cb: (ws: WebSocket) => void): void;
-  offSocket(cb: (ws: WebSocket) => void): void;
+  /** Every WebSocket frame on every page — including sockets opened before this session joined (for the `ws` predicate). */
+  onFrame(cb: (f: WsFrame) => void): void;
+  offFrame(cb: (f: WsFrame) => void): void;
+  /** The log id of a Playwright Request (to mark the row an `until` matched). */
+  idOf(r: Request): string | undefined;
+  /** Resolves once the initial listeners (including the CDP socket watchers of existing pages) are in place. */
+  ready: Promise<void>;
 }
+export interface WsFrame { dir: "in" | "out"; payload: string; url: string }
 
 export function attachRecorder(context: BrowserContext, store: Store, current: () => string | null, dialogs: DialogPolicy): Recorder {
   const ids = new WeakMap<Request, string>();
@@ -68,7 +72,27 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   };
 
   const pageCleanups = new Map<Page, () => void>();
-  const live = new Set<WebSocket>(); const socketCbs = new Set<(ws: WebSocket) => void>();
+  const frameCbs = new Set<(f: WsFrame) => void>();
+  const cdpSessions = new Set<CDPSession>();
+  // WebSocket frames come from a CDP Network session per page rather than Playwright's `websocket` event, which
+  // only reports sockets created after the listener exists: a script joining a live page must still see frames.
+  const watchSockets = async (page: Page) => {
+    let cdp: CDPSession;
+    try { cdp = await context.newCDPSession(page); await cdp.send("Network.enable"); } catch { return; }
+    cdpSessions.add(cdp);
+    const urls = new Map<string, string>();
+    const urlOf = (id: string) => urls.get(id) ?? "(opened before recording)";
+    const frame = (dir: "in" | "out", id: string, payload: string) => {
+      const f: WsFrame = { dir, payload: String(payload), url: urlOf(id) };
+      store.insert("ws_frames", { t: store.now(), url: f.url, dir, payload: cap(f.payload, WS_PAYLOAD_CAP), action_id: current() });
+      for (const cb of frameCbs) cb(f);
+    };
+    cdp.on("Network.webSocketCreated", (e: any) => { urls.set(e.requestId, e.url); store.insert("ws_frames", { t: store.now(), url: e.url, dir: "open", action_id: current() }); });
+    cdp.on("Network.webSocketFrameReceived", (e: any) => frame("in", e.requestId, e.response?.payloadData ?? ""));
+    cdp.on("Network.webSocketFrameSent", (e: any) => frame("out", e.requestId, e.response?.payloadData ?? ""));
+    cdp.on("Network.webSocketClosed", (e: any) => { store.insert("ws_frames", { t: store.now(), url: urlOf(e.requestId), dir: "close", action_id: current() }); urls.delete(e.requestId); });
+    page.once("close", () => { cdpSessions.delete(cdp); cdp.detach().catch(() => {}); });
+  };
   const onPage = (page: Page) => {
     const handlers = {
       console: (m: any) => store.insert("console", { t: store.now(), level: m.type(), text: cap(m.text(), 2000), url: m.location()?.url ?? null, action_id: current() }),
@@ -80,16 +104,9 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       framenavigated: (f: any) => { if (f === page.mainFrame()) store.insert("nav", { t: store.now(), kind: "navigated", url: f.url(), action_id: current() }); },
       close: () => store.insert("nav", { t: store.now(), kind: "closed", url: safeUrl(page), action_id: current() }),
       download: (d: any) => store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }),
-      websocket: (ws: WebSocket) => {
-        const url = ws.url();
-        live.add(ws); for (const cb of socketCbs) cb(ws);
-        store.insert("ws_frames", { t: store.now(), url, dir: "open", action_id: current() });
-        ws.on("framesent", (f) => store.insert("ws_frames", { t: store.now(), url, dir: "out", payload: cap(String(f.payload), WS_PAYLOAD_CAP), action_id: current() }));
-        ws.on("framereceived", (f) => store.insert("ws_frames", { t: store.now(), url, dir: "in", payload: cap(String(f.payload), WS_PAYLOAD_CAP), action_id: current() }));
-        ws.on("close", () => { live.delete(ws); store.insert("ws_frames", { t: store.now(), url, dir: "close", action_id: current() }); });
-      },
     };
     for (const [ev, fn] of Object.entries(handlers)) page.on(ev as any, fn as any);
+    track(watchSockets(page));
     pageCleanups.set(page, () => { for (const [ev, fn] of Object.entries(handlers)) page.off(ev as any, fn as any); });
   };
   const onNewPage = (page: Page) => {
@@ -100,18 +117,22 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   };
 
   context.on("request", onRequest); context.on("response", onResponse); context.on("requestfinished", onFinished); context.on("requestfailed", onFailed);
-  for (const p of context.pages()) onPage(p);
+  const initial: Promise<unknown>[] = [];
+  for (const p of context.pages()) { onPage(p); initial.push(...[...pending].slice(-1)); }
   context.on("page", onNewPage);
 
   return {
+    ready: Promise.allSettled(initial).then(() => {}),
     async flush(maxMs) {
       if (!pending.size) return;
       await Promise.race([Promise.allSettled([...pending]), new Promise((r) => setTimeout(r, maxMs))]);
     },
-    sockets: () => [...live],
-    onSocket: (cb) => { socketCbs.add(cb); },
-    offSocket: (cb) => { socketCbs.delete(cb); },
+    onFrame: (cb) => { frameCbs.add(cb); },
+    offFrame: (cb) => { frameCbs.delete(cb); },
+    idOf: (req) => ids.get(req),
     detach() {
+      for (const c of cdpSessions) c.detach().catch(() => {});
+      cdpSessions.clear();
       context.off("request", onRequest); context.off("response", onResponse); context.off("requestfinished", onFinished); context.off("requestfailed", onFailed);
       context.off("page", onNewPage);
       for (const c of pageCleanups.values()) c();

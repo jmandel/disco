@@ -3,9 +3,9 @@
 // or a diagnosis when the action could not be performed. Every wait is short and named.
 import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Browser, BrowserContext, FrameLocator, Locator, Page, WebSocket } from "playwright-core";
+import type { Browser, BrowserContext, FrameLocator, Locator, Page } from "playwright-core";
 import { Store, appStoreDir, appDir, openStore, type StoreReader } from "./store.ts";
-import { attachRecorder, type DialogPolicy, type Recorder } from "./record.ts";
+import { attachRecorder, type DialogPolicy, type Recorder, type WsFrame } from "./record.ts";
 import { readBrowserInfo, writeBrowserInfo, isAlive, launchChromium, attachEndpoint, connect, killLaunched, type BrowserInfo } from "./browser.ts";
 
 // ---------------------------------------------------------------------------------------------
@@ -25,6 +25,7 @@ export const DEFAULT_TIMEOUTS: Timeouts = { action: 3000, until: 5000, window: 7
 /** `landed` waits this long past the response headers for the body to finish; a body the page never reads never does. */
 export const LANDED_BOUND_MS = 1000;
 /** A string url predicate matches the href without its query string (unless the string itself contains '?'); a RegExp sees the whole href. */
+function originOf(u: string): string { try { return new URL(u).origin; } catch { return ""; } }
 function sameUrl(a: string, b: string): boolean { const n = (x: string) => x.replace(/#.*$/, "").replace(/\/+$/, ""); return n(a) === n(b); }
 export function urlMatches(u: string | RegExp, href: string): boolean {
   if (typeof u !== "string") return u.test(href);
@@ -33,7 +34,7 @@ export function urlMatches(u: string | RegExp, href: string): boolean {
 }
 
 export type Pred =
-  | { selector: string; visible?: boolean; frame?: string; label?: string }   // an element exists (visible: true → is visible)
+  | { selector: string; visible?: boolean; frame?: string; label?: string }   // an element is visible (visible: false → merely attached, hidden or not)
   | { gone: string; frame?: string; label?: string }                          // an element is hidden or detached
   | { text: string; label?: string }                                          // visible text anywhere on the page
   | { url: string | RegExp; label?: string }                                  // string: URL without its query contains it (with it, if the string has a '?'); RegExp: whole href
@@ -76,8 +77,8 @@ export interface Diagnosis {
   url?: string;
   shot?: string;               // screenshot blob hash
 }
-export interface UntilResult { ok: boolean; elapsedMs: number; which?: string; error?: string; diagnosis?: Diagnosis; /** the predicate already held before the action was dispatched — it proved nothing */ alreadyTrue?: boolean }
-export interface WireLine { id: string; method: string; path: string; status?: number | null; ms?: number | null; mime?: string | null; body?: string | null; size?: number | null; state?: string | null; type?: string | null }
+export interface UntilResult { ok: boolean; elapsedMs: number; which?: string; error?: string; diagnosis?: Diagnosis; /** the predicate already held before the action was dispatched — it proved nothing */ alreadyTrue?: boolean; /** the log id of the response a `request` predicate matched */ request?: string }
+export interface WireLine { id: string; method: string; path: string; status?: number | null; ms?: number | null; mime?: string | null; body?: string | null; size?: number | null; state?: string | null; type?: string | null; /** started before the window and finished inside it (a long-poll that answered you) */ earlier?: boolean; /** the response the `until` matched */ until?: boolean }
 export interface Report {
   action: string;              // act:<n>
   kind: Kind | "until";
@@ -131,16 +132,16 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
   const browser = await connect(info);
   const context = browser.contexts()[0] ?? (await browser.newContext());
   const pages = context.pages();
-  let page = pages[opts.page ?? 0];
-  if (!page) {
-    if (opts.url && info.mode === "attach") page = pages.find((p) => p.url().includes(opts.url!)) ?? pages[0];
-    page = page ?? (await context.newPage());
-  }
+  // pages() is not in creation order after a reconnect: prefer the page already at `url` (then its origin), never a popup by accident
+  let page = opts.page !== undefined ? pages[opts.page] : undefined;
+  if (!page && opts.url) page = pages.find((p) => sameUrl(p.url(), opts.url!)) ?? pages.find((p) => p.url().includes(opts.url!)) ?? pages.find((p) => originOf(p.url()) === originOf(opts.url!));
+  page = page ?? pages[0] ?? (await context.newPage());
   await page.bringToFront().catch(() => {});
   const store = new Store(storeDir);
   if (fresh || !store.resumeRun()) store.beginRun({ url: opts.url ?? page.url(), mode: info.mode });
   const s = new Session(app, dir, store, browser, context, page, info, { ...DEFAULT_TIMEOUTS, ...(opts.timeouts ?? {}) }, opts.dialogs ?? "accept");
   s.uiIgnore.push(...(opts.uiIgnore ?? []));
+  await s.recorderReady();
   // navigate when we just launched, or when the page is somewhere else; joining a browser that is already there leaves its state alone
   if (opts.url && (fresh || !sameUrl(page.url(), opts.url))) await s.navigate(opts.url);
   return s;
@@ -172,6 +173,7 @@ export class Session {
     this.recorder = attachRecorder(context, log, () => this.currentAction, dialogs);
   }
 
+  /** @internal */ recorderReady(): Promise<void> { return this.recorder.ready; }
   /** The run this session records into (one `open` of a browser = one run; a script that joins a live browser joins its run). */
   get run(): number { return this.log.run; }
   /** Read-only view of the log with the helpers (`requests`, `json`, `latestJson`, `sql`). */
@@ -290,7 +292,7 @@ export class Session {
       action: id, kind: spec.kind === "noop" ? "until" : spec.kind, target: targetText, matches, ok, diagnosis, until: untilRes,
       url: safe(() => this.page.url(), ""),
       ui: diffAria(preAria, postAria, 40, this.uiIgnore),
-      requests: this.wire(t0, t1),
+      requests: this.wire(t0, t1, untilRes?.request),
       console: this.log.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", this.log.run, t0, t1 + 1),
       dialogs: this.log.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1),
       pages: this.log.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1).map((x) => x.url),
@@ -305,9 +307,9 @@ export class Session {
     return report;
   }
 
-  private wire(t0: number, t1: number): WireLine[] {
-    return this.log.all<any>("SELECT id, method, path, url, status, t_start, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND t_start BETWEEN ? AND ? ORDER BY t_start", this.log.run, t0 - 1, t1 + 1)
-      .map((r) => ({ id: r.id, method: r.method, path: pathOf(r.url, r.path), status: r.status, ms: r.t_end != null ? Math.round(r.t_end - r.t_start) : null, mime: shortMime(r.mime), body: r.body_hash ? r.body_hash.slice(0, 16) : null, size: r.body_size, state: r.body_state, type: r.resource_type }));
+  private wire(t0: number, t1: number, matched?: string): WireLine[] {
+    return this.log.all<any>("SELECT id, method, path, url, status, t_start, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?)) OR id=?) ORDER BY t_start", this.log.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1, matched ?? "")
+      .map((r) => ({ id: r.id, method: r.method, path: pathOf(r.url, r.path), status: r.status, ms: r.t_end != null ? Math.round(r.t_end - r.t_start) : null, mime: shortMime(r.mime), body: r.body_hash ? r.body_hash.slice(0, 16) : null, size: r.body_size, state: r.body_state, type: r.resource_type, ...(r.t_start < t0 - 1 ? { earlier: true } : {}), ...(matched && r.id === matched ? { until: true } : {}) }));
   }
 
   private async resolve(spec: ActSpec): Promise<{ locator: Locator; matches: number } | { diagnosis: Diagnosis }> {
@@ -462,8 +464,9 @@ export class Session {
   private arm(pred: Pred, timeout: number): { wait: () => Promise<UntilResult>; cancel: () => void } {
     const t0 = performance.now();
     let cancelled = false;
-    const p = this.waitPred(pred, timeout).then(
-      (which) => ({ ok: true, elapsedMs: ms(t0, performance.now()), which }),
+    const ctx: ArmContext = {};
+    const p = this.waitPred(pred, timeout, ctx).then(
+      (which) => ({ ok: true, elapsedMs: ms(t0, performance.now()), which, ...(ctx.request ? { request: ctx.request } : {}) }),
       (e) => ({ ok: false, elapsedMs: ms(t0, performance.now()), error: firstLine(e) }),
     );
     p.catch(() => {});
@@ -475,7 +478,7 @@ export class Session {
     try {
       if ("any" in pred) { for (const p of pred.any) if (await this.holdsNow(p)) return true; return false; }
       if ("all" in pred) { for (const p of pred.all) if (!(await this.holdsNow(p))) return false; return true; }
-      if ("selector" in pred) { const l = this.base(pred.frame).locator(pred.selector).first(); return pred.visible ? l.isVisible() : (await l.count()) > 0; }
+      if ("selector" in pred) { const l = this.base(pred.frame).locator(pred.selector).first(); return pred.visible === false ? (await l.count()) > 0 : l.isVisible(); }
       if ("gone" in pred) return !(await this.base(pred.frame).locator(pred.gone).first().isVisible());
       if ("text" in pred) return this.page.getByText(pred.text).first().isVisible();
       if ("url" in pred) return urlMatches(pred.url, this.page.url());
@@ -483,18 +486,19 @@ export class Session {
     return false;
   }
 
-  private waitPred(pred: Pred, timeout: number): Promise<string> {
+  private waitPred(pred: Pred, timeout: number, ctx: ArmContext = {}): Promise<string> {
     const label = pred.label ?? describe(pred);
     const done = (p: Promise<unknown>) => p.then(() => label);
-    if ("any" in pred) return firstFulfilled(pred.any.map((x) => this.waitPred(x, timeout)));
-    if ("all" in pred) return Promise.all(pred.all.map((x) => this.waitPred(x, timeout))).then(() => label);
-    if ("selector" in pred) return done(this.base(pred.frame).locator(pred.selector).first().waitFor({ state: pred.visible ? "visible" : "attached", timeout }));
+    if ("any" in pred) return firstFulfilled(pred.any.map((x) => this.waitPred(x, timeout, ctx)));
+    if ("all" in pred) return Promise.all(pred.all.map((x) => this.waitPred(x, timeout, ctx))).then(() => label);
+    if ("selector" in pred) return done(this.base(pred.frame).locator(pred.selector).first().waitFor({ state: pred.visible === false ? "attached" : "visible", timeout }));
     if ("gone" in pred) return done(this.base(pred.frame).locator(pred.gone).first().waitFor({ state: "hidden", timeout }));
     if ("text" in pred) return done(this.page.getByText(pred.text).first().waitFor({ state: "visible", timeout }));
     if ("url" in pred) { const u = pred.url; return done(this.page.waitForURL((x) => urlMatches(u, x.href), { timeout, waitUntil: "commit" })); }
     if ("request" in pred) {
       const r = pred.request; const match = (url: string) => (typeof r === "string" ? url.includes(r) : r.test(url));
       return done(this.page.waitForResponse((res) => match(res.url()), { timeout }).then(async (res) => {
+        ctx.request = this.recorder.idOf(res.request());
         // a body the page never reads never "finishes" in Chromium (and cannot be fetched at all), so landed waits at most 1 s past the headers
         if (pred.landed) await Promise.race([res.finished(), new Promise((r) => setTimeout(r, LANDED_BOUND_MS))]);
         return res;
@@ -506,16 +510,14 @@ export class Session {
       return done(this.context.waitForEvent("page", { timeout }).then((p) => p.waitForURL((x) => urlMatches(u, x.href), { timeout, waitUntil: "commit" })));
     }
     if ("ws" in pred) {
-      const m = pred.ws; const ev = pred.dir === "out" ? "framesent" : "framereceived";
+      const m = pred.ws;
       const match = (payload: unknown) => (typeof m === "string" ? String(payload).includes(m) : m.test(String(payload)));
       return new Promise<string>((resolve, reject) => {
-        const attached: WebSocket[] = [];
-        const onFrame = (f: { payload: string | Buffer }) => { if (match(f.payload)) { cleanup(); resolve(label); } };
-        const attach = (ws: WebSocket) => { ws.on(ev as "framereceived", onFrame); attached.push(ws); };
+        const want = pred.dir ?? "in";
+        const cb = (f: WsFrame) => { if (f.dir === want && match(f.payload)) { cleanup(); resolve(label); } };
         const timer = setTimeout(() => { cleanup(); reject(new Error(`no WebSocket frame matching ${String(m)} within ${timeout}ms`)); }, timeout);
-        const cleanup = () => { clearTimeout(timer); this.recorder.offSocket(attach); for (const ws of attached) ws.off(ev as "framereceived", onFrame); };
-        for (const ws of this.recorder.sockets()) attach(ws);
-        this.recorder.onSocket(attach);
+        const cleanup = () => { clearTimeout(timer); this.recorder.offFrame(cb); };
+        this.recorder.onFrame(cb);
       });
     }
     return Promise.reject(new Error("unknown predicate " + JSON.stringify(pred)));
@@ -528,7 +530,7 @@ export class Session {
 export function describe(p: Pred): string {
   if ("any" in p) return "any(" + p.any.map(describe).join(", ") + ")";
   if ("all" in p) return "all(" + p.all.map(describe).join(", ") + ")";
-  if ("selector" in p) return (p.visible ? "visible " : "") + p.selector + (p.frame ? ` in ${p.frame}` : "");
+  if ("selector" in p) return (p.visible === false ? "attached " : "") + p.selector + (p.frame ? ` in ${p.frame}` : "");
   if ("gone" in p) return "gone " + p.gone;
   if ("text" in p) return `text "${p.text}"`;
   if ("url" in p) return "url " + String(p.url);
@@ -546,6 +548,8 @@ export function reached(r: Report, what?: string): Report {
   const d = r.diagnosis ?? r.until?.diagnosis;
   throw new Error(`${what ?? r.action}: ${r.ok ? `until failed after ${r.until?.elapsedMs}ms` : r.diagnosis?.reason}${d ? ` — ${d.message}${d.dialogs?.length ? ` (open: ${d.dialogs.join("; ")})` : ""}${d.shot ? ` [shot ${d.shot.slice(0, 12)}]` : ""}` : ""}`);
 }
+
+interface ArmContext { request?: string }
 
 /** Rows whose headers arrived but whose body never finished are bodies the page never read: no recorder will ever complete them. */
 export function sweepUnread(log: Store): void {

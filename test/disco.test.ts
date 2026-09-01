@@ -222,6 +222,29 @@ describe("round-3 friction", () => {
     const miss = await s.until({ ws: "never-in-any-payload" }, { timeout: 300 });
     assert.match(miss.until!.diagnosis!.message, /WebSocket frame/);
   });
+  it("a session that joins after the socket opened still sees its frames (round 4)", async () => {
+    const s2 = await open("t", { appsDir });
+    try {
+      assert.equal(s2.page, s2.context.pages().find((p) => p.url().startsWith(g.origin)) ?? s2.page);
+      const p = s2.until({ ws: "push" }, { timeout: 3000 });
+      await g.ctl.set({ wsPush: true });
+      const r = reached(await p);
+      assert.equal(r.until?.ok, true);
+    } finally { await s2.close(); }
+  });
+  it("the wire marks the response an until matched, and a long-poll that answered inside the window", async () => {
+    const r = reached(await s.click("#load-chart", { until: { request: "/api/chart/b" } }));
+    const hit = r.requests.find((w) => w.until);
+    assert.ok(hit && hit.path.includes("/api/chart/b"), JSON.stringify(r.requests));
+    assert.ok(r.until?.request?.startsWith("r"));
+    await g.ctl.set({ ambient: true, pollHoldMs: 400, heartbeatMs: 60000 });
+    try {
+      reached(await s.navigate(g.origin, { until: { selector: "#load-chart" } }));
+      const p = reached(await s.until({ request: "/api/poll" }, { timeout: 4000 }));
+      const answered = p.requests.find((w) => w.until);
+      assert.ok(answered, JSON.stringify(p.requests));
+    } finally { await g.ctl.reset(); reached(await s.navigate(g.origin, { until: { selector: "#load-chart" } })); }
+  });
   it("until { request } that never fires says whether the request was issued at all", async () => {
     const r = await s.until({ request: "/api/does-not-exist" }, { timeout: 300 });
     assert.match(r.until!.diagnosis!.message, /no request matching .* was issued/);
@@ -235,6 +258,12 @@ describe("round-3 friction", () => {
   });
   it("click with position: a canvas cell", async () => {
     reached(await s.click("#grid", { position: { x: 30, y: 30 }, until: { fn: "window.__gridSelected != null" } }));
+  });
+  it("selector predicates mean visible by default; visible: false means attached", async () => {
+    const r = await s.until({ selector: "#ctx-menu" }, { timeout: 300 });    // exists, hidden until a right-click
+    assert.equal(r.until?.ok, false);
+    const r2 = reached(await s.until({ selector: "#ctx-menu", visible: false }, { timeout: 300 }));
+    assert.equal(r2.until?.ok, true);
   });
   it("uiIgnore drops noisy lines from the diff", async () => {
     s.uiIgnore.push("ws: open");

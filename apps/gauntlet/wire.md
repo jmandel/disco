@@ -1,124 +1,90 @@
 # gauntlet — the wire
 
-Two origins. **Main** `http://localhost:4800` serves the shell, the app code and everything under
-`/api/*`. **x-origin** `http://localhost:4801` serves only the cross-origin iframe and its own
-`/api/xframe-submit` (the value is in `GET /ctl` as `xOrigin`, and on screen in `#x-origin`).
+Origins: **`http://localhost:4800`** (everything) and **`http://localhost:4801`** (the cross-origin
+iframe only; its value is `ctl.xOrigin`). Bodies below are cited by their `body_hash` prefix —
+`./disco body <prefix>` prints them.
 
-All bodies below are cited by `body_hash` prefix; print one with `./disco body <hash>`.
-Statuses/mimes come from `SELECT method, path, status, mime, body_state FROM requests`.
+## Control plane (not part of the app's UI — this is how the exam is configured)
+
+| Endpoint | R/W | Carries |
+|---|---|---|
+| `GET /ctl` | read | the effective knob set, e.g. `d8d884fd3750`: `{"slowMs":400,"renderDelayMs":0,"modal":false,"modalDelayMs":0,"toastMs":2000,"saveFails":false,"ambient":false,"heartbeatMs":5000,"pollHoldMs":3000,"wsPushMs":7000,"timeoutMs":0,"rerenderOnHover":true,"requireAuth":false,"notifyPollHoldMs":25000,"notify":false,"xOrigin":"http://localhost:4801"}` |
+| `POST /ctl` | write | a partial patch; returns the new effective set. `{"push":"ws"\|"sse"\|"poll"}` is a one-shot trigger, not a knob |
+| `POST /ctl/reset` | write | restores the defaults above |
+
+The page GETs `/ctl` on every load and prints it into `#ctl-state`; the WebSocket `hello` frame
+carries it too. **Every "sometimes" behaviour in this app is one of these knobs — nothing is random.**
 
 ## Documents
 
-| Method | Path | Carries |
-|---|---|---|
-| GET | `/` | the whole app shell, one page, sections `#s-1 … #s-28` — `12b605e5d338` |
-| GET | `/app.js` | the client (ES module, ~20 KB) — `b187749b6c87` |
-| GET | `/style.css` | — `2a3bd7d123f5` |
-| GET | `/iframe.html` | same-origin frame, itself embedding `/iframe2.html` — `eadfa92545d7` |
-| GET | `/iframe2.html` | depth-2 frame ("depth-2 island") — `766ff6b55b11` |
-| GET | `http://localhost:4801/xframe.html` | cross-origin frame — `b6f03cd42a2c` |
-| GET | `/child.html` | the child window — `f802643d54e0` |
-| GET | `/away.html` | the beforeunload destination — `213ba5108e97` |
-| GET | `/login.html?next=<path>` | login form; posts `/api/login`, then `location.href = next` — `262685498079` |
-| GET | `/secure.html` | 200 with the cookie (`f2e4054b413c`), **302 → `/login.html?next=/secure.html` without it** |
+| Endpoint | Carries |
+|---|---|
+| `GET /` | the whole shell, 6 KB, 27 `<section>`s, all ids literal (`12b605e5d338`). 302 → `/login.html?next=/` when `ctl.requireAuth` and no cookie |
+| `GET /app.js` | 20.5 KB ES module — the entire client (`b187749b6c87`) |
+| `GET /style.css`, `/iframe.html`, `/iframe2.html`, `/child.html`, `/away.html`, `/login.html`, `/secure.html` | static |
+| `GET http://localhost:4801/xframe.html` | the cross-origin iframe document (`b6f03cd42a2c`) |
 
 ## Read endpoints
 
-| Method | Path | Carries | Body |
-|---|---|---|---|
-| GET | `/ctl` | the whole knob set; fetched by the page on load and shown in `#ctl-state` | `d8d884fd3750` (defaults) |
-| GET | `/api/grid` | `{rows:4, cols:8, cells:[{r,c,label}]}` — the seed for the canvas | `8d63deae6960` |
-| GET | `/api/slow?ms=<slowMs>` | `{"ms":400,"at":<epoch>}` — the deliberately slow leg of section 1 | `8ddec09c4889` |
-| GET | `/api/chart/a` | `{"series":"a","points":[1,3,2,5,4]}` | `e565556a7a19` |
-| GET | `/api/chart/b` | `{"series":"b","points":[2,2,3,1,6]}` | `89cf1590e155` |
-| GET | `/api/record/<id>` | `{id,name,dob,mrn,allergies:[…]}`, ids 1–5, deterministic | `f0056a3f6602` (1), `311c996db007` (2) |
-| GET | `/api/search?q=` | `{"q":"ada","hits":["Ada Lovelace"]}` — debounced 250 ms | `dc9bab08ca0c` |
-| GET | `/api/meds?q=` | `{"q":"as","hits":[…]}` — **subsequence** match, not prefix | `4d5b401a3e4b` |
-| GET | `/api/rows` | a bare JSON **array of 10 000** `{id,name,group}` — 484.7 KB, fully captured | `70f7def94492` |
-| GET | `/api/fake-stream` | `text/event-stream` mime, ordinary finite body: `<envelope>…</envelope>`, 97 chars | `c46e5f2a155a` |
-| GET | `/api/child-ping` | `{"pong":true}` — issued by the child *window*, still in this log | `3874e63167be` |
-| GET | `/api/heartbeat` | `{"ok":true,"n":5}` — ambient, every `heartbeatMs` | `ec284f947ac5` |
+| Endpoint | Carries | Cited body |
+|---|---|---|
+| `GET /api/slow?ms=N` | resolves after `N` ms (`N` = `ctl.slowMs`) | `554db7361795` `{"ms":400,"at":…}` |
+| `GET /api/chart/a`, `/api/chart/b` | one series each | `e565556a7a19` `{"series":"a","points":[1,3,2,5,4]}` |
+| `GET /api/record/:id` (1‑5) | the record the form renders | `f0056a3f6602` `{"id":1,"name":"Ada Lovelace","dob":"1963-01-11","mrn":"MRN-0001","allergies":["Penicillin"]}` · `311c996db007` = record 2 |
+| `GET /api/search?q=` | debounced search hits | `dc9bab08ca0c` `{"q":"ada","hits":["Ada Lovelace"]}` |
+| `GET /api/meds?q=` | combobox suggestions, **not** debounced | `eed2f80b5a1e` (q=a, 14 hits) · `45f4839713a9` `{"q":"asp","hits":["Aspirin"]}` |
+| `GET /api/rows` | **all 10 000 rows**, 484.7 KB — the virtualised table's only source of truth | `70f7def94492`, items `{"id":0,"name":"Aardvark-Row-0","group":"G0"}` |
+| `GET /api/grid` | the canvas model the pixels are drawn from: `{"rows":4,"cols":8,"cells":[{"r","c","label"}…]}` | `8d63deae6960` |
+| `GET /api/fake-stream` | mime `text/event-stream`, **finite** body → `body_state: ok` | `c46e5f2a155a` `<envelope><encounters><e id="1">complete payload behind a stream mime</e></encounters></envelope>` |
+| `GET /api/heartbeat` | ambient only; `{"ok":true,"n":1}` | `27e1acbfee88` |
+| `GET /api/poll` | ambient long-poll, holds `ctl.pollHoldMs` (3000) then reissues | `30718b5ee1bf` `{"n":3,"heldMs":3000}` |
+| `GET /api/notify-poll` | push long-poll, holds `ctl.notifyPollHoldMs` (25000); only exists when `ctl.notify` | `8262681bc125` `{"n":7,"via":"poll","text":"Result 7 via poll"}` |
+| `GET /api/notify-sse` | **endless** `text/event-stream`, opened on every load → `body_state: streaming`, `t_end` null, **messages never captured** | — |
+| `GET /api/child-ping` | the popup's fetch | — |
 
 ## Write endpoints
 
-| Method | Path | Request | Response |
-|---|---|---|---|
-| POST | `/api/save` | `{"form":{"name":"x"}}` | **202** `{"id":N,"pending":true,"received":{…}}` — `acfec170c2c0` |
-| GET | `/api/save/status?id=N` | — | **200** when the save worked, **500** when `ctl.saveFails`. The page never reads this body, so the row is `body_state: pending/missing` — the status code is the whole signal |
-| DELETE | `/api/item/1` | — | `{"deleted":1}` — `78000dac3e34` |
-| POST | `/api/graphql` | `{"query":"query { patient { name } }"}` / `{"query":"mutation { rename(name: \"Renamed\") { name } }"}` | `{"data":…,"sawMutation":false|true,"operation":"query"|"mutation"}` — `f74fd6f2f865`, `7ac5cf5b514e`. **One path for both** — the operation lives in `requests.req_body` |
-| POST | `/api/iframe-submit` | `{"name":"Grace"}` (or `{"name":…,"depth":2}` from the depth-2 frame) | `{"ok":true,"name":"Grace"}` — `8329910c8a17` |
-| POST | `http://localhost:4801/api/xframe-submit` | `{"name":"Kate"}` | `{"ok":true,"name":"Kate","origin":"x"}` — `2870e1b6385c` |
-| POST | `/api/drag-report` | `{"widget":"sort","order":"b,c,a"}` — fired on every drop | body never read by the page |
-| POST | `/api/login` | `{"user":"demo","pass":"anything"}` | **200 for any credentials**, `set-cookie: gauntlet_auth=<user>; Path=/; HttpOnly` — `540dd9686b29`. The login page checks only `r.ok` |
-
-## Push channels (section 23)
-
-Trigger any of them with `POST /ctl {"push":"ws"|"sse"|"poll"}`. Each delivers one notification;
-`#notif-count` increments and `#notif-list` gains `Result N via <channel>`.
-
-| Channel | Transport | In the log |
+| Endpoint | R/W | Carries |
 |---|---|---|
-| ws | the standing WebSocket, open from page load | `ws_frames` — `{"type":"notify","n":1,"via":"ws","text":"Result 1 via ws"}` |
-| sse | standing `GET /api/notify-sse` (`text/event-stream`, opened on load) | the request row only, `body_state: streaming`; **the messages are not captured** — read the DOM |
-| poll | long-poll `GET /api/notify-poll`, held `notifyPollHoldMs` then reissued | full body captured: `{"n":7,"via":"poll","text":"Result 7 via poll"}` — `8262681bc125` |
-
-The poll channel **only exists when `ctl.notify` is true**, and the page reads that knob at load —
-so `{"push":"poll"}` on a default page is silently dropped (a 30 s wait taught me this).
-
-## Streams
-
-| Path | Behaviour |
-|---|---|
-| `GET /api/sse` | started by `#start-sse`; 5 events ~500 ms apart, then the server closes. `body_state` goes `streaming` → `missing`; the messages appear only as `<li>` in `#sse-log` |
-| `GET /api/notify-sse` | standing, never ends: `body_state: streaming` for the life of the page |
-| `GET /api/poll` | ambient long-poll, `{"n":9,"heldMs":400}` — `e2ff20fa1b51` |
+| `POST /api/save` | write | req `{"form":{"name":"x"}}` → **202** `acfec170c2c0` `{"id":1,"pending":true,"received":{…}}`. `id` increments per process |
+| `GET /api/save/status?id=N` | read | **the real outcome**: `200` = saved, `500` = failed (`ctl.saveFails`). The page never reads the body → `body_state` goes `pending` → `missing`. **Only the status code exists.** |
+| `DELETE /api/item/1` | write | the app's only non-POST write; `78000dac3e34` `{"deleted":1}` |
+| `POST /api/graphql` | both | req `{"query":"query { patient { name } }"}` → `f74fd6f2f865` `{"data":{"patient":{"name":"Ada Lovelace"}},"sawMutation":false,"operation":"query"}`; req `{"query":"mutation { rename(name: \"Renamed\") { name } }"}` → `7ac5cf5b514e` `{"data":{"rename":{"name":"Renamed"}},"sawMutation":true,"operation":"mutation"}`. Both are 200 — a GraphQL error would not be a 4xx |
+| `POST /api/iframe-submit` | write | from the same-origin frame; `c684c60a7be2` `{"ok":true,"name":"Ada"}` |
+| `POST /api/xframe-submit` | write | from the cross-origin frame, to **:4801**; `fe0036eb5b57` `{"ok":true,"name":"Grace","origin":"x"}` |
+| `POST /api/drag-report` | write | fired on every mouse-up of section 26. `{"widget":"slider","value":43}` or `{"widget":"sort","order":"a,b,c"}`. **It fires even when the drag changed nothing** — the request is not evidence of a reorder |
+| `POST /api/login` | write | req `{user,pass}`. **Any non-empty pair is accepted**; the response `{"ok":true,"user":"<user>"}` and `set-cookie: gauntlet_auth=<user>; Path=/; HttpOnly`. An empty field → **401** `{"ok":false,"error":"user and pass required"}` |
 
 ## WebSocket
 
-One socket, opened on page load, reconnecting on every navigation (`#ws-status`, `#ws-count`, `#ws-last`).
+One socket, opened on every page load, at the main origin. Frames seen:
 
-- **in**, on connect: `{"type":"hello","id":N,"state":{…the whole ctl set…}}`
-- **in**, ambient: a push every `wsPushMs` when `ctl.ambient`
-- **in**, on demand: `{"type":"notify","n":N,"via":"ws","text":"Result N via ws"}`
-- **out**, on every button click **except `#noop`**: `{"type":"action","id":"<element id>","t":<epoch ms>}`
+| Direction | Payload |
+|---|---|
+| `in` (on open) | `{"type":"hello","id":<conn n>,"state":{…the whole ctl set…}}` |
+| `out` | `{"type":"action","id":"<button id>","t":…}` — sent by every button click **except `#noop`** |
+| `in` | `{"type":"echo","id":"<button id>","t":…,"seq":N}` — the server's echo; `seq` drives `#ws-count` |
+| `in` | `{"type":"notify","n":4,"via":"ws","text":"Result 4 via ws"}` — a `POST /ctl {"push":"ws"}` delivery |
 
-```sql
-SELECT dir, payload FROM ws_frames WHERE dir='out' ORDER BY t DESC LIMIT 5;
-```
+With `ctl.ambient` the server also pushes on its own every `ctl.wsPushMs` (7000).
 
-## The control plane
+## Auth
 
-```
-GET  /ctl          → the effective knobs
-POST /ctl  {…}     → merge, returns the effective knobs   (also accepts {"push":"ws"|"sse"|"poll"})
-POST /ctl/reset    → back to the defaults below
-```
-
-```json
-{"slowMs":400,"renderDelayMs":0,"modal":false,"modalDelayMs":0,"toastMs":2000,"saveFails":false,
- "ambient":false,"heartbeatMs":5000,"pollHoldMs":3000,"wsPushMs":7000,"timeoutMs":0,
- "rerenderOnHover":true,"requireAuth":false,"notifyPollHoldMs":25000,"notify":false,
- "xOrigin":"http://localhost:4801"}
-```
-
-Server-side knobs take effect immediately (`slowMs`, `saveFails`, `modal`, `modalDelayMs`, `toastMs`,
-`requireAuth`, `push`). Client-side knobs are read once at page load and need a reload:
-`ambient`, `heartbeatMs`, `pollHoldMs`, `wsPushMs`, `timeoutMs`, `notify`, `notifyPollHoldMs`,
-`renderDelayMs`. `#ctl-state` in the header shows what the *page* currently believes.
+`ctl.requireAuth` turns `GET /` **and** `GET /secure.html` into `302 → /login.html?next=<path>`.
+The cookie is `gauntlet_auth`, `HttpOnly` — `document.cookie` is empty, so read it from
+`resp_headers` (`SELECT path, json_extract(resp_headers,'$."set-cookie"') FROM requests …`) or
+`s.context.cookies()`. Clear it with `s.context.clearCookies()`.
 
 ## Useful queries
 
 ```sql
 -- the endpoint map
 SELECT method, path, count(*) n, min(status), max(status) FROM requests
-WHERE path LIKE '/api/%' GROUP BY 1,2 ORDER BY n DESC;
--- what fired on its own (ambient traffic)
-SELECT t_start, method, path, status FROM requests WHERE action_id IS NULL ORDER BY t_start DESC LIMIT 20;
--- did this save actually work?
-SELECT status FROM requests WHERE path='/api/save/status' ORDER BY t_start DESC LIMIT 1;
--- which GraphQL operation was that?
-SELECT req_body, status FROM requests WHERE path='/api/graphql' ORDER BY t_start DESC LIMIT 2;
--- the auth cookie
-SELECT path, json_extract(resp_headers,'$."set-cookie"') FROM requests WHERE path='/api/login';
+ WHERE resource_type IN ('xhr','fetch') GROUP BY 1,2 ORDER BY n DESC;
+-- what the app does with nobody driving it (ambient on)
+SELECT t_start, method, path, status FROM requests WHERE action_id IS NULL AND run=? ORDER BY t_start;
+-- the real outcome of a save
+SELECT status FROM requests WHERE path='/api/save/status' AND action_id='act:N';
+-- the login cookie
+SELECT path, json_extract(resp_headers,'$."set-cookie"') FROM requests WHERE resp_headers LIKE '%set-cookie%';
 ```

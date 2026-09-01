@@ -1,329 +1,256 @@
-# friction — driving the gauntlet with disco, from the README alone
+# friction — where disco or its README got in my way
 
-Everywhere the tool or its documentation got in the way. Ordered roughly by what it cost me.
-Times are wall clock spent on the item, not on the task it belonged to.
+Format per item: **what I tried · what happened · what I expected · what I did instead · what it cost.**
+Ordered roughly by cost. Total session ≈ 85 min; I estimate ~22 min of it went to the items below.
 
 ---
 
-### 1. `alreadyTrue` is flagged but does not fail `reached()` — it cost me a red check (~7 min)
+### 1. WebSocket frames are invisible unless the socket opened inside *your* session (~10 min)
 
-**Tried.** An `any`-of postcondition for "did the beforeunload dialog let us leave?":
+**Tried.** `SELECT t,dir,payload FROM ws_frames ORDER BY seq DESC LIMIT 10` after ~30 acts, each of
+which (per the app's own header counter) had sent a WS frame.
 
-```ts
-await s.click("#nav-away", { until: { any: [
-  { selector: "h1:text-is('You navigated away')", label: "left" },
-  { selector: "#load-chart", label: "stayed" } ] } });
+**Happened.** Two rows, both from `act:1`:
 ```
-
-**Happened.** `until: ✓ stayed 6ms ⚠ already true before the action — proves nothing`, `reached()`
-passed, and my `check.ts` reported `FAIL 11. native dialogs: beforeunload did not let us leave: stayed`
-on a run where the browser had in fact navigated correctly. The predicate had been true since before
-the click, because `#load-chart` is on the page we were already on.
-
-**Expected.** Either `reached()` to throw on an `alreadyTrue` arm, or at minimum for the docs to say
-that `until.which` can name an arm that proves nothing. The README warns about `alreadyTrue` in
-prose ("choose one that is false beforehand") but the *mechanism* — a green `until.ok: true` and a
-confident `which` — reads as success in code. `reached()` is sold as "wrap every step and failures
-explain themselves"; this failure explained itself as a pass.
-
-**Did instead.** Removed the negative arm entirely: wait only for the positive landmark with a short
-budget and treat the timeout as "stayed", plus assert `report.dialogs` contains a `beforeunload` entry
-so the step still proves the dialog was raised. See `armAndNavigateAway` in `lib.ts`.
-
-**Suggestion.** `reached()` should throw (or at least there should be `reached(r, { strict: true })`)
-when the satisfying arm was `alreadyTrue`. A predicate that was true before the action is, by the
-README's own words, not a postcondition.
-
----
-
-### 2. `s.drag(target, to)` cannot address a point — only another element (~5 min)
-
-**Tried.** `await s.drag("#slider-thumb", { x: 250, y: 578 })`, the obvious reading of "For sliders and
-reorderable lists".
-
-**Happened.** `act:33 drag #slider-thumb FAILED 82ms — diagnosis: error — locator.dragTo: target:
-expected string, got undefined`. A Playwright-internal message leaking through; nothing said "the
-destination must be a selector".
-
-**Expected.** Either a `{x,y}` destination, or the README to say `to` is a selector/Locator only —
-because a slider is precisely the case where there is no element to drop onto.
-
-**Did instead.** `s.page.mouse.move/down/move(...,{steps:12})/up`. The README does mention
-"use `s.page.mouse` for custom paths", but it recommends `drag` for sliders in the same sentence,
-which is the wrong way round.
-
-**Also.** `s.drag("#sort-a", "#sort-c")` on the reorderable list moved the item exactly **one** slot
-(`a,b,c` → `b,a,c`) rather than to C's position, because `dragTo` teleports to the element centre in
-one move and the list reorders on `dragover` midpoints. Any real reorder needs a stepped path. Worth a
-sentence in the docs, since reorderable lists are the other advertised use.
-
----
-
-### 3. There is no `until` for "a new page opened" (~4 min, 8 s of it pure waiting)
-
-**Tried.** `await s.click("#open-child", { until: { fn: "window.__child && !window.__child.closed" } })`
-— a guess, because the predicate table has nothing for popups.
-
-**Happened.** The full 5 s budget burned (`page.waitForFunction: Timeout 5000ms exceeded`), on an act
-that actually took 8030 ms end to end. The report then cheerfully printed `new page:
-http://localhost:4800/child.html` — it *knew*, it just could not be waited on.
-
-**Expected.** `until: { page: "/child.html" }`, symmetric with `{ url }`. The report already has
-`pages` and `openPages`; the predicate is the missing half.
-
-**Did instead.** Bare act with `window: 1200`, then `s.context.pages().find(...)`. Works, but it means
-the one hazard where a fixed observation window is unavoidable is the one the README's whole design
-(«you name what you wait for») is meant to eliminate.
-
----
-
-### 4. `act` has no `position` — a canvas cell needs raw mouse coordinates (~4 min)
-
-**Tried.** `s.click("#grid")` to hit a specific cell of the 4×8 canvas grid.
-
-**Happened.** It clicks the element centre. `act:55` came back `ok` with an empty `ui` diff and no
-wire — indistinguishable from "nothing happened", because for a canvas nothing in the DOM *ever*
-changes. I spent two probes convincing myself the click had done anything at all.
-
-**Expected.** Playwright's own `position: {x,y}` exposed on the click spec, since the README's pitch is
-"Playwright, unwrapped".
-
-**Did instead.** `s.scroll("#grid")`, read `getBoundingClientRect()` through `s.evaluate`, then
-`s.page.mouse.click(box.x+1+x, box.y+1+y)` (the `+1` is the canvas border). Verified via
-`window.__gridSelected` and `getImageData`. Fine — but "unwrapped" should not stop at the option that
-makes canvases addressable.
-
----
-
-### 5. `open(app, { url })` silently re-navigates, destroying the state you came to look at (~3 min)
-
-**Tried.** Probe 16 armed the session timeout and left the "Session expiring" dialog on screen.
-Probe 17 started with `const s = await open("gauntlet", { url: "http://localhost:4800/" })` and
-immediately asserted the dialog.
-
-**Happened.** `dialog present: 0 state: off` — the dialog was gone. `open` had reloaded the page.
-The README documents `url` as "navigate after connecting (launch) — or select the page containing it
-(attach)", which reads like *ensure we are here*, not *reload unconditionally*.
-
-**Expected.** Either "navigates every time, even when joining an existing browser" spelled out, or a
-no-op when the current URL already matches.
-
-**Did instead.** `open("gauntlet", {})` with no `url` when I wanted to inspect leftover state, and an
-explicit `s.navigate(...)` when I wanted a clean slate. The README's own "state leaks between scripts —
-by design" section should say which of the two `open({url})` is.
-
----
-
-### 6. `run` does not advance per script, so the recon query in the README finds nothing (~2 min)
-
-**Tried.** The README's recon recipe: `SELECT method, path, resource_type FROM requests WHERE run=<n>`.
-After my second script I ran `... WHERE run=2`.
-
-**Happened.** `(no rows)`. Everything — 25 CLI-era rows and every script since — was `run=1`, because
-runs are per *browser*, not per session, and the browser is reused. For a minute I thought scripts
-were not recording.
-
-**Expected.** The README does say "A new browser starts a new run", but the recon section then says
-"look at the log: `WHERE run=<n>`" as though `<n>` were obvious per session. A one-liner
-(`SELECT max(run) FROM runs`, or the run number printed by `open`) would close it. `disco open` does
-print `run 1` — it should probably print it on every script `open` too; my script `open()`s printed
-nothing at all.
-
----
-
-### 7. `body_state` is `pending` where the docs promise `missing` (~2 min)
-
-**Tried.** The README: "disco marks such rows `body_state: missing` ('body not read by the page') after
-1.5 s". I went looking for `missing` on `/api/save/status`, the textbook case (the page does
-`if (r.ok)` and never reads the body).
-
-**Happened.** `SELECT body_state FROM requests WHERE path='/api/save/status'` → `pending`, for every
-row, long after the fact. `/api/login` and `/api/drag-report` likewise. `/api/sse` *did* end up
-`missing`. So the promised transition happens for some rows and not others — probably it needs the
-session to still be open 1.5 s later, and my scripts closed first.
-
-**Expected.** Either the sweep to run on close, or the docs to say `pending` is the resting state for a
-body that was never read if the session ends first. It matters, because "pending" reads as
-"ask again later" and "missing" reads as "there is nothing to ask for".
-
-**Did instead.** Ignored `body_state` for these and used `requests.status`, which is what the README
-tells you to do anyway.
-
----
-
-### 8. `s.until()` returns a failure, it does not throw — so `.catch()` around it does nothing (~2 min)
-
-**Tried.** `const r = await s.until({...}, { timeout: 3000 }).catch(e => e)` — defensively, because
-the API table lists `s.until(pred, { timeout })` with no note on failure behaviour, and every *other*
-"wait" API I know rejects on timeout.
-
-**Happened.** The `.catch` never fires; a failed wait comes back as a normal report with
-`until.ok: false`. Harmless, but I wrote that useless `.catch` into a dozen probes before I was sure.
-
-**Expected.** One line in the API table: "never throws; read `until.ok` (or wrap in `reached`)".
-The `reached()` section implies it, but from the other end.
-
----
-
-### 9. No `until` predicate for a WebSocket frame (~2 min)
-
-**Tried.** Waiting for the app's `{"type":"notify",…}` frame after `POST /ctl {"push":"ws"}`.
-
-**Happened.** The predicate table has `request`, but nothing for `ws_frames`, even though disco records
-every frame and the README advertises WebSocket push as a first-class hazard. `{ request: … }` does not
-match a WS message.
-
-**Did instead.** `until: { fn: "+document.getElementById('notif-count').textContent > N" }` — i.e. I had
-to wait on the DOM rendering of the frame, which is exactly the indirection `{ request }` exists to
-avoid. For an app whose only channel is a socket, there is no wire-first option at all.
-
-**Suggestion.** `{ ws: /"type":"notify"/ , dir?: "in"|"out" }`.
-
----
-
-### 10. Every report carried two lines of pure noise, and there is no way to mute a region (~ongoing tax)
-
-The gauntlet's header contains a live WebSocket frame counter. Because a click sends an action frame,
-**every** report's `ui` diff contained:
-
+146 in act:1 {"type":"hello","id":1,…}
+140 open act:1 null
 ```
-+ - text: "ws: open · frames: 4 · ambient: off (heartbeats 0 / polls 0) · x-origin: … last ws frame: {
-- - text: "ws: open · frames: 3 · ambient: off (heartbeats 0 / polls 0) · x-origin: … last ws frame: {
+`#ws-count` in the page header said `frames: 5`. Nothing in the report, the diagnosis, or the log said
+"this channel is not being observed".
+
+**Expected.** The README sells `{ ws, dir? }` as a first-class predicate for "push channels — the
+notification itself, not its rendering", and sells joining a running browser as a feature ("a second
+script joins the same browser and the same run"). Nothing warns that the two do not compose.
+
+**Instead.** Navigated to `/` *inside* the session (`s.navigate(HOME, { until: … })`) to force a fresh
+socket; frames appeared immediately (`out {"type":"action",…}` / `in {"type":"echo",…}`). `lib.ts:goHome()`
+now always navigates for this reason, and it is gotcha #3 in the pack README.
+
+**Fix I'd want.** Either capture frames for pre-existing sockets, or make `{ ws }` fail loudly:
+"no WebSocket has been observed in this session — reload the page to attach". A silent 5 s timeout on a
+channel that is demonstrably alive is the worst possible outcome.
+
+---
+
+### 2. `s.drag(a, b)` on an adjacent list item silently does nothing, and the README says it reorders (~6 min)
+
+**Tried.** `s.drag("#sort-a", "#sort-b", { until: { fn: "…#sort-order… !== 'a,b,c'" } })`, straight from
+the README: *"`to` is an element (Playwright `dragTo`: one straight move, which reorders a list by one
+slot)"*.
+
+**Happened.** `until` timed out after 5 s. The wire showed `POST /api/drag-report 200` — i.e. the app
+*did* see a complete drag — but the order was unchanged. A second attempt with a hand-rolled 8-step
+`s.page.mouse` path also failed.
+
+**Expected.** The README's parenthetical reads as a guarantee. It is really "one straight move to the
+centre of the element you name" — which for the *adjacent* item never crosses its midpoint, so nothing
+moves.
+
+**Instead.** `s.drag("#sort-a", "#sort-c")` → `b,a,c`. One slot, as promised, but you must aim two
+slots away.
+
+**Fix I'd want.** Say so: "`dragTo` releases at the target's centre; to move one slot, target the item
+*two* slots away, or use `s.page.mouse` with `{ steps }`."
+
+---
+
+### 3. `s.type()` appends; the sugar table does not say so (~5 min + a 5 s timeout)
+
+**Tried.** `s.type("#med", "asp", { until: { request: "/api/meds?q=asp", landed: true } })` on a field
+that already contained `Aspirin` from the previous step.
+
+**Happened.** Three requests `q=Aspirina`, `q=Aspirinas`, `q=Aspirinasp`, then
+`until: ✗ 5003ms … no request matching /api/meds?q=asp was issued during the wait`. The diagnosis is
+excellent — it told me no matching request was issued — but the wire lines above it were the only clue
+as to why.
+
+**Expected.** The table says `s.fill` "sets the value (one input event)" and `s.type` "keystrokes — for
+debounced/keyboard widgets". Reasonable to read as "types this text into the field".
+
+**Instead.** `s.fill(target, "")` before every `type`. It is now a recipe line in the pack README.
+
+**Fix I'd want.** One word in the table: "keystrokes, **appended** to the current value".
+
+---
+
+### 4. One un-dismissed interstitial cascades into a dozen 1–3 s failures in `run-check` (~4 min)
+
+**Tried.** First full `node scripts/run-check.ts gauntlet`.
+
+**Happened.** `2 record WITH a delayed modal` failed to notice a modal that arrived 600 ms late, leaving
+`div#record-modal.overlay` open. The next **eleven** steps then failed with
+`occluded — #save is covered by div#record-modal.overlay`, each burning its own actionability budget
+(one burned 5 s, two burned 3 s). 17 failures, ~14 s of it pure timeout, from one root cause.
+
+**Expected.** The diagnoses were perfect — every one named the overlay and the open dialog, which is why
+the fix took two minutes once I read them. But there is no way to say "if a step fails, stop" or "run
+this recovery before each step".
+
+**Instead.** Read the first failure, ignored the rest, fixed `openRecord`'s grace window.
+
+**Fix I'd want.** `run-check --bail`, or a documented `beforeEach` hook in `check.ts` (the README shows
+`check(s, step)` and nothing else about the harness — not whether failures abort, not what `step`
+returns).
+
+---
+
+### 5. `{ selector }` without `visible: true` matches hidden nodes — the predicate table implies otherwise (~3 min)
+
+**Tried.** `until: { selector: "#ctx-menu li" }` to wait for a right-click menu to open.
+
+**Happened.** `alreadyTrue` — the `<li>`s live in the DOM inside a `<ul hidden>` before the menu opens.
+
+**Expected.** The table row reads *"`{ selector, visible?, frame? }` — an element matches (**and is
+visible**)"*. That parenthetical reads as a description of the predicate, not as a description of what
+happens only when you pass the optional flag.
+
+**Instead.** `{ selector: "#ctx-menu li", visible: true }`.
+
+**Fix I'd want.** Rewrite the row as "an element matches; **add `visible: true`** to require visibility".
+
+---
+
+### 6. Rejoining an app whose previous script left a popup open drives an unclear page (~4 min, unresolved)
+
+**Tried.** Script A did `s.click("#open-child", { until: { page: "child" } })` and exited without
+`closeOtherPages()`. Script B did `open("gauntlet", { url: "http://localhost:4800" })`.
+
+**Happened.** `s.context.pages()` in script B reported **two** pages, *both* at `http://localhost:4800/` —
+i.e. something navigated the popup (which had been at `/child.html`) to `/`. The log shows an extra act
+with its own page load (`hello id:2`) that I never issued. I could not tell from any report which page
+`s.page` was.
+
+**Expected.** The README covers state leaking ("a second script joins the same browser where the last one
+left it… close popups you opened") and `page: 0`, but not that `open(..., { url })` may pick and navigate
+a *popup*, nor that `/child.html` "contains" `http://localhost:4800/` for URL-matching purposes.
+
+**Instead.** `s.closeOtherPages()` at the top of the next script and `closeOtherPages()` inside
+`openChildWindow()`. Never established which page was actually driven.
+
+**Fix I'd want.** Have `open` print which page it selected (`page 1 of 2: http://…/child.html`), and say
+in the README that `url` on a rejoin selects a page by substring and *will* navigate a popup.
+
+---
+
+### 7. Table columns are not in the README, and a wrong column dumps library source at you (~2 min)
+
+**Tried.** `s.store.sql("SELECT id,t,dir,payload FROM ws_frames …")` — `id` because `requests` has `id`.
+
+**Happened.**
 ```
-
-The README's "two adjacent elements glued into one aria line" gotcha covers *why* it reads badly, but
-not the bigger problem: a page with any live counter poisons the aria diff of every act, and there is
-no `ignore` / `scope` option to diff only a subtree. On a real dashboard this would be most of the diff.
-
----
-
-### 11. The truncation hint tells scripts to use a CLI flag (~30 s, cosmetic)
-
-`formatReport` printed `… 88 more lines (--json for all)` inside a **script**, where `--json` does not
-exist. Also the truncation applies to the combined added+removed list, so a navigation (which removes
-the whole previous page) drowns the two added lines I cared about. Suggest truncating each side
-separately, and phrasing the hint as "see `report.ui`".
-
----
-
-### 12. `POST`ing to an app's control plane is undocumented (~2 min)
-
-The gauntlet is driven by `POST /ctl`, and every serious app has some equivalent (a seed endpoint, a
-feature flag). The README has `s.evaluate(fnOrSource, arg)` but never says whether a returned promise
-is awaited (it is) or shows a fetch. I guessed:
-
-```ts
-s.evaluate(`fetch('/ctl',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"modal":true}'}).then(r=>r.json())`)
+file:///…/src/store.ts:232
+  const sql = (q, ...args) => db.prepare(q).all(...args);
+                                   ^
+Error: no such column: id
 ```
+An uncaught SQLite error that prints six lines of disco's own (type-stripped, unreadable) source. In a
+task whose ground rule is "do not read `src/`", the tool put `src/` on my screen.
 
-It works and — importantly — the call lands **in the log** as a normal request, which
-`s.page.request.post()` would not. That is a genuinely good property and deserves a documented line,
-because the obvious alternative silently costs you the record.
+**Expected.** The README lists the tables and says "`./disco schema` prints the DDL", which is true and
+which I then ran. But the tables' *shapes* differ in a way worth one sentence: `requests` has `id`,
+everything else keys on `seq`.
 
----
+**Instead.** `./disco schema`, then `seq`.
 
-### 13. Documentation mismatch: the "disabled control that hit-tests to its parent" (~1 min)
-
-The root README lists among the gauntlet's hazards "a disabled control that hit-tests to its parent",
-which primes you for an `occluded` diagnosis with `over: div.field-wrap`. What actually happens is
-`diagnosis: disabled — #noop-disabled is disabled` in 106 ms, because the disabled check runs first.
-The behaviour is better than advertised; the sentence still sends you looking for the wrong thing.
-(I confirmed the hit-test claim separately: `elementFromPoint` over it returns `DIV.field-wrap` and its
-`pointer-events` is `none`.)
+**Fix I'd want.** Catch SQLite errors in `store.sql` and rethrow as
+`store.sql: no such column "id" in ws_frames (columns: run, seq, t, url, dir, payload, action_id)`.
+Also: `store.sql()` accepts bind parameters (`sql(q, ...args)`) — undocumented; I only learned it from
+that stack trace, which is a bad way to learn an API.
 
 ---
 
-### 14. The README's worked example names an endpoint the app does not have (~1 min, 5 s of waiting)
+### 8. Shadow DOM is claimed to work but never shown (~2 min)
 
-The "Keyboard-only widgets" recipe reads `until: { request: "/api/suggest", landed: true }`. I copied
-the shape and the path; the gauntlet's combobox calls `/api/meds`, so the act burned its full 5 s
-budget. Self-correcting — the report listed the two `/api/meds` requests that *did* land right
-underneath the timeout, which is the system working as designed — but a placeholder in the docs that
-looks like a real path is a trap in a repo where the example app is one command away. Consider
-`"/api/<your-suggest-endpoint>"`.
+**Tried.** `s.click("#shadow-host >> internal:control=enter-frame")`, guessing at a frame-like syntax
+because `s.frame("#a >> #b")` is the documented way into nested things.
 
----
+**Happened.** `diagnosis: error — locator.count: Selector cannot end with entering frame, while parsing
+selector …` — a raw Playwright parse error.
 
-### 15. `t` restarts every run, so the README's "newest row" one-liners are cross-run wrong (~9 min)
+**Expected.** The README mentions shadow DOM exactly twice ("frames and shadow DOM work" in Tests, and
+"shadow DOM" in the gauntlet's feature list) and never says how.
 
-**Tried.** `lib.ts` read facts the way the README teaches — `s.store.latestJson("/api/rows")`,
-`s.store.requests({ url }).pop()`, and for the WebSocket
-`SELECT payload FROM ws_frames WHERE dir='out' ORDER BY t DESC LIMIT 1`.
+**Instead.** Discovered by experiment that the root is open and plain CSS pierces it
+(`#shadow-host #shadow-btn`), and that state inside the root needs `until: { fn }` through
+`.shadowRoot` because the aria diff cannot see it.
 
-**Happened.** Green on every warm run. Then I killed the browser and ran the check cold, as a stranger
-would, and got:
-
-```
-FAIL 6. a click sends a WebSocket action frame (130ms):
-  no action frame: {"type":"action","id":"load-fake-stream","t":1788237312303}
-```
-
-The "newest" out-frame was section 28's frame **from the previous check run**. `ws_frames.t` is
-"ms since *this* run started" (the README says so, in a parenthesis), so a two-hour-old run's row at
-`t = 803440` outranks the frame I had just sent at `t = 30000`. Every "latest" read in the store has
-this hazard, including `latestJson` and the README's own recipe
-`SELECT t_start, method, path FROM requests WHERE action_id IS NULL ORDER BY t_start`.
-
-**Expected.** Either `latestJson` / `requests()` to default to the current run, or the docs to lead with
-"filter by `run`, or better by `action_id`" instead of mentioning `run` as one filter among many. The
-store is per app and outlives browsers **by design** — so cross-run contamination is the default state,
-not an edge case.
-
-**Did instead.** Two helpers in `lib.ts`, `jsonFrom(s, rep, url)` and `statusFrom(s, rep, url)`, that
-scope every read to `rep.action` — exact attribution, no ordering question at all — and, for the socket,
-`WHERE seq > <max seq before the act>` (`ws_frames.seq` is a global `AUTOINCREMENT`, so it is the only
-monotone column in the table). Both cold and warm runs are green now. The tool already had the right
-answer (`action_id`); the documentation just does not point at it as the *first* choice for wire reads.
+**Fix I'd want.** One line in *Selector gotchas*: "Open shadow roots are pierced by ordinary CSS;
+closed ones are not reachable. Contents do not appear in the aria diff."
 
 ---
 
-### 16. Moments I did not know what to do next
+### 9. `reached()` is the only documented way to consume a report, but optional checks need the other way (~2 min)
 
-- **After `POST /ctl {"push":"poll"}` produced nothing for 30 s.** Nothing in the report, nothing in
-  `ws_frames`, no failing request — a channel that is simply absent looks identical to a channel that
-  is broken. What unstuck me was the README's own advice to query the log
-  (`SELECT … FROM requests WHERE path LIKE '%notify%'` → there was no `/api/notify-poll` row at all,
-  so the client had never opened one). That is a good habit the docs teach, but "the thing you are
-  waiting for was never started" deserves to be a named diagnosis on a timed-out `{ request }`
-  predicate: *no request to that URL was even issued during the wait*. disco knows this. (~4 min)
-- **Whether reading `/app.js` off the wire was in bounds.** The README explicitly blesses it ("The
-  app's own code is on the wire … legitimate, fast"), while my instructions said to treat the app as a
-  black box. I chose not to read it, and never needed to. But the two framings conflict, and a fresh
-  agent will resolve the ambiguity by reading the client on minute one. (~1 min of hesitation)
-- **`gauntlet/scenarios.md`.** The root README points at it as documenting "every behaviour and the
-  `/ctl` knobs that drive them". For an exercise whose whole point is discovering those knobs, that
-  file is the answer key, and the root README hands you the link in the same paragraph that sets the
-  exam. I did not open it; everything in `README.md`/`wire.md` here was derived from driving the app.
-  If the exam is meant to be closed-book, the pointer should not sit in the tool's own documentation.
+**Tried.** Handling the optional allergy modal: I want "look for `#record-modal` for 1.2 s and tell me
+yes or no", which must *not* throw.
+
+**Happened.** Every example in the README wraps acts in `reached()`, and `reached()` throws on both
+failure and `alreadyTrue`. Nothing shows the non-throwing idiom.
+
+**Expected.** An example of the "optional" case, given that the README's own *Interstitials* section is
+built entirely around conditional dialogs.
+
+**Instead.** `const r = await s.until({ selector: "#record-modal" }, { timeout: 1200 }); if (r.until?.ok) …`.
+Works fine; it just is not written down anywhere.
 
 ---
 
-### 17. Waits that were longer than I wanted
+### 10. A long-poll's report shows the *new* pending request, not the one that answered you (~1 min of doubt)
 
-| Wait | Cost | Why |
-|---|---|---|
-| `until { request: "/api/suggest" }` (wrong path) | 5.0 s | item 14 |
-| `until { fn: "window.__child…" }` for the popup | 5.0 s | item 3 |
-| `until { url: "/secure.html" }` after logging in from `/` | 5.0 s | the app redirects to `next`, which was `/`. My fault, but a `{url}` timeout does not show you the URL you *did* land on until you read the report header |
-| `until { selector: "#dbl-state:text-is('saved')" }` | 5.0 s | I guessed the word; it is `committed: <value>` |
-| `until { text: "Save failed" }` on a successful save | 3.0 s | deliberate negative test |
-| `POST /ctl {"push":"poll"}` with `notify:false` | 30.0 s | item 15 — my budget, but nothing could have shortened it except knowledge |
-| `s.click("#rerender")` without `js:true` | 3.1 s | correct behaviour: Playwright's actionability wait, then a perfect `detached` diagnosis naming the fix |
-
-Total ≈ 56 s of dead waiting across ~75 acts. Every one of them was my predicate being wrong, and in
-five of the seven cases the report told me exactly why. That part of the promise holds.
+`s.until({ request: "/api/notify-poll", landed: true })` returned in 126 ms and the report's wire section
+read `GET /api/notify-poll … [pending]`, which looks like a failure. The row that landed is the
+*previous* one (visible in `requests` with `t_end` set); the page reissues the poll instantly, and the
+reissue is what started inside the window. Correct per "attribution is a time window", but the report
+reads as if the thing you waited for never arrived. A `[landed]` marker on the row the `until` matched
+would remove the doubt.
 
 ---
 
-### 18. What worked so well it deserves saying
+### 11. Two failures produced the identical `shot` hash (~1 min of doubt)
 
-- `diagnosis: unclickable — pointer-events: none on li#med-opt-1 — the app wants the keyboard
-  (type / ArrowDown / Enter)` and `diagnosis: detached … try { js: true }` each replaced an entire
-  debugging session with one line. Same for `occluded … over: div#record-modal.overlay` naming the
-  overlay that a *previous* step had armed.
-- `not-found` listing the visible controls turned a wrong selector into an oriented one instantly.
-- Wire-first reads (`store.latestJson("/api/rows")` for 10 000 virtualised rows;
-  `requests.status` for a save whose screen lies) are the difference between a workflow that works and
-  one that scrapes. This is the tool's best idea.
-- Cross-origin iframe traffic, child-window traffic and `set-cookie` all landing in one queryable log,
-  with no configuration, is the reason `wire.md` took ten minutes to write.
+`act:24` (not-found inside `#same-origin`) and `act:25` (not-found inside `#cross-origin`) both reported
+`shot 8aa8da6ed8e9c515`. Content-addressed dedup is sensible, but when you are using shots as evidence of
+a *moment* it reads like a bug. Worth one sentence in *Diagnoses*.
+
+---
+
+### 12. Credentials: the README's auth advice points at the form, not the endpoint (~2 min)
+
+*"Log in with an `until: { url }` (or `any` of the landing anchor and the error banner)"* assumes you
+already have credentials. I burned two minutes guessing at a login form before doing the obvious thing:
+`s.evaluate("fetch('/api/login', …)")` in a loop over candidate pairs, reading statuses off the wire —
+which found `admin/admin` on the first try and (later) revealed that **any** non-empty pair works. The
+README's own "Calling the app's API yourself" trick deserves a cross-reference from the auth section.
+
+---
+
+### 13. The 5 s default `until` budget is the cost of every wrong guess (no fix, just the number)
+
+Six of my failed predicates cost 5 s each and two cost 3 s: ~36 s of the session was spent waiting for
+budgets on predicates I had already gotten wrong. That is the design working as advertised ("no wait is
+longer than the number you wrote"), and every one of those failures came with a diagnosis that told me
+why — but the honest number for an unfamiliar app is *a wrong `until` costs five seconds*, and on a
+30-step check that adds up fast. I'd default `until` to 3000 and tell people to raise it per step.
+
+---
+
+### 14. `apps/README.md` (4 lines) adds nothing (~0 min, but it is a missed opportunity)
+
+It says "one folder per app; see the root README". Since this file is the first thing an agent reads
+after the root README, it could carry the *starting* checklist instead: run `./disco open`, dump the
+endpoint map, read `body` of the main document, write anchors first. That sequence is in the root
+README's prose but nowhere as a list.
+
+---
+
+## What worked so well it is worth recording
+
+- **The diagnoses are the product.** `occluded` naming `div#record-modal.overlay` *and* the open dialog,
+  `detached` telling me to use `{ js: true }`, `not-found` inside a frame listing that frame's controls
+  (which is literally how I discovered `#if-name`/`#if-submit`) — every one of these saved a debug cycle.
+- **`alreadyTrue` as a hard rejection in `reached()`** caught two predicates of mine that were proving
+  nothing (a stale `#login-error`, a leftover `#notif-list li`). Both were real bugs in my code.
+- **Wire-first reads were the only way to be right** about the save outcome, the 10 000 rows, and the
+  cross-origin frame — exactly as advertised.
+- **`body_state` distinguishing `missing` / `streaming` / `ok`** turned two of this app's traps
+  (the never-read status body, the mislabeled event-stream) into one-line answers.

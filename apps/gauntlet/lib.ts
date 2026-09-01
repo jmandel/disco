@@ -1,570 +1,442 @@
 // apps/gauntlet/lib.ts — the gauntlet's workflows as functions.
-// Every function: assert an anchor on the way in, put an `until` on every transition,
-// read facts from the wire when they travel on it, `reached(...)` every step, leave a known anchor.
-import { open, reached } from "../../src/index.ts";
-
-export type S = Awaited<ReturnType<typeof open>>;
+// Rules kept throughout: anchor in -> anchor out, an `until` on every transition,
+// facts read from the wire when they travel on it, `reached()` on every step.
+import { reached, type Session } from "../../src/index.ts";
 
 export const HOME = "http://localhost:4800/";
-export const XORIGIN = "http://localhost:4801";
 
-// ------------------------------------------------------------ wire reads
+/** Cheap anchors: URL + one specific element. */
+export const anchors = {
+  home:   { url: "/",             el: "#load-chart" },
+  away:   { url: "/away.html",    el: "a#back" },
+  login:  { url: "/login.html",   el: "#login" },
+  secure: { url: "/secure.html",  el: "#who" },
+  child:  { url: "/child.html",   el: "#child-fetch" },
+};
+
+/** Aria noise the header emits on almost every act. */
+export const uiIgnore = [/ws: open/, /ws: closed/, /last ws frame/, /effective ctl/, /heartbeats/];
+
+// ---------------------------------------------------------------- shell
+
+/** Assert we are on the shell without navigating. Cheap (1.5 s budget). */
+export async function atHome(s: Session) {
+  return reached(await s.until({ selector: anchors.home.el }, { timeout: 1500 }), "at home");
+}
 
 /**
- * The body of a request *this act* made. Always prefer this to store.latestJson():
- * `t` is milliseconds since the run started, so "newest" across a store that has seen more than one
- * browser is not the newest in time — a stale row from an older run can win. `action_id` cannot.
+ * Reach the shell. Always navigates: a reload is ~150 ms and it is the only way to
+ * make the page's WebSocket visible to THIS session (see README "WebSocket frames").
  */
-export function jsonFrom<T = any>(s: S, rep: any, url: string): T {
-  const rows = s.store.requests({ action: rep.action, url });
-  const row = rows[rows.length - 1];
-  if (!row) throw new Error(`${rep.action} made no request matching ${url}`);
-  if (!row.body_hash) throw new Error(`${rep.action} ${url}: body_state=${row.body_state} (the page never read it); status=${row.status}`);
-  return s.store.json(String(row.body_hash)) as T;
+export async function goHome(s: Session, opts: { allowLogin?: boolean } = {}) {
+  s.uiIgnore = uiIgnore;
+  // With ctl.requireAuth and no cookie the SHELL ITSELF 302s to /login.html?next=/,
+  // so the login page is an arm of the home anchor (a refusal then costs ~40 ms, not 5 s).
+  const r = reached(await s.navigate(HOME, { until: { any: [
+    { selector: anchors.home.el, label: "home" },
+    { selector: anchors.login.el, label: "login" },
+  ] } }), "go home");
+  const which = r.until?.which as "home" | "login";
+  if (which === "login" && !opts.allowLogin) throw new Error(`go home: redirected to ${s.page.url()} — log in first`);
+  return { act: r.action, which };
 }
 
-/** The status code of a request this act made — for bodies the page never reads. */
-export function statusFrom(s: S, rep: any, url: string): number {
-  const rows = s.store.requests({ action: rep.action, url });
-  const row = rows[rows.length - 1];
-  if (!row) throw new Error(`${rep.action} made no request matching ${url}`);
-  return Number(row.status);
+// ---------------------------------------------------------------- ctl (the app's knobs)
+
+/** POST /ctl from inside the page (page cookies + it lands in the log). Returns the effective config. */
+export async function ctl(s: Session, patch: Record<string, unknown>): Promise<any> {
+  return await s.evaluate(
+    `fetch('/ctl',{method:'POST',headers:{'content-type':'application/json'},` +
+    `body:JSON.stringify(${JSON.stringify(patch)})}).then(r=>r.json())`);
 }
 
-// ---------------------------------------------------------------- anchors
+/** POST /ctl/reset — back to the documented defaults. Do this first in any check. */
+export async function ctlReset(s: Session): Promise<any> {
+  return await s.evaluate(`fetch('/ctl/reset',{method:'POST'}).then(r=>r.json())`);
+}
 
-/** The shell. Cheap and specific: the section-1 button only exists on the app shell. */
-export const SHELL = { selector: "#load-chart" } as const;
-export const LOGIN = { selector: "#login-form" } as const;
-export const SECURE = { selector: "#who" } as const;
+export async function ctlGet(s: Session): Promise<any> {
+  return await s.evaluate(`fetch('/ctl').then(r=>r.json())`);
+}
 
-/** Assert we are on the shell; if we are not, go there. Also clears a leftover modal by reloading. */
-export async function atShell(s: S, { reload = false } = {}) {
-  if (reload || !(await s.evaluate("!!document.getElementById('load-chart')"))) {
-    reached(await s.navigate(HOME, { until: SHELL }), "navigate home");
-  } else {
-    reached(await s.until(SHELL, { timeout: 1500 }), "shell anchor");
+// ---------------------------------------------------------------- 1. chart
+
+/** Three concurrent fetches, one slow. #chart-status never leaves "idle" — anchor on #chart. */
+export async function loadChart(s: Session, budgetMs = 4000) {
+  const r = reached(await s.click("#load-chart", {
+    until: { selector: "#chart:has-text('Chart loaded')" }, timeout: budgetMs,
+  }), "load chart");
+  const a = s.store.latestJson("/api/chart/a", r.action);
+  const b = s.store.latestJson("/api/chart/b", r.action);
+  const slow = s.store.requests({ url: "/api/slow", action: r.action })[0];
+  return { act: r.action, series: [a, b], slowMs: slow?.t_end && slow?.t_start ? Math.round(slow.t_end - slow.t_start) : null,
+           text: await s.evaluate("document.querySelector('#chart').textContent") as string };
+}
+
+// ---------------------------------------------------------------- 2. records + conditional modal
+
+/**
+ * Open a record. The "Allergy Review Required" modal is optional (ctl.modal) and may be
+ * delayed (ctl.modalDelayMs) — handled both ways.  Fields come from the wire.
+ */
+export async function openRecord(
+  s: Session, id: number, opts: { budgetMs?: number; modalGraceMs?: number } = {},
+) {
+  const budgetMs = opts.budgetMs ?? 4000;
+  // ctl.modalDelayMs can push the dialog AFTER the record renders, and nothing on the page
+  // says "no dialog is coming" — so a delayed interstitial costs a grace window, once.
+  const modalGraceMs = opts.modalGraceMs ?? 1200;
+  const r = reached(await s.click(`#record-${id}`, {
+    until: { any: [
+      { selector: "#record-modal", label: "modal" },
+      { selector: `#record h3:text-is("Record ${id}")`, label: "record" },
+    ] },
+    timeout: budgetMs,
+  }), `open record ${id}`);
+  const rec = s.store.latestJson(`/api/record/${id}`, r.action);
+  let modal = r.until?.which === "modal";
+  if (!modal) {
+    // it may still be coming (modalDelayMs); look once, cheaply, without failing.
+    const late = await s.until({ selector: "#record-modal" }, { timeout: modalGraceMs });
+    modal = !!late.until?.ok;
   }
+  if (modal) await acknowledgeModal(s);
+  return { act: r.action, record: rec, sawModal: modal };
 }
 
-// ------------------------------------------------------------------- ctl
-// The gauntlet's knobs. GET /ctl reads them, POST /ctl merges, POST /ctl/reset restores defaults.
-// Driven through the page so the calls land in disco's log like any other request.
-
-export type Ctl = Record<string, unknown>;
-
-export async function ctl(s: S, patch: Ctl): Promise<Ctl> {
-  return (await s.evaluate(
-    `fetch('${HOME}ctl',{method:'POST',headers:{'Content-Type':'application/json'},` +
-      `body:${JSON.stringify(JSON.stringify(patch))}}).then(r=>r.json())`,
-  )) as Ctl;
-}
-export async function readCtl(s: S): Promise<Ctl> {
-  return (await s.evaluate(`fetch('${HOME}ctl').then(r=>r.json())`)) as Ctl;
-}
-export async function resetCtl(s: S): Promise<Ctl> {
-  return (await s.evaluate(`fetch('${HOME}ctl/reset',{method:'POST'}).then(r=>r.json())`)) as Ctl;
-}
-/** Knobs the client reads once, at page load. Set them, then reload, or they do nothing. */
-export async function ctlAndReload(s: S, patch: Ctl) {
-  await ctl(s, patch);
-  await atShell(s, { reload: true });
+export async function acknowledgeModal(s: Session) {
+  return reached(await s.click("#record-modal button", { until: { gone: "#record-modal" } }), "acknowledge");
 }
 
-// -------------------------------------------------------- 1. load chart
+// ---------------------------------------------------------------- 3. optimistic save
 
 /**
- * Three concurrent GETs, one artificially slow (ctl.slowMs).
- * NOT #chart-status: it goes "loading…" and back to "idle", so it is already-true on both sides.
+ * The UI says "Saved ✓" before the server answers and never takes it back.
+ * The truth is the STATUS CODE of /api/save/status (its body is never read by the page).
  */
-export async function loadChart(s: S): Promise<{ responses: number; a: number[]; b: number[] }> {
-  await atShell(s);
-  const rep = await s.click("#load-chart", { until: { selector: "#chart:has-text('Chart loaded')" }, timeout: 8000 });
-  reached(rep, "load chart");
-  const text = String(await s.evaluate("document.getElementById('chart').textContent"));
-  const responses = Number(/\((\d+) responses\)/.exec(text)?.[1] ?? 0);
-  return {
-    responses,
-    a: jsonFrom(s, rep, "/api/chart/a").points,
-    b: jsonFrom(s, rep, "/api/chart/b").points,
-  };
+export async function save(s: Session, budgetMs = 6000) {
+  const r = reached(await s.click("#save", { until: { request: "/api/save/status" }, timeout: budgetMs }), "save");
+  const rows = s.store.requests({ url: "/api/save/status", action: r.action });
+  const status = rows.length ? rows[rows.length - 1].status : null;
+  const posted = s.store.latestJson("/api/save", r.action);
+  return { act: r.action, status, ok: status === 200, saveId: posted?.id ?? null,
+           uiSays: await s.evaluate("document.querySelector('#save-state').textContent") as string };
 }
 
-// ------------------------------------------------------------ 2. records
+// ---------------------------------------------------------------- 4. spinner that never resolves
 
-export type Record_ = { id: number; name: string; dob: string; mrn: string; allergies: string[] };
-
-/**
- * Open record `id`. The "Allergy Review Required" modal appears whenever ctl.modal is true
- * (for every record, not just the ones with allergies) and, with ctl.modalDelayMs, it can land
- * *after* the record renders — so both arms are optional and we always sweep the dialog afterwards.
- * The record is read from the wire, never scraped.
- */
-export async function openRecord(s: S, id: number): Promise<Record_> {
-  await atShell(s);
-  const rep = await s.click(`#record-${id}`, {
-    until: {
-      any: [
-        { selector: "[role=dialog]", label: "dialog" },
-        { selector: `#record h3:text-is("Record ${id}")`, label: "record" },
-      ],
-    },
-  });
-  reached(rep, `open record ${id}`);
-  await dismissRecordModal(s);
-  reached(await s.until({ selector: `#record h3:text-is("Record ${id}")` }, { timeout: 3000 }), "record rendered");
-  return jsonFrom<Record_>(s, rep, `/api/record/${id}`);
+/** Proves the negative: #spinner is perpetual. Returns true when it is STILL there after budgetMs. */
+export async function spinnerStillSpinning(s: Session, budgetMs = 800) {
+  const r = await s.until({ gone: "#spinner" }, { timeout: budgetMs });
+  return r.until?.ok === false;
 }
 
-/** Idempotent: acknowledges the allergy modal if one is up (including one that lands late). */
-export async function dismissRecordModal(s: S, { settle = 900 } = {}) {
-  const seen = await s.until(
-    { any: [{ selector: "#record-modal", label: "up" }] },
-    { timeout: settle },
-  );
-  if (!seen.until?.ok) return false;
-  reached(await s.click("#modal-ack", { until: { gone: "#record-modal" } }), "acknowledge allergy modal");
-  return true;
-}
+// ---------------------------------------------------------------- 7. debounced search
 
-// --------------------------------------------------------------- 3. save
-
-/**
- * Optimistic UI. #save-state flips to "Saved ✓" immediately and NEVER corrects itself,
- * so the screen cannot tell you whether the save worked. The truth is the status code of
- * GET /api/save/status (200 ok / 500 failed) — the page never reads that body, so the
- * status is all there is, and it is enough.
- */
-export async function save(s: S): Promise<{ ok: boolean; status: number; toast: string }> {
-  await atShell(s);
-  reached(await s.until({ gone: "[role=status]" }, { timeout: 4000 }), "previous toast gone");
-  const rep = await s.click("#save", {
-      until: {
-        any: [
-          { selector: "[role=status]:has-text('Save failed')", label: "failed" },
-          { selector: "[role=status]:has-text('Saved')", label: "saved" },
-        ],
-      },
-      timeout: 8000,
-  });
-  reached(rep, "save");
-  const toast = String(await s.evaluate("document.querySelector('[role=status]')?.textContent ?? ''"));
-  const status = statusFrom(s, rep, "/api/save/status");   // the page never reads this body
-  return { ok: status === 200, status, toast };
-}
-
-// ------------------------------------------------------------- 7. search
-
-/** Debounced 250 ms trailing. `type` (keystrokes), never `fill`. Hits come off the wire. */
-export async function search(s: S, q: string): Promise<string[]> {
-  await atShell(s);
+/** 250 ms trailing debounce: one XHR for the whole word. Hits come from the wire. */
+export async function search(s: Session, q: string) {
   reached(await s.fill("#search", ""), "clear search");
-  const rep = await s.type("#search", q, { until: { request: "/api/search", landed: true } });
-  reached(rep, `search ${q}`);
-  return jsonFrom(s, rep, "/api/search").hits as string[];
+  const r = reached(await s.type("#search", q, {
+    until: { request: `/api/search?q=${encodeURIComponent(q)}`, landed: true }, timeout: 4000,
+  }), `search ${q}`);
+  return { act: r.action, hits: (s.store.latestJson("/api/search", r.action)?.hits ?? []) as string[] };
 }
 
-// --------------------------------------------------------------- 8. rows
+// ---------------------------------------------------------------- 17. keyboard-only combobox
 
 /**
- * 10 000 rows, 24px each, ~23 in the DOM at a time. #rows-count exists but is EMPTY before the
- * click, so `{ selector: "#rows-count" }` is already-true — anchor on its text instead.
- * Row N comes from GET /api/rows (484 KB, fully captured), not from the DOM.
+ * #med ignores nothing, but the list is replaced faster than a mouse can land and it is
+ * not debounced. Recipe: clear, type, wait for the LAST suggestion request, ArrowDown, Enter.
  */
-export async function loadRows(s: S): Promise<{ total: number; rows: any[] }> {
-  await atShell(s);
-  const rep = await s.click("#load-rows", { until: { selector: "#rows-count:has-text('rows')" }, timeout: 8000 });
-  reached(rep, "load rows");
-  const body = jsonFrom(s, rep, "/api/rows") as any;
-  const rows = Array.isArray(body) ? body : (body.rows ?? body.items ?? []);
-  return { total: rows.length, rows };
+export async function pickMed(s: Session, prefix: string) {
+  reached(await s.fill("#med", ""), "clear med");                 // s.type APPENDS — always clear
+  reached(await s.type("#med", prefix, {
+    until: { request: `/api/meds?q=${encodeURIComponent(prefix)}`, landed: true }, timeout: 4000,
+  }), "type med");
+  reached(await s.press("ArrowDown", {
+    target: "#med", until: { fn: "document.querySelector('#med').getAttribute('aria-activedescendant')" },
+  }), "arrow down");
+  const r = reached(await s.press("Enter", {
+    target: "#med", until: { selector: "#med-selected:has-text('Selected:')" },
+  }), "enter");
+  return { act: r.action, selected: (await s.evaluate("document.querySelector('#med-selected').textContent") as string).replace(/^Selected:\s*/, "") };
 }
 
-/** Scroll the virtualised viewport and wait for the *effect* (the first rendered row changing). */
-export async function scrollRowsTo(s: S, index: number): Promise<string> {
-  await s.evaluate(`document.getElementById('rows').scrollTop = ${index} * 24`);
-  reached(
-    await s.until({ fn: `document.querySelector('#rows .row[data-id="${index}"]') !== null` }, { timeout: 3000 }),
-    `row ${index} rendered`,
-  );
-  return String(await s.evaluate(`document.querySelector('#rows .row[data-id="${index}"]').textContent`));
+// ---------------------------------------------------------------- 8. virtualised rows
+
+/** 10 000 rows on the wire, ~24 in the DOM. Total and any row's data come from /api/rows. */
+export async function loadRows(s: Session) {
+  const r = reached(await s.click("#load-rows", { until: { selector: "#rows .row" }, timeout: 4000 }), "load rows");
+  const all = s.store.latestJson("/api/rows", r.action) as Array<{ id: number; name: string; group: string }>;
+  const dom = await s.evaluate("document.querySelectorAll('#rows .row').length") as number;
+  return { act: r.action, total: all.length, domCount: dom, all };
 }
 
-// ----------------------------------------------------------- 9. rerender
-
-/** #rerender is replaced on every mousemove: a real click times out with `detached`. js:true only. */
-export async function clickRerender(s: S): Promise<number> {
-  await atShell(s);
-  const before = Number(await s.evaluate("document.getElementById('rerender-count').textContent"));
-  reached(
-    await s.click("#rerender", { js: true, until: { selector: `#rerender-count:text-is('${before + 1}')` } }),
-    "rerender click",
-  );
-  return before + 1;
+/** Move the virtual window. Row height is 24 px; wait on the EFFECT, never on the scroll call. */
+export async function scrollRowsTo(s: Session, index: number) {
+  const before = await s.evaluate("document.querySelector('#rows .row')?.dataset.id") as string;
+  await s.evaluate(`document.querySelector('#rows').scrollTop = 24 * ${index}`);
+  const r = reached(await s.until(
+    { fn: `document.querySelector('#rows .row')?.dataset.id !== ${JSON.stringify(before)}` }, { timeout: 3000 },
+  ), "rows scrolled");
+  return { act: r.action, firstId: await s.evaluate("document.querySelector('#rows .row').dataset.id") as string };
 }
 
-// ------------------------------------------------------------ 10. frames
+// ---------------------------------------------------------------- 9. re-render race
 
-export async function iframeSubmit(s: S, name: string): Promise<string> {
-  await atShell(s);
-  reached(await s.fill("#if-name", name, { frame: "#same-origin" }), "same-origin name");
-  const rep = await s.click("#if-submit", { frame: "#same-origin", until: { request: "/api/iframe-submit", landed: true } });
-  reached(rep, "same-origin submit");
-  return jsonFrom(s, rep, "/api/iframe-submit").name;
+/** The button is replaced on hover; a real mouse click is diagnosed `detached` after 3 s. Use js:true. */
+export async function clickRerender(s: Session) {
+  const before = Number(await s.evaluate("document.querySelector('#rerender-count').textContent"));
+  const r = reached(await s.click("#rerender", {
+    js: true, until: { fn: `Number(document.querySelector('#rerender-count').textContent) > ${before}` },
+  }), "rerender");
+  return { act: r.action, count: Number(await s.evaluate("document.querySelector('#rerender-count').textContent")) };
 }
 
-/** Depth-2: /iframe.html embeds /iframe2.html. Chain frames with ">>". */
-export async function deepIframeSubmit(s: S, name: string): Promise<string> {
-  await atShell(s);
-  const frame = "#same-origin >> #nested2";
-  reached(await s.fill("#deep-name", name, { frame }), "deep name");
-  reached(await s.click("#deep-submit", { frame, until: { request: "/api/iframe-submit", landed: true } }), "deep submit");
-  return String(await s.frame(frame).locator("#deep-result").textContent()).replace("Deep submitted: ", "");
+// ---------------------------------------------------------------- 10. iframes
+
+export async function submitSameFrame(s: Session, name: string) {
+  reached(await s.fill("#if-name", name, { frame: "#same-origin" }), "fill same-origin");
+  const r = reached(await s.click("#if-submit", {
+    frame: "#same-origin", until: { request: "/api/iframe-submit", landed: true },
+  }), "submit same-origin");
+  return { act: r.action, body: s.store.latestJson("/api/iframe-submit", r.action),
+           text: await s.frame("#same-origin").locator("#if-result").textContent() };
 }
 
-/** Cross-origin (localhost:4801). Its requests are in the log under the other origin's URL. */
-export async function xframeSubmit(s: S, name: string): Promise<{ name: string; origin: string }> {
-  await atShell(s);
-  reached(await s.fill("#xf-name", name, { frame: "#cross-origin" }), "cross-origin name");
-  const rep = await s.click("#xf-submit", { frame: "#cross-origin", until: { request: "/api/xframe-submit", landed: true } });
-  reached(rep, "cross-origin submit");
-  return jsonFrom(s, rep, "/api/xframe-submit");
+export async function submitCrossFrame(s: Session, name: string) {
+  reached(await s.fill("#xf-name", name, { frame: "#cross-origin" }), "fill cross-origin");
+  const r = reached(await s.click("#xf-submit", {
+    frame: "#cross-origin", until: { request: "/api/xframe-submit", landed: true },
+  }), "submit cross-origin");
+  return { act: r.action, body: s.store.latestJson("/api/xframe-submit", r.action),
+           text: await s.frame("#cross-origin").locator("#xf-result").textContent() };
 }
 
-// ----------------------------------------------------------- 11. dialogs
-
-export async function nativeAlert(s: S): Promise<string> {
-  await atShell(s);
-  reached(await s.click("#alert", { until: { selector: "#alert-result:text-is('alerted')" } }), "alert");
-  return "alerted";
+/** Depth 2: /iframe.html embeds /iframe2.html. */
+export async function submitDeepFrame(s: Session, name: string) {
+  reached(await s.fill("#deep-name", name, { frame: "#same-origin >> #nested2" }), "fill deep");
+  const r = reached(await s.click("#deep-submit", {
+    frame: "#same-origin >> #nested2",
+    until: { selector: "#deep-result:not(:empty)", frame: "#same-origin >> #nested2" },
+    timeout: 3000,
+  }), "submit deep");
+  const text = await s.frame("#same-origin >> #nested2").locator("#deep-result").textContent();
+  return { act: r.action, text };
 }
 
-/** "confirmed" when the session is dialogs:"accept", "cancelled" when it is "dismiss". */
-export async function nativeConfirm(s: S): Promise<string> {
-  await atShell(s);
-  reached(
-    await s.click("#confirm", {
-      until: {
-        any: [
-          { selector: "#confirm-result:text-is('confirmed')", label: "confirmed" },
-          { selector: "#confirm-result:text-is('cancelled')", label: "cancelled" },
-        ],
-      },
-    }),
-    "confirm",
-  );
-  return String(await s.evaluate("document.getElementById('confirm-result').textContent"));
+// ---------------------------------------------------------------- 11. native dialogs
+
+/** Session policy handles them (open(..., { dialogs: "accept" | "dismiss" })); the row lands in `dialogs`. */
+export async function nativeDialog(s: Session, which: "alert" | "confirm") {
+  const sel = which === "alert" ? "#alert" : "#confirm";
+  const out = which === "alert" ? "#alert-result" : "#confirm-result";
+  const r = reached(await s.click(sel, { until: { selector: `${out}:not(:empty)` } }), which);
+  const row = s.store.sql(`SELECT type,message,handled FROM dialogs WHERE action_id=? ORDER BY seq DESC LIMIT 1`, r.action)[0];
+  return { act: r.action, dialog: row, result: await s.evaluate(`document.querySelector('${out}').textContent`) as string };
+}
+
+/** Arm beforeunload, follow the link, come back. With dialogs:"accept" the navigation goes through. */
+export async function armUnloadAndNavigateAway(s: Session) {
+  reached(await s.click("#arm-unload", { until: { selector: "#unload-armed:text-is('armed')" } }), "arm");
+  const r = reached(await s.click("#nav-away", { until: { url: "/away.html" } }), "navigate away");
+  const row = s.store.sql(`SELECT type,message,handled FROM dialogs WHERE action_id=? ORDER BY seq DESC LIMIT 1`, r.action)[0];
+  reached(await s.click("a#back", { until: { selector: anchors.home.el } }), "back to shell");
+  return { act: r.action, dialog: row };
+}
+
+// ---------------------------------------------------------------- 15. child window
+
+export async function openChildWindow(s: Session) {
+  const r = reached(await s.click("#open-child", { until: { page: "child.html" } }), "open child");
+  const child = s.context.pages().find((p) => p.url().includes("child.html"))!;
+  const text = await child.locator("body").innerText();
+  await s.closeOtherPages();                      // a background page is throttled to 1 fps — always clean up
+  return { act: r.action, text };
+}
+
+// ---------------------------------------------------------------- 16. canvas
+
+/** 400x200, 4 rows x 8 cols, 50 px cells. Pixels are the only evidence — read them back. */
+export async function pickCanvasCell(s: Session, row: number, col: number) {
+  const x = col * 50 + 25, y = row * 50 + 25;
+  const probe = `(()=>{const c=document.querySelector('#grid');return Array.from(c.getContext('2d').getImageData(${x},${y},1,1).data).join(',')})()`;
+  const before = await s.evaluate(probe) as string;
+  const r = reached(await s.click("#grid", {
+    position: { x, y }, until: { fn: `${probe} !== ${JSON.stringify(before)}` }, timeout: 2000,
+  }), `canvas cell ${row},${col}`);
+  return { act: r.action, before, after: await s.evaluate(probe) as string,
+           label: (s.store.latestJson("/api/grid")?.cells ?? []).find((c: any) => c.r === row && c.c === col)?.label };
+}
+
+// ---------------------------------------------------------------- 24 / 25. context menu, dblclick
+
+export async function contextMenuPick(s: Session, item: "open" | "rename" | "delete") {
+  reached(await s.rightclick("#ctx-target", { until: { selector: "#ctx-menu li", visible: true } }), "open ctx menu");
+  const r = reached(await s.click(`#ctx-${item}`, { until: { gone: "#ctx-menu li" } }), `ctx ${item}`);
+  return { act: r.action, result: await s.evaluate("document.querySelector('#ctx-result').textContent") as string };
+}
+
+export async function doubleClickToEdit(s: Session) {
+  const r = reached(await s.dblclick("#dbl-target", { until: { selector: "#dbl-state:text-is('editing')" } }), "dblclick edit");
+  return { act: r.action, editable: await s.evaluate("!!document.querySelector('#s-25 input')") as boolean };
+}
+
+// ---------------------------------------------------------------- 26. drag
+
+/** Slider: an offset drag from the thumb's centre. value = percent of the 280 px of travel. */
+export async function setSlider(s: Session, dx: number) {
+  const before = await s.evaluate("document.querySelector('#slider-value').textContent") as string;
+  // `all` of the rendered value AND the wire, so the POST is guaranteed inside this act's window.
+  const r = reached(await s.drag("#slider-thumb", { dx, dy: 0 }, {
+    until: { all: [
+      { fn: `document.querySelector('#slider-value').textContent !== ${JSON.stringify(before)}`, label: "value" },
+      { request: "/api/drag-report", label: "reported" },
+    ] },
+  }), "slider");
+  return { act: r.action, value: Number(await s.evaluate("document.querySelector('#slider-value').textContent")),
+           reported: s.store.requests({ url: "/api/drag-report", action: r.action }).at(-1)?.req_body };
 }
 
 /**
- * Arms beforeunload, then leaves. With dialogs:"accept" the dialog is accepted and we land on
- * /away.html; with dialogs:"dismiss" the page stays put.
- * "stayed" has no positive landmark of its own — every candidate (#load-chart, url "/") is already
- * true before the click, so it is diagnosed as the *absence* of the landing page inside a short budget.
+ * Reorder: dragTo is ONE straight move, so it must land past the target's midpoint.
+ * Dropping on the ADJACENT item does nothing (and still POSTs an unchanged /api/drag-report);
+ * drop on the item two slots away to move one slot.
  */
-export async function armAndNavigateAway(s: S, budget = 2500): Promise<"left" | "stayed"> {
-  await atShell(s);
-  reached(await s.click("#arm-unload", { until: { selector: "#unload-armed:text-is('armed')" } }), "arm beforeunload");
-  const rep = await s.click("#nav-away", {
-    until: { selector: "h1:text-is('You navigated away')" },
-    timeout: budget,
-  });
-  if (!rep.ok) reached(rep, "navigate away");                    // the click itself must have happened
-  const which = rep.until?.ok ? "left" : "stayed";
-  if (!rep.dialogs?.some((d: any) => d.type === "beforeunload")) throw new Error("no beforeunload dialog was raised");
-  await atShell(s, { reload: true });
-  return which;
+export async function moveItemDownOneSlot(s: Session) {
+  const before = await s.evaluate("document.querySelector('#sort-order').textContent") as string;
+  const r = reached(await s.drag("#sort-a", "#sort-c", {
+    until: { fn: `document.querySelector('#sort-order').textContent !== ${JSON.stringify(before)}` }, timeout: 3000,
+  }), "reorder");
+  return { act: r.action, before, after: await s.evaluate("document.querySelector('#sort-order').textContent") as string };
 }
 
-// --------------------------------------------------- 12. session timeout
+// ---------------------------------------------------------------- 18. shadow DOM
 
-/** Arm the idle timer, wait for the dialog, then "Stay signed in" (which re-arms it). */
-export async function sessionTimeoutAndStay(s: S, timeoutMs = 1200): Promise<number> {
-  await ctlAndReload(s, { timeoutMs });
-  const fired = await s.until({ selector: "#session-timeout" }, { timeout: timeoutMs + 4000 });
-  reached(fired, "session expiring dialog");
-  reached(await s.click("#stay", { until: { gone: "#session-timeout" } }), "stay signed in");
-  reached(await s.until({ selector: "#timeout-state:has-text('armed')" }, { timeout: 2000 }), "timer re-armed");
-  await ctlAndReload(s, { timeoutMs: 0 });
-  return fired.until?.elapsedMs ?? -1;
+/** The root is OPEN, so ordinary CSS pierces it; the count is only reachable through .shadowRoot. */
+export async function clickShadowButton(s: Session) {
+  const root = "document.querySelector('#shadow-host').shadowRoot";
+  const before = Number(await s.evaluate(`${root}.querySelector('#shadow-count').textContent`));
+  const r = reached(await s.click("#shadow-host #shadow-btn", {
+    until: { fn: `Number(${root}.querySelector('#shadow-count').textContent) > ${before}` },
+  }), "shadow click");
+  return { act: r.action, count: Number(await s.evaluate(`${root}.querySelector('#shadow-count').textContent`)) };
 }
 
-// ------------------------------------------------------------- 14. delete
+// ---------------------------------------------------------------- 20. GraphQL
 
-export async function deleteItem(s: S, id = 1): Promise<number> {
-  await atShell(s);
-  const rep = await s.click("#delete", { until: { request: "/api/item/", landed: true } });
-  reached(rep, "delete");
-  return jsonFrom(s, rep, "/api/item/" + id).deleted;
+export async function graphql(s: Session, kind: "query" | "mutate") {
+  const r = reached(await s.click(kind === "query" ? "#gql-query" : "#gql-mutate", {
+    until: { request: "/api/graphql", landed: true },
+  }), `graphql ${kind}`);
+  const row = s.store.requests({ url: "/api/graphql", action: r.action }).at(-1)!;
+  return { act: r.action, sent: row.req_body, body: s.store.latestJson("/api/graphql", r.action) };
 }
 
-// ------------------------------------------------------- 15. child window
+// ---------------------------------------------------------------- 28. fake stream
+
+/** mime says text/event-stream, the body is finite XML — and it IS captured (body_state "ok"). */
+export async function loadFakeStream(s: Session) {
+  const r = reached(await s.click("#load-fake-stream", {
+    until: { request: "/api/fake-stream", landed: true },
+  }), "fake stream");
+  const row = s.store.requests({ url: "/api/fake-stream", action: r.action }).at(-1)!;
+  return { act: r.action, mime: row.mime, bodyState: row.body_state, body: s.store.body(row.body_hash!) };
+}
+
+// ---------------------------------------------------------------- 23. push channels
 
 /**
- * There is no `until` for "a new page opened" — act bare with a window and read report.pages.
- * Always close it: a background page is throttled to 1 fps and slows the driven page down.
+ * Deliver one notification over a chosen channel.  Arm FIRST, trigger second.
+ * ws  -> visible as a ws_frame (only if the socket opened inside this session: goHome first)
+ * poll-> visible as a /api/notify-poll response (needs ctl.notify = true)
+ * sse -> invisible on the wire (body_state "streaming"); DOM only.
  */
-export async function openChildAndPing(s: S): Promise<string> {
-  await atShell(s);
-  const rep = await s.click("#open-child", { window: 1200 });
-  reached(rep, "open child window");
-  const child = s.context.pages().find((p: any) => p.url().includes("child.html"));
-  if (!child) throw new Error("child window did not open; report.pages=" + JSON.stringify(rep.pages));
-  await child.bringToFront();
-  await child.click("#child-fetch");
-  await child.waitForSelector("#child-result:not(:empty)", { timeout: 3000 });
-  const out = String(await child.locator("#child-result").textContent());
-  await s.page.bringToFront();
-  await s.closeOtherPages();
-  return out;
+export async function pushNotification(s: Session, via: "ws" | "sse" | "poll", budgetMs = 8000) {
+  const before = await s.evaluate("document.querySelectorAll('#notif-list li').length") as number;
+  const arms: any[] = [{ fn: `document.querySelectorAll('#notif-list li').length > ${before}`, label: "dom" }];
+  if (via === "ws") arms.unshift({ ws: "notify", label: "ws-frame" });
+  if (via === "poll") arms.unshift({ request: "/api/notify-poll", landed: true, label: "poll-response" });
+  const pending = s.until({ all: arms }, { timeout: budgetMs });
+  await ctl(s, { push: via });
+  const r = reached(await pending, `push ${via}`);
+  const items = await s.evaluate("[...document.querySelectorAll('#notif-list li')].map(li=>li.textContent)") as string[];
+  return { act: r.action, which: r.until?.which, latest: items.at(-1)!, count: items.length };
 }
 
-// -------------------------------------------------------------- 16. canvas
+// ---------------------------------------------------------------- 5/22. ambient traffic
 
-/**
- * Pixels only: nothing in the DOM changes. `act` has no position option, so address the cell
- * with raw mouse coordinates. Readback: window.__gridSelected, and the cell pixel turning amber.
- */
-export async function selectGridCell(s: S, r: number, c: number): Promise<{ r: number; c: number; pixel: number[] }> {
-  await atShell(s);
-  reached(await s.scroll("#grid"), "scroll canvas into view");
-  const box = JSON.parse(String(await s.evaluate("JSON.stringify(document.getElementById('grid').getBoundingClientRect())")));
-  const cw = 400 / 8, ch = 200 / 4;                       // from GET /api/grid: 4 rows x 8 cols
-  const x = c * cw + cw / 2, y = r * ch + ch / 2;
-  await s.page.mouse.click(box.x + 1 + x, box.y + 1 + y);   // +1 for the canvas border
-  reached(
-    await s.until({ fn: `window.__gridSelected && window.__gridSelected.r===${r} && window.__gridSelected.c===${c}` }, { timeout: 2000 }),
-    `grid cell ${r},${c}`,
-  );
-  const pixel = JSON.parse(
-    String(await s.evaluate(`JSON.stringify([...document.getElementById('grid').getContext('2d').getImageData(${x},${y},1,1).data])`)),
-  );
-  return { r, c, pixel };
+/** Turn the background on and prove it: heartbeat every ctl.heartbeatMs, /api/poll holding ctl.pollHoldMs. */
+export async function observeAmbient(s: Session, beats = 1, budgetMs = 12000) {
+  await ctl(s, { ambient: true });
+  await goHome(s);
+  const r = reached(await s.until(
+    { fn: `Number(document.querySelector('#heartbeat-count').textContent) >= ${beats}` }, { timeout: budgetMs },
+  ), "ambient heartbeats");
+  const hb = s.store.requests({ url: "/api/heartbeat", action: r.action });
+  const poll = s.store.requests({ url: "/api/poll", action: r.action });
+  await ctl(s, { ambient: false });
+  return { act: r.action, heartbeats: hb.length, polls: poll.length,
+           pollHoldMs: poll.filter((p) => p.t_end).map((p) => Math.round(p.t_end! - p.t_start)) };
 }
 
-// ------------------------------------------------------------ 17. combobox
+// ---------------------------------------------------------------- 12. session timeout
 
-/**
- * Keyboard only. The <li role=option>s are pointer-events:none — clicking one is `unclickable`.
- * type -> wait for /api/meds -> ArrowDown per option -> Enter.
- */
-export async function pickMedication(s: S, prefix: string, name: string): Promise<string> {
-  await atShell(s);
-  reached(await s.fill("#med", ""), "clear med");
-  const typed = await s.type("#med", prefix, { until: { request: "/api/meds", landed: true } });
-  reached(typed, "type medication");
-  const hits = jsonFrom(s, typed, "/api/meds").hits as string[];
-  const idx = hits.indexOf(name);
-  if (idx < 0) throw new Error(`"${name}" not in /api/meds?q=${prefix}: ${hits.join(", ")}`);
-  for (let i = 0; i <= idx; i++) {
-    reached(await s.press("ArrowDown", { target: "#med", until: { selector: `#med-opt-${i}[aria-selected="true"]` } }), `ArrowDown ${i}`);
-  }
-  reached(await s.press("Enter", { target: "#med", until: { selector: `#med-selected:has-text("${name}")` } }), "Enter");
-  return String(await s.evaluate("document.getElementById('med-selected').textContent"));
-}
-
-// ---------------------------------------------------------- 18. shadow DOM
-
-/** Open shadow root; Playwright pierces it, so "#shadow-host >> #shadow-btn" just works. */
-export async function clickShadowButton(s: S): Promise<number> {
-  await atShell(s);
-  const before = Number(await s.evaluate("document.getElementById('shadow-host').shadowRoot.getElementById('shadow-count').textContent"));
-  reached(
-    await s.click("#shadow-host >> #shadow-btn", {
-      until: { fn: `+document.getElementById('shadow-host').shadowRoot.getElementById('shadow-count').textContent > ${before}` },
-    }),
-    "shadow button",
-  );
-  return before + 1;
-}
-
-// ----------------------------------------------------------------- 19. SSE
-
-/** #sse-status idle -> open -> done; 5 events ~500 ms apart. The messages exist only in the DOM. */
-export async function runSse(s: S): Promise<string[]> {
-  await atShell(s);
-  reached(await s.click("#start-sse", { until: { selector: "#sse-status:text-is('open')" } }), "start SSE");
-  reached(await s.until({ selector: "#sse-status:text-is('done')" }, { timeout: 8000 }), "SSE finished");
-  return (await s.evaluate("[...document.querySelectorAll('#sse-log li')].map(e=>e.textContent)")) as string[];
-}
-
-// ------------------------------------------------------------- 20. GraphQL
-
-/** One path for both operations — tell them apart by the REQUEST body (requests.req_body). */
-export async function graphql(s: S, op: "query" | "mutation"): Promise<any> {
-  await atShell(s);
-  const rep = await s.click(op === "query" ? "#gql-query" : "#gql-mutate", { until: { request: "/api/graphql", landed: true } });
-  reached(rep, `graphql ${op}`);
-  return jsonFrom(s, rep, "/api/graphql");
+/** ctl.timeoutMs of idle raises a [role=dialog]; "Stay signed in" clears it. */
+export async function sessionTimeoutAndRecover(s: Session, timeoutMs = 2500) {
+  await ctl(s, { timeoutMs });
+  await goHome(s);
+  const r = reached(await s.until({ selector: "[role=dialog]" }, { timeout: timeoutMs + 4000 }), "session dialog");
+  const text = await s.evaluate("document.querySelector('[role=dialog]').innerText") as string;
+  reached(await s.click("button:has-text('Stay signed in')", { until: { gone: "[role=dialog]" } }), "stay signed in");
+  await ctl(s, { timeoutMs: 0 });
+  return { act: r.action, text, state: await s.evaluate("document.querySelector('#timeout-state').textContent") as string };
 }
 
 // ---------------------------------------------------------------- 21. auth
 
-/** With ctl.requireAuth every page 302s to /login.html?next=…, including "/". */
-export async function logout(s: S) {
-  await s.context.clearCookies();
+/** requireAuth makes /secure.html a 302 to /login.html?next=… . Returns which anchor we landed on. */
+export async function gotoSecure(s: Session) {
+  const r = reached(await s.click("#go-secure", {
+    until: { any: [
+      { selector: anchors.secure.el, label: "secure" },
+      { selector: anchors.login.el,  label: "login" },
+    ] },
+  }), "go to secure");
+  return { act: r.action, which: r.until?.which as "secure" | "login", url: s.page.url() };
 }
 
-export async function login(s: S, user: string, pass: string): Promise<string> {
-  reached(await s.until(LOGIN, { timeout: 2000 }), "on the login page");
-  const next = new URL(s.page.url()).searchParams.get("next") ?? "/secure.html";
+/**
+ * From the login page. POST /api/login accepts ANY non-empty user/pass (the cookie value is
+ * the username); only an EMPTY field is a 401, which renders #login-error "login failed".
+ */
+export async function login(s: Session, user: string, pass: string) {
+  reached(await s.until({ selector: anchors.login.el }, { timeout: 1500 }), "at login");
+  // A leftover "login failed" from the previous attempt makes the `error` arm alreadyTrue.
+  // Reload the form instead of asserting on a stale span.
+  if (await s.evaluate("document.querySelector('#login-error').textContent !== ''"))
+    reached(await s.navigate(s.page.url(), { until: { selector: anchors.login.el } }), "reload login");
   reached(await s.fill("#user", user), "user");
   reached(await s.fill("#pass", pass), "pass");
-  reached(
-    await s.click("#login", {
-      until: {
-        any: [
-          { selector: "#who", label: "secure" },
-          { selector: "#load-chart", label: "shell" },
-          { selector: "#login-error:has-text('login failed')", label: "rejected" },
-        ],
-      },
-    }),
-    `login (next=${next})`,
-  );
-  return String(await s.evaluate("document.getElementById('who')?.textContent ?? document.title"));
+  // where you land depends on ?next= — the shell, the secure page, or nowhere (bad password).
+  const r = reached(await s.click("#login", {
+    until: { any: [
+      { selector: anchors.secure.el, label: "secure" },
+      { selector: anchors.home.el,   label: "home" },
+      { selector: "#login-error:not(:empty)", label: "error" },
+    ] },
+  }), "submit login");
+  const cookie = (await s.context.cookies()).find((c) => c.name === "gauntlet_auth");
+  return { act: r.action, which: r.until?.which as "secure" | "home" | "error", cookie: cookie?.value ?? null,
+           who: r.until?.which === "secure" ? await s.evaluate("document.querySelector('#who').textContent") as string : null };
 }
 
-/** Anchor in: anywhere. Anchor out: /secure.html showing "Welcome, <user>". */
-export async function reachSecureArea(s: S, user = "demo", pass = "s3cret"): Promise<string> {
-  const rep = await s.navigate("http://localhost:4800/secure.html", {
-    until: { any: [{ selector: "#who", label: "secure" }, { selector: "#login-form", label: "login" }] },
-  });
-  reached(rep, "go to secure area");
-  if (rep.until?.which === "login") await login(s, user, pass);
-  reached(await s.until(SECURE, { timeout: 3000 }), "secure area");
-  return String(await s.evaluate("document.getElementById('who').textContent"));
-}
+export async function logout(s: Session) { await s.context.clearCookies(); }
 
-// ------------------------------------------------------- 23. push channels
+// ---------------------------------------------------------------- 14. delete
 
-export type Channel = "ws" | "sse" | "poll";
-
-/** Fire one notification down a channel and wait for it to show up in the list. */
-export async function push(s: S, channel: Channel, timeout = 8000): Promise<string> {
-  await atShell(s);
-  const before = Number(await s.evaluate("document.getElementById('notif-count').textContent"));
-  await s.evaluate(
-    `fetch('${HOME}ctl',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"push":"${channel}"}'}).then(r=>r.text())`,
-  );
-  reached(
-    await s.until({ fn: `+document.getElementById('notif-count').textContent > ${before}` }, { timeout }),
-    `push via ${channel}`,
-  );
-  return String(await s.evaluate("[...document.querySelectorAll('#notif-list li')].pop().textContent"));
-}
-
-/** The long-poll channel only exists when ctl.notify is true (read at page load). */
-export async function enablePollChannel(s: S, notifyPollHoldMs = 4000) {
-  await ctlAndReload(s, { notify: true, notifyPollHoldMs });
-}
-
-// -------------------------------------------------------- 24. context menu
-
-export async function contextMenuPick(s: S, item: "open" | "rename" | "delete"): Promise<string> {
-  await atShell(s);
-  reached(await s.rightclick("#ctx-target", { until: { selector: "#ctx-menu[role=menu]", visible: true } }), "open context menu");
-  reached(await s.click(`#ctx-${item}`, { until: { gone: "#ctx-menu" } }), `pick ${item}`);
-  return String(await s.evaluate("document.getElementById('ctx-result').textContent"));
-}
-
-// --------------------------------------------------- 25. double-click edit
-
-export async function editValue(s: S, text: string): Promise<string> {
-  await atShell(s);
-  reached(await s.dblclick("#dbl-target", { until: { selector: "#dbl-input" } }), "enter edit mode");
-  reached(await s.fill("#dbl-input", text), "type value");
-  reached(await s.press("Enter", { target: "#dbl-input", until: { selector: `#dbl-state:has-text("committed: ${text}")` } }), "commit");
-  return String(await s.evaluate("document.getElementById('dbl-target').textContent"));
-}
-
-// ----------------------------------------------------------------- 26. drag
-
-/** s.drag() only accepts a selector as the destination, so a slider needs raw mouse moves. */
-export async function setSlider(s: S, fraction: number): Promise<number> {
-  await atShell(s);
-  reached(await s.scroll("#slider-track"), "scroll slider into view");
-  const track = JSON.parse(String(await s.evaluate("JSON.stringify(document.getElementById('slider-track').getBoundingClientRect())")));
-  const thumb = JSON.parse(String(await s.evaluate("JSON.stringify(document.getElementById('slider-thumb').getBoundingClientRect())")));
-  const y = thumb.y + thumb.height / 2;
-  await s.page.mouse.move(thumb.x + thumb.width / 2, y);
-  await s.page.mouse.down();
-  await s.page.mouse.move(track.x + track.width * fraction, y, { steps: 12 });
-  await s.page.mouse.up();
-  reached(await s.until({ fn: `+document.getElementById('slider-value').textContent > 0` }, { timeout: 2000 }), "slider moved");
-  return Number(await s.evaluate("document.getElementById('slider-value').textContent"));
-}
-
-/** Move #sort-a below #sort-c. dragTo() only moves it one slot; a stepped path past the bottom works. */
-export async function moveItemToEnd(s: S, id = "sort-a"): Promise<string> {
-  await atShell(s);
-  reached(await s.scroll("#sort-list"), "scroll list into view");
-  const box = (sel: string) => s.evaluate(`JSON.stringify(document.getElementById('${sel}').getBoundingClientRect())`).then((x) => JSON.parse(String(x)));
-  const from = await box(id), last = await box("sort-c");
-  const y0 = from.y + from.height / 2, y1 = last.y + last.height;
-  await s.page.mouse.move(from.x + 20, y0);
-  await s.page.mouse.down();
-  for (const f of [0.3, 0.6, 1.0]) await s.page.mouse.move(from.x + 20, y0 + (y1 - y0) * f, { steps: 6 });
-  await s.page.mouse.up();
-  reached(await s.until({ selector: `#sort-order:has-text("${id.slice(-1)}")` }, { timeout: 2000 }), "order updated");
-  return String(await s.evaluate("document.getElementById('sort-order').textContent"));
-}
-
-// --------------------------------------------------------- 28. fake stream
-
-/** text/event-stream mime, ordinary finite body. disco captures it like any other body. */
-export async function loadFakeStream(s: S): Promise<{ chars: number; body: string }> {
-  await atShell(s);
-  const rep = await s.click("#load-fake-stream", { until: { request: "/api/fake-stream", landed: true } });
-  reached(rep, "fake stream");
-  const row = s.store.requests({ action: rep.action, url: "/api/fake-stream" }).pop()!;
-  const chars = Number(/got (\d+) chars/.exec(String(await s.evaluate("document.getElementById('fake-stream-out').textContent")))?.[1] ?? 0);
-  return { chars, body: String(s.store.body(String(row.body_hash))) };
-}
-
-// ------------------------------------------------------- 5/22. ambient + 6. ws
-
-/** Turn the background noise on and wait for the header counters to move. */
-export async function runAmbient(s: S, { heartbeatMs = 700, pollHoldMs = 400, wsPushMs = 900 } = {}) {
-  await ctlAndReload(s, { ambient: true, heartbeatMs, pollHoldMs, wsPushMs });
-  reached(
-    await s.until(
-      { fn: "+document.getElementById('heartbeat-count').textContent >= 2 && +document.getElementById('poll-count').textContent >= 2" },
-      { timeout: 8000 },
-    ),
-    "ambient traffic",
-  );
-  const out = {
-    heartbeats: Number(await s.evaluate("document.getElementById('heartbeat-count').textContent")),
-    polls: Number(await s.evaluate("document.getElementById('poll-count').textContent")),
-    unattributed: s.store.sql("SELECT method, path, count(*) n FROM requests WHERE action_id IS NULL GROUP BY 1,2") as any[],
-  };
-  await ctlAndReload(s, { ambient: false });
-  return out;
-}
-
-/** Every button click except #noop sends {"type":"action","id":"<element id>"} up the WebSocket. */
-export async function wsActionFrame(s: S, buttonId: string, wireUntil = "/api/"): Promise<any> {
-  await atShell(s);
-  // ws_frames.seq is a global AUTOINCREMENT; ws_frames.t restarts with every run, so never ORDER BY t.
-  const before = Number((s.store.sql("SELECT coalesce(max(seq),0) m FROM ws_frames") as any[])[0].m);
-  // Wait on this button's own round trip: it gives the CDP recorder time to flush the outgoing frame.
-  reached(await s.click("#" + buttonId, { until: { request: wireUntil, landed: true }, timeout: 5000 }), "click " + buttonId);
-  const rows = s.store.sql(
-    `SELECT payload FROM ws_frames WHERE dir='out' AND seq > ${before} ORDER BY seq DESC LIMIT 5`,
-  ) as any[];
-  for (const r of rows) {
-    const f = JSON.parse(String(r.payload));
-    if (f.type === "action" && f.id === buttonId) return f;
-  }
-  return null;
-}
-
-// ---------------------------------------------------------- 4. the spinner
-
-/** Proves the negative: #spinner is a CSS animation with no request behind it and never resolves. */
-export async function spinnerNeverResolves(s: S, budget = 1000): Promise<boolean> {
-  await atShell(s);
-  const rep = await s.until({ gone: "#spinner" }, { timeout: budget });
-  return rep.until?.ok === false;
+export async function deleteItem(s: Session) {
+  const r = reached(await s.click("#delete", { until: { request: "/api/item/", landed: true } }), "delete");
+  return { act: r.action, body: s.store.latestJson("/api/item/", r.action),
+           text: await s.evaluate("document.querySelector('#delete-result').textContent") as string };
 }
