@@ -329,6 +329,33 @@ describe("openmrs run-2 friction", () => {
   });
 });
 
+describe("openmrs run-3 friction", () => {
+  it("probe is an act: its requests are attributed, the value comes back, writes are listed", async () => {
+    const r = await s.probe<number>("fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.status)", undefined, { until: { request: "/api/save" } });
+    assert.equal(r.ok, true);
+    assert.equal(r.value, 202);
+    assert.ok(r.writes.some((w) => w.startsWith("POST /api/save")), JSON.stringify(r.writes));
+    await new Promise((x) => setTimeout(x, 200));
+    assert.ok(s.store.requests({ url: "/api/save", method: "POST", action: r.action }).length >= 1);
+  });
+  it("holds: one cheap check, no waiting", async () => {
+    assert.equal(await s.holds({ selector: "#load-chart" }), true);
+    assert.equal(await s.holds({ selector: "#never" }), false);
+    assert.equal(await s.holds({ any: [{ url: "/nowhere" }, { text: "Load Chart" }] }), true);
+  });
+  it("aria accepts a bare role name", async () => {
+    assert.match(await s.aria("main").catch(() => s.aria("body")), /Load Chart/);
+    assert.match(await s.aria("combobox"), /Medication/);
+  });
+  it("a malformed arm fails the any-of immediately instead of burning the budget", async () => {
+    const t0 = performance.now();
+    const r = await s.until({ any: [{ selector: "#never" }, { selector: "role=button[name='x'] svg, #broken[" }] }, { timeout: 4000 });
+    assert.equal(r.until?.ok, false);
+    assert.match(r.until!.error!, /arm failed/);
+    assert.ok(performance.now() - t0 < 1500, "should not have waited for the budget");
+  });
+});
+
 describe("the log without a browser", () => {
   it("openApp reads what was recorded", async () => {
     const st = openApp("t", appsDir);

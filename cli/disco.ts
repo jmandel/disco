@@ -28,9 +28,9 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
             --until-request R [--landed] | --until-fn JS   (repeat flags → any-of)   --timeout MS  --window MS  --shot  --wire all
 
   disco aria [<selector>] [--frame F]          the page (or one element) as the accessibility tree sees it — look before you guess a selector
-  disco eval <js-expression>                   run in the page (main world), print JSON
+  disco eval <js-expression>                   run in the page as an act (its requests are attributed); prints the value and the report
   disco screenshot [--out file.jpg]
-  disco sql <query> [--json]                   the log (disco schema for the tables)
+  disco sql <query> [--json | --wide]          the log (disco schema for the tables); cells clip at 200 chars unless --wide/--json
   disco body <hash-or-prefix>                  a captured body / screenshot blob
   disco note <text>                            append to apps/<app>/NOTES.md
   disco record                                 record in the foreground (open already runs one in the background)
@@ -188,8 +188,10 @@ async function main() { switch (cmd) {
   }
   case "eval": {
     const js = args._.slice(1).join(" "); if (!js) fail("usage: disco eval <js-expression>");
-    const v = await withSession((s) => s.evaluate(js));
-    console.log(typeof v === "string" && !json ? v : JSON.stringify(v, null, 2));
+    const r = await withSession((s) => s.probe(js, undefined, { until: untilFromArgs(), timeout: num(args.timeout), window: num(args.window) }));
+    if (json) console.log(JSON.stringify(r, null, 2));
+    else { console.log(typeof r.value === "string" ? r.value : JSON.stringify(r.value, null, 2)); console.log(formatReport({ ...r, value: undefined } as any)); }
+    if (!r.ok) process.exit(1);
     break;
   }
   case "screenshot": {
@@ -207,7 +209,9 @@ async function main() { switch (cmd) {
     else {
       const cols = Object.keys(rows[0]);
       console.log(cols.join("\t"));
-      for (const r of rows) console.log(cols.map((c) => { const v = r[c]; const s = v == null ? "" : typeof v === "string" ? v : String(v); return s.length > 120 ? s.slice(0, 117) + "…" : s; }).join("\t"));
+      const wide = args.wide === true; let clipped = false;
+      for (const r of rows) console.log(cols.map((c) => { const v = r[c]; const s = v == null ? "" : typeof v === "string" ? v : String(v); if (!wide && s.length > 200) { clipped = true; return s.slice(0, 197) + "…"; } return s; }).join("\t"));
+      if (clipped) console.error("(cells clipped at 200 chars — --wide or --json for everything)");
     }
     st.close();
     break;

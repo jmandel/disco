@@ -218,6 +218,7 @@ act:6 click #record-2  ok  299ms (act 78 · until 200 · report 10)  http://loca
 | `dialogs` | native dialogs inside the window and how they were handled |
 | `pages` | URLs of pages opened inside the window (popups, `window.open`) |
 | `openPages` | pages open in the browser afterwards; printed as `(+N other pages open)` — leftover popups throttle the driven page |
+| `writes` | the non-GET app requests in the window (`POST /api/save 202`) — printed as `writes:`; under a read-only stance, a non-empty line is the signal to stop and read |
 | `window` | `{ t0, t1 }` in the run's clock — `SELECT … WHERE t BETWEEN t0 AND t1` |
 | `timing` | `actMs` (checks + the Playwright action) · `untilMs` · `windowMs` · `reportMs` · `totalMs` |
 
@@ -283,7 +284,9 @@ Wrap every step of a workflow in it and failures explain themselves.
 | | |
 |---|---|
 | `s.aria(selector?)` | the page (or one element) as the accessibility tree sees it — Playwright's aria snapshot, the same text the `ui` diff is made of. **Look before you guess a selector**; on a SPA whose HTML is an empty shell this is the only way to see the screen |
-| `s.evaluate(fnOrSource, arg)` | run in the page's main world, return JSON-able values |
+| `s.evaluate(fnOrSource, arg)` | run in the page's main world, return JSON-able values — raw and unlogged |
+| `s.probe(fnOrSource, arg, o?)` | the same as an **act**: the requests it causes are attributed to it, `report.value` holds the result, `until` works. Use it for calling the app's API yourself (`fetch` with the page's cookies) — that is what `./disco eval` does |
+| `s.holds(pred)` | is this predicate true *right now*? One check, no waiting. Ask before writing an `until` on a screen you have not looked at |
 | `s.screenshot(reason?)` | `{ hash, path }` — JPEG in the blob store, row in `shots` |
 | `s.note(text)` | append a timestamped line to `apps/<app>/NOTES.md` (and the `notes` table) |
 | `s.frame("#a >> #b")` | a `FrameLocator` for nested iframes |
@@ -299,7 +302,7 @@ Wrap every step of a workflow in it and failures explain themselves.
 ```ts
 import { openApp } from "./src/index.ts";
 const st = openApp("shop");                       // read-only; same object as s.store
-st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[] — fields are the requests columns: id, t_start, method, url, path, status, mime, body_hash, body_size, body_state, req_body, resp_headers, action_id…
+st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[] — every requests column: id, run, t_start, t_response, t_end, method, url, host, path, resource_type, frame_url, req_headers, req_body, status, mime, resp_headers, body_hash, body_size, body_state, error, action_id
 st.latestJson("/api/me", "act:9");                 // parsed body of the newest matching response — scope it to the act whose report showed it
 st.jsonAll("/api/queue-entry", "act:9");         // every body for that family in that act — when a screen calls one endpoint twice, pick by shape
 st.json(hash) · st.body(hash) · st.bytes(hash)     // a body by hash or 16-char prefix
@@ -358,7 +361,7 @@ open, or `./disco open` first.
 ./disco select <target> <value>  ./disco scroll [<target>|--dy N]  ./disco navigate <url>
 ./disco until [until…]           until…: --until-selector S [--visible] | --until-gone S | --until-text T
                                          --until-url U | --until-request R [--landed] | --until-fn JS   (repeat → any-of)  --timeout MS
-./disco aria [<selector>]        ./disco eval <js>                   ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json]
+./disco aria [<selector> | <role>]  ./disco eval <js>   (an act)        ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json | --wide]
 ./disco body <hash>   (text bodies print; a screenshot prints its file path)
 ./disco note <text>              ./disco record   (foreground; open already runs one)
 ```
@@ -381,7 +384,9 @@ export async function check(s, step) {
 ```
 
 `node scripts/run-check.ts shop` (or `npm run check -- shop`) prints `PASS/FAIL name (ms)` per step and
-exits non-zero on any failure. `--headed` to watch, `--close` to kill the browser afterwards, `--bail` to
+exits non-zero on any failure. A pack is done when it passes **warm and cold** — once on the browser you
+explored with, once after `./disco close shop` on a fresh one; the cold run is what catches predicates
+that were only ever true because of what you had already done. `--headed` to watch, `--close` to kill the browser afterwards, `--bail` to
 stop at the first failure. Steps run in order and share the browser, so a step that leaves a dialog open
 fails every step after it: start each step from an anchor (reach the shell) and end each with the app as
 you found it.
@@ -444,6 +449,13 @@ action_id='act:n'` for headers and bodies, `SELECT * FROM console WHERE t BETWEE
 
 **Never:** `sleep`; raise a timeout to hide a wrong predicate; assert a fact off the screen when the
 response that carried it is in the log; retry a diagnosis without reading it.
+
+**SPA predicates that are already true.** After `navigate` to a route that redirects, `{ url }` may be
+already satisfied; a heading like "Conditions" often exists on the previous screen too (a summary card).
+For a route or tab change, anchor on what is unique to the destination — the selected state of the app's
+own navigation (`[role=tab][aria-selected=true]:has-text("Conditions")`), a value only that screen shows —
+and ask `s.holds(pred)` first when unsure. **Skeletons** satisfy structural predicates: a loading table has
+all its rows and empty cells, a heading shows `--`. Anchor on a real value, never on structure.
 
 **Frames and shadow roots.** Iframes need `frame:` (`frame: "#outer >> #inner"` when nested); shadow DOM
 needs nothing — Playwright's css pierces open shadow roots, so `s.click("#shadow-btn")` and

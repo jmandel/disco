@@ -45,7 +45,7 @@ export type Pred =
   | { any: Pred[]; label?: string }
   | { all: Pred[]; label?: string };
 
-export type Kind = "click" | "dblclick" | "fill" | "type" | "press" | "select" | "hover" | "scroll" | "drag" | "navigate" | "noop";
+export type Kind = "click" | "dblclick" | "fill" | "type" | "press" | "select" | "hover" | "scroll" | "drag" | "navigate" | "evaluate" | "noop";
 
 export interface ActSpec {
   kind: Kind;
@@ -54,6 +54,7 @@ export interface ActSpec {
   key?: string;                // press
   value?: string | string[];   // select
   url?: string;                // navigate
+  fn?: string | ((arg: any) => unknown); arg?: unknown;   // evaluate: run in the page as an act (its requests are attributed; the value is report.value)
   frame?: string;              // iframe selector(s), `>>`-chained for nesting; the target is resolved inside
   button?: "left" | "right" | "middle";
   js?: boolean;                // click: dispatch a DOM click event instead of moving the mouse (widgets the app re-renders under you)
@@ -96,6 +97,10 @@ export interface Report {
   console: Array<{ level: string; text: string }>;
   dialogs: Array<{ type: string; message: string | null; handled: string | null }>;
   pages: string[];
+  /** Non-GET requests of the app's own traffic in the window — what this act may have persisted. */
+  writes: string[];
+  /** evaluate: what the expression returned */
+  value?: unknown;
   /** Pages open in the browser after this act (popups included). More than 1 means the driven page can be throttled in the background. */
   openPages: number;
   shot?: string;
@@ -205,6 +210,10 @@ export class Session {
   navigate(url: string, o: Partial<ActSpec> = {}) { return this.act({ kind: "navigate", url, ...o }); }
   /** Wait for a state without acting. Same report shape; `report.until` says whether it arrived. */
   until(pred: Pred, o: { timeout?: number } = {}) { return this.act({ kind: "noop", until: pred, timeout: o.timeout }); }
+  /** Run code in the page AS AN ACT: the requests it causes are attributed to it, the value is `report.value`. `s.evaluate` is the raw, unlogged form. */
+  probe<T = unknown>(fn: string | ((arg: any) => T | Promise<T>), arg?: unknown, o: Partial<ActSpec> = {}) { return this.act({ kind: "evaluate", fn: fn as any, arg, ...o }) as Promise<Report & { value: T }>; }
+  /** Is this predicate true right now? One cheap check, no waiting — ask before you write an `until` on it. */
+  holds(pred: Pred): Promise<boolean> { return this.holdsNow(pred); }
 
   /** Close every page except the driven one (popups left by earlier scripts throttle the browser). Returns how many were closed. */
   async closeOtherPages(): Promise<number> {
@@ -227,8 +236,11 @@ export class Session {
 
   /** The page as the accessibility tree sees it (Playwright's aria snapshot) — the whole body, or one element. Read this when the diff is not enough. */
   async aria(selector?: string, o: { frame?: string } = {}): Promise<string> {
-    const loc = this.base(o.frame).locator(selector ?? "body").first();
-    if (selector && (await loc.count()) === 0) throw new Error(`aria: no element matches ${selector}${o.frame ? ` in ${o.frame}` : ""}`);
+    const base = this.base(o.frame);
+    let loc = base.locator(selector ?? "body").first();
+    // a bare word that is an ARIA role ("banner", "navigation", "dialog") — the words aria itself prints — means role=
+    if (selector && /^[a-z]+$/.test(selector) && (await loc.count()) === 0) { const byRole = base.locator(`role=${selector}`).first(); if ((await byRole.count()) > 0) loc = byRole; }
+    if (selector && (await loc.count()) === 0) throw new Error(`aria: no element matches ${selector}${o.frame ? ` in ${o.frame}` : ""} (a css/role selector, or a bare role name such as "banner")`);
     return loc.ariaSnapshot({ timeout: this.timeouts.action });
   }
 
@@ -278,12 +290,13 @@ export class Session {
     const t0 = this.log.now();
     this.log.insert("actions", { id, n, t0, kind: spec.kind, target: targetText });
     this.currentAction = id;
-    let ok = true; let diagnosis: Diagnosis | undefined; let matches: number | undefined;
+    let ok = true; let diagnosis: Diagnosis | undefined; let matches: number | undefined; let value: unknown;
     let untilRes: UntilResult | undefined;
     const tAct0 = performance.now();
     if (this.context.pages().length > 1) await this.page.bringToFront().catch(() => {});
     try {
-      if (spec.kind !== "noop" && spec.kind !== "navigate" && spec.kind !== "scroll" && !(spec.kind === "press" && !spec.target)) {
+      if (spec.kind === "evaluate") value = await this.page.evaluate(spec.fn as any, spec.arg);
+      else if (spec.kind !== "noop" && spec.kind !== "navigate" && spec.kind !== "scroll" && !(spec.kind === "press" && !spec.target)) {
         const r = await this.resolve(spec);
         if ("diagnosis" in r) { ok = false; diagnosis = r.diagnosis; }
         else { matches = r.matches; await this.perform(spec, r.locator); }
@@ -301,7 +314,7 @@ export class Session {
       } else { armed.cancel(); untilRes = { ok: false, elapsedMs: 0, error: "action not performed" }; }
       if (!untilRes.ok && !untilRes.diagnosis && ok) untilRes.diagnosis = await this.untilDiagnosis(spec.until!, untilRes.error ?? "", t0);
       if (alreadyTrue) untilRes.alreadyTrue = true;
-    } else if (ok && spec.kind !== "noop") await sleep(spec.window ?? T.window);
+    } else if (ok && spec.kind !== "noop" && spec.kind !== "evaluate") await sleep(spec.window ?? T.window);
     const tWin1 = performance.now();
     await this.recorder.flush(300);
     const t1 = this.log.now();
@@ -317,10 +330,13 @@ export class Session {
       dialogs: this.log.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1),
       pages: this.log.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", this.log.run, t0, t1 + 1).map((x) => x.url),
       openPages: this.context.pages().length,
+      writes: [],
+      ...(spec.kind === "evaluate" ? { value } : {}),
       shot,
       window: { t0: Math.round(t0), t1: Math.round(t1) },
       timing: { actMs: ms(tAct0, tAct1), untilMs: armed ? ms(tAct1, tWin1) : 0, windowMs: armed ? 0 : ms(tAct1, tWin1), reportMs: 0, totalMs: 0 },
     };
+    report.writes = report.requests.filter((w) => !["GET", "HEAD", "OPTIONS"].includes(w.method) && !w.earlier).map((w) => `${w.method} ${w.path}${w.status != null ? " " + w.status : ""}`);
     report.timing.reportMs = ms(tWin1, performance.now());
     report.timing.totalMs = ms(tStart, performance.now());
     this.log.update("actions", { t1, ok, report }, "id=?", [id]);
@@ -408,7 +424,7 @@ export class Session {
         else await this.page.mouse.wheel(0, spec.deltaY ?? 600);
         break;
       case "navigate": await this.page.goto(spec.url!, { waitUntil: "commit", timeout: T.navigate }); break;
-      case "noop": break;
+      case "evaluate": case "noop": break;
     }
   }
 
@@ -608,7 +624,12 @@ export function sweepUnread(log: Store): void {
 function firstFulfilled<T>(ps: Promise<T>[]): Promise<T> {
   return new Promise((resolve, reject) => {
     let rejected = 0; const errors: unknown[] = [];
-    ps.forEach((p, i) => p.then(resolve, (e) => { errors[i] = e; if (++rejected === ps.length) reject(new Error("none matched: " + errors.map(firstLine).join(" / "))); }));
+    ps.forEach((p, i) => p.then(resolve, (e) => {
+      errors[i] = e;
+      // a malformed selector (or any non-timeout failure) in one arm is a bug in the predicate: say so now, don't burn the budget on the other arms
+      if (!/timeout/i.test(String((e as any)?.message ?? e))) { reject(new Error("arm failed: " + firstLine(e))); return; }
+      if (++rejected === ps.length) reject(new Error("none matched: " + errors.map(firstLine).join(" / ")));
+    }));
   });
 }
 function firstLine(e: unknown): string { return String((e as any)?.message ?? e).split("\n")[0].slice(0, 200); }
