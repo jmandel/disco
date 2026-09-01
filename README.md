@@ -63,14 +63,15 @@ try {
 ### `open(app, { url?, attach?, headed?, appsDir? }) → Session`
 
 Launches Chromium (or rejoins the one launched before, or attaches to `attach`: a port, `host:port`, `http://…`
-or `ws://…`), picks the page at `url` (else the first), navigates only when the page is somewhere else. A second
-script joins the same browser **and the same run**, wherever the last one left it. `s.page` is the Playwright
-`Page`; `s.context`, `s.browser`, `s.run`, `s.dir` (`apps/<app>/`).
+or `ws://…`), picks the page at `url` (else the first that no popup opened), and navigates only when the page is
+somewhere else — as its own act, returning once the new page is quiet (`s.opened` says `navigated` or `joined`). A run
+is one browser's life: a second script joins the same browser **and the same run**, wherever the last one left it, and
+act ids are unique across runs. `s.page` is the Playwright `Page`; `s.context`, `s.browser`, `s.run`, `s.dir` (`apps/<app>/`).
 
 ### `s.act(label, run, { until?, quiet?, max? }) → Report`
 
-`run(page)` is your code — any Playwright call, a `page.evaluate`, a fetch from inside the page, several
-steps. `label` is what the log calls it.
+`run(page)` is your code — any Playwright call, a `page.evaluate`, several steps. `label` is what the log calls it.
+Your code runs in Node: use `page.evaluate(() => …)` for the DOM, and for a `fetch` that should carry the page's cookies.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -88,13 +89,13 @@ steps. `label` is what the log calls it.
 | `until` | `{ ok, elapsedMs, alreadyTrue?, error?, value? }` |
 | `diagnosis` | when `run` threw: `reason`, `message`, `selector` (as Playwright named it), `over`, `candidates`, `dialogs`, `shot` |
 | `ui` | `{ added, removed }` lines of the accessibility tree that changed (main frame; iframes appear as nodes) |
-| `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`; `static` folds scripts, styles, images, fonts into a count. `(started earlier)` marks a long-poll that answered you |
+| `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`; `static` folds scripts, styles, images, fonts into a count, `thirdParty` folds other sites (telemetry) out of the wire, `writes` and `pending`. `(started earlier)` marks a long-poll that answered you |
 | `pending` | requests started in the window and still in flight when it closed |
-| `writes` | the non-GET app requests in the window — under a read-only stance, a non-empty line is the signal to stop |
+| `writes` | `string[]`: the non-GET app requests in the window — under a read-only stance, a non-empty line is the signal to stop |
 | `storage` | cookie (HttpOnly included), localStorage and sessionStorage changes — the wire of an app that has no wire |
 | `console` · `dialogs` · `pages` · `openPages` | errors and warnings; native dialogs (accepted, recorded); popups opened; pages open afterwards (more than 1 throttles the driven page) |
 | `proposed` | pasteable `until` code for what this act caused: responses with their `+ms`, roles that appeared (with their new state: `selected`, `expanded`, `checked`), the one that left, the url path, a storage key. **Copy one into the SDK.** |
-| `note` | something true that is not a failure: the click landed but the page blocked; a body the page never read; the aria snapshot exceeded 1.5 s |
+| `note` | something true that is not a failure: the click landed but the page blocked; a body the page never read; what an already-true or failed until's target looks like now, and what answered just before the act; lines that only moved |
 | `window`, `timing` | `{ t0, t1 }` in the run's clock; `{ runMs, observeMs, reportMs, totalMs }` |
 
 **Diagnoses** (`diagnosis.reason`):
@@ -121,15 +122,16 @@ copy of the screenshot in a scratch page.
 
 ### `s.waitFor(kind, pred, timeout?) → event`
 
-The next event on the recorder's stream that satisfies `pred`: `"request"` · `"response"` · `"ws"` (`{ dir, payload,
-url }` — including sockets opened before you joined) · `"console"` · `"dialog"` · `"page"` (a popup) · `"nav"` (the
-main frame committed a navigation). Default timeout: the enclosing act's `max`. A navigation's honest `until` is
+The next event on the recorder's stream that satisfies `pred`: `"request"` / `"response"` (`{ id, method, url, status }`)
+· `"ws"` (`{ dir, payload, url }` — including sockets opened before you joined) · `"console"` (`{ level, text }`) ·
+`"dialog"` (`{ type, message }`) · `"page"` (a popup, `{ url }`) · `"nav"` (the main frame committed a navigation,
+`{ url }`). Default timeout: the enclosing act's `max`. A navigation's honest `until` is
 `s.waitFor("nav", e => e.url.includes("/home")).then(() => page.locator("#shell").waitFor())` — false before the goto
 even when you were already there.
 
 ### `s.sql(query, …args)` · `s.body(hash)` · `s.json(urlPart, { action?, method? })`
 
-The log. `sql` explains a wrong column with the table's columns. `body` returns a body or screenshot blob by hash or
+The log. `sql` returns an array of row objects and explains a wrong column with the table's columns. `body` returns a body or screenshot blob by hash or
 16-char prefix. `json` returns the newest JSON body whose URL contains `urlPart`, scoped to an act and/or a method
 (`json("/api/save", { action: r.action, method: "POST" })` reads back a write when the app fired GETs after it); it
 waits up to 1 s for a body still arriving. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
@@ -146,7 +148,7 @@ SELECT t_start, method, path, status FROM requests WHERE action_id IS NULL AND r
 
 ### `reached(report, what?) → report` · `s.close({ browser? })`
 
-`reached` throws with the diagnosis unless `run` ran and its `until` held, and throws when the `until` was already true.
+`reached` throws with the diagnosis unless `run` ran and its `until` held (a bare act passes on `ok`), and throws when the `until` was already true.
 `close` disconnects; `{ browser: true }` also kills a browser disco launched (an attached one is only forgotten).
 
 ## The pack
@@ -161,7 +163,8 @@ apps/<app>/
 
 **The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
 report or shot is in `evidence/`. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
-the docblock above the function, once. `sdk.ts` runs its own check:
+the docblock above the function, once. `./disco sql "SELECT report FROM actions WHERE id='act:7'" --json > apps/shop/evidence/act-7.json`
+copies a report, and the report names its shot's path. `sdk.ts` runs its own check:
 
 ```ts
 // apps/shop/sdk.ts
@@ -181,11 +184,11 @@ export async function check(s: Session): Promise<number> {
   }
   return failed;
 }
-if (import.meta.main) { const s = await open("shop", { url: URL }); let f = 1; try { f = await check(s); } finally { await s.close({ browser: true }); } process.exit(f ? 1 : 0); }
+if (import.meta.main) { const s = await open("shop", { url: URL }); let f = 1; try { f = await check(s); } finally { await s.close(); } process.exit(f ? 1 : 0); }
 ```
 
-`node apps/shop/sdk.ts` runs it. A pack is done when it passes **warm and cold** — once on the browser you explored with,
-once after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
+`node apps/shop/sdk.ts` runs it and leaves the browser running. A pack is done when it passes **warm and cold** — once on
+the browser you explored with, then once more after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
 had already done.
 
 ## Method

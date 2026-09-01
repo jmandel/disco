@@ -10,10 +10,15 @@ export function formatReport(r: Report): string {
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
   if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action — it proves nothing; wait for something that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}`);
   if (r.note) L.push("  note: " + r.note);
-  if (r.requests.length || r.static?.count) {
+  if (r.proposed.length) {
+    L.push("  proposed until (each was false before the action):");
+    for (const p of r.proposed) L.push(`    ${p.atMs != null ? `+${p.atMs}ms`.padEnd(8) : "end     "} ${p.code}`);
+  }
+  if (r.requests.length || r.static?.count || r.thirdParty?.count) {
     const lines = r.requests.map((w) => `${w.earlier ? "(started earlier) " : ""}${w.method} ${w.path.length > 80 ? w.path.slice(0, 77) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state === "missing" ? "body not read by the page" : w.state === "pending" && w.status != null ? "body pending" : w.state}]` : ""}`);
     const st = r.static?.count ? ` + ${r.static.count} static (${Object.entries(r.static.types).map(([k, v]) => `${v} ${k}`).join(", ")})` : "";
-    L.push(`  wire (${r.requests.length}${st}):`); for (const l of lines.slice(0, 25)) L.push("    " + l);
+    const tp = r.thirdParty?.count ? ` + ${r.thirdParty.count} third-party (${Object.entries(r.thirdParty.hosts).map(([k, v]) => `${k} ${v}`).join(", ")}; not the app's — see sql)` : "";
+    L.push(`  wire (${r.requests.length}${st}${tp}):`); for (const l of lines.slice(0, 25)) L.push("    " + l);
     if (lines.length > 25) L.push(`    … ${lines.length - 25} more (sql: SELECT * FROM requests WHERE action_id='${r.action}')`);
   }
   if (r.pending.length) L.push("  pending: " + r.pending.join(" · "));
@@ -30,11 +35,7 @@ export function formatReport(r: Report): string {
   for (const c of r.console.slice(0, 5)) L.push(`  console ${c.level}: ${c.text.slice(0, 160)}`);
   for (const d of r.dialogs) L.push(`  dialog ${d.type} "${(d.message ?? "").slice(0, 100)}" → ${d.handled}`);
   for (const p of r.pages) L.push(`  new page: ${p}`);
-  if ("value" in r && r.value !== undefined) L.push("  value: " + (typeof r.value === "string" ? r.value : JSON.stringify(r.value))?.slice(0, 400));
-  if (r.proposed.length) {
-    L.push("  proposed until (each was false before the action):");
-    for (const p of r.proposed) L.push(`    ${p.atMs != null ? `+${p.atMs}ms`.padEnd(8) : "end     "} ${p.code}`);
-  }
+  if ("value" in r && r.value !== undefined) { const v = typeof r.value === "string" ? r.value : JSON.stringify(r.value) ?? ""; L.push("  value: " + (v.length > 400 ? v.slice(0, 400) + `… (clipped, ${v.length} chars — --json or report.value for all of it)` : v)); }
   return L.join("\n");
 }
 

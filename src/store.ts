@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
-export const STORE_VERSION = 4;
+export const STORE_VERSION = 5;
 export const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
@@ -113,8 +113,9 @@ CREATE TABLE IF NOT EXISTS shots (
   run INTEGER NOT NULL,
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   t REAL NOT NULL,
-  hash TEXT NOT NULL,                -- blob (jpeg)
-  reason TEXT,                       -- look | marks | diagnosis
+  hash TEXT NOT NULL,                -- blob (jpeg, stored as blobs/<hh>/<hash>.jpg)
+  reason TEXT,                       -- look | diagnosis
+  url TEXT,                          -- the page's URL when it was taken
   action_id TEXT
 );
 `;
@@ -124,7 +125,8 @@ export const REQ_BODY_CAP = 64 * 1024;
 export const WS_PAYLOAD_CAP = 16 * 1024;
 
 export function sha256(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
-export function blobPath(dir: string, hash: string): string { return join(dir, "blobs", hash.slice(0, 2), hash); }
+/** blobs/<hh>/<hash>, or <hash>.jpg for a screenshot. */
+export function blobPath(dir: string, hash: string): string { const p = join(dir, "blobs", hash.slice(0, 2), hash); return !existsSync(p) && existsSync(p + ".jpg") ? p + ".jpg" : p; }
 
 export function isTextual(mime: string | null | undefined): boolean {
   if (!mime) return false;
@@ -207,12 +209,14 @@ export class Store {
   get<T = any>(sql: string, ...args: unknown[]): T | null { return (this.stmt(sql).get(...(args as any[])) as T) ?? null; }
   all<T = any>(sql: string, ...args: unknown[]): T[] { return this.stmt(sql).all(...(args as any[])) as T[]; }
 
-  writeBlob(bytes: Uint8Array): string {
+  writeBlob(bytes: Uint8Array, ext = ""): string {
     const hash = sha256(bytes);
-    const p = blobPath(this.dir, hash);
+    const p = join(this.dir, "blobs", hash.slice(0, 2), hash + ext);
     if (!existsSync(p)) { mkdirSync(join(this.dir, "blobs", hash.slice(0, 2)), { recursive: true }); writeFileSync(p, bytes); }
     return hash;
   }
+  /** The file a blob lives in (screenshots carry .jpg). */
+  blobFile(hash: string): string { return blobPath(this.dir, hash); }
   storeBody(bytes: Uint8Array, mime: string | null): { hash: string; size: number; truncated: boolean } {
     const hash = this.writeBlob(bytes);
     const textual = isTextual(mime);
@@ -252,7 +256,7 @@ export function openStore(dir: string, opts: { readonly?: boolean } = {}) {
     const row = one<{ hash: string }>("SELECT hash FROM bodies WHERE hash LIKE ? LIMIT 1", h + "%") ?? one<{ hash: string }>("SELECT hash FROM shots WHERE hash LIKE ? LIMIT 1", h + "%");
     if (row?.hash) return row.hash;
     const shard = join(dir, "blobs", h.slice(0, 2));
-    if (existsSync(shard)) { const m = readdirSync(shard).find((f) => f.startsWith(h)); if (m) return m; }
+    if (existsSync(shard)) { const m = readdirSync(shard).find((f) => f.startsWith(h)); if (m) return m.replace(/\.jpg$/, ""); }
     throw new Error(`no blob matches prefix ${h}`);
   };
   const api = {

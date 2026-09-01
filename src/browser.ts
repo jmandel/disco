@@ -12,7 +12,8 @@ export interface BrowserInfo {
   port?: number;
   pid?: number;              // only when launched by us
   startedWall: string;
-  recorderPid?: number;      // a detached `disco record` process capturing everything until `close`
+  recorderPid?: number;      // a detached recorder process capturing everything until `close`
+  pageTarget?: string;       // CDP target id of the page `open` drove first — later sessions prefer it over popups
 }
 
 export function pidAlive(pid: number | undefined): boolean { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } }

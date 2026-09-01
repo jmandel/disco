@@ -334,6 +334,87 @@ describe("ceilings on a large page", () => {
   });
 });
 
+describe("exam A fold-backs", () => {
+  it("open({url}) navigates as its own act and returns quiet; a nav until right after is not already true", async () => {
+    reached(await s.act("go login", (p) => p.goto(g.origin + "/login.html"), { until: () => s.waitFor("nav", (e) => e.url.includes("/login.html")), max: 8000 }));
+    const s2 = await open("t", { url: g.origin, appsDir });
+    try {
+      assert.equal(s2.opened, "navigated");
+      const last = s2.sql<{ label: string; report: string }>("SELECT label, report FROM actions ORDER BY n DESC LIMIT 1")[0];
+      assert.match(last.label, /^open /); assert.equal(JSON.parse(last.report).returned, "quiet");
+      const r = reached(await s2.act("login page", (p) => p.goto(g.origin + "/login.html"), { until: () => s2.waitFor("nav", (e) => e.url.includes("/login.html")).then(() => s2.page.locator("#login").waitFor()), max: 8000 }));
+      assert.notEqual(r.until?.alreadyTrue, true);
+    } finally { await s2.close(); }
+    await home();
+  });
+  it("a popup left open does not become the driven page of the next session", async () => {
+    reached(await s.act("open child", (p) => p.click("#open-child"), { until: () => s.waitFor("page", (e) => e.url.includes("/child.html")) }));
+    const s2 = await open("t", { appsDir });
+    try { assert.equal(new URL(s2.page.url()).pathname, "/"); assert.equal(s2.opened, "joined"); } finally { await s2.close(); }
+    for (const p of s.context.pages()) if (p !== s.page) await p.close();
+  });
+  it("until.value keeps a JSON object", async () => {
+    const r = reached(await s.act("push", () => g.ctl.set({ wsPush: true }), { until: () => s.waitFor("ws", (f) => f.payload.includes("push")) }));
+    assert.match((r.until!.value as any).payload, /push/);
+  });
+  it("code that touches document in Node is diagnosed with the page.evaluate hint", async () => {
+    const r = await s.act("dom in node", async () => document.title, { max: 500 });
+    assert.equal(r.ok, false); assert.match(r.diagnosis!.message, /runs in Node/);
+  });
+  it("an already-true until names its target's state; a failed response until lists what answered just before", async () => {
+    const r = await s.act("already", (p) => p.click("#noop"), { until: () => s.page.locator("#load-chart").waitFor() });
+    assert.equal(r.until?.alreadyTrue, true);
+    assert.match(r.note ?? "", /the until's target locator\("#load-chart"\): 1 match now; the first is visible/);
+    const ta = reached(await s.act("tab a", (p) => p.click("#tab-a"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/tab/a")) }));
+    assert.ok(String(ta).indexOf("proposed until") > 0 && String(ta).indexOf("proposed until") < String(ta).indexOf("wire ("), "proposals print before the wire");
+    reached(await s.act("tab b", (p) => p.click("#tab-b")));
+    const again = await s.act("tab a again", (p) => p.click("#tab-a"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/tab/a")), max: 800 });
+    assert.equal(again.until?.ok, false);
+    assert.match(again.note ?? "", /BEFORE this act.*\/api\/tab\/a 200/);
+  });
+  it("a text-only change proposes a page-text until that holds; a reorder without additions is noted", async () => {
+    const r = reached(await s.act("dblclick", (p) => p.dblclick("#dbl-target")));
+    const p = r.proposed.find((x) => x.code.includes("waitForFunction") && x.code.includes("editing"));
+    assert.ok(p, JSON.stringify(r.proposed));
+    const fn = new Function("page", `return (${p!.code})`)(s.page) as () => Promise<unknown>;
+    await fn();
+    reached(await s.act("commit", (p) => p.press("#dbl-input", "Enter"), { until: () => s.page.locator("#dbl-state:has-text('committed')").waitFor() }));
+    const swap = reached(await s.act("swap items", (p) => p.evaluate(() => { const l = document.getElementById("sort-list")!; l.appendChild(l.firstElementChild!); })));
+    assert.match(swap.note ?? "", /lines moved/);
+  });
+  it("third-party requests are folded out of writes and do not block quiet", async () => {
+    const port = new URL(g.origin).port;
+    const r = reached(await s.act("telemetry", (p) => p.evaluate((u) => fetch(u, { method: "POST", mode: "no-cors", body: "{}" }).then(() => 1), `http://127.0.0.1:${port}/api/save`)));
+    assert.ok(r.thirdParty.count >= 1, JSON.stringify(r.thirdParty));
+    assert.deepEqual(r.writes, []);
+    assert.match(String(r), /third-party \(127\.0\.0\.1/);
+  });
+  it("look lists anchors without href, tabindex targets and shadow-DOM buttons; an unnamed dialog is marked", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<a id=\"nohref\" onclick=\"1\">cart</a><div id=\"tabby\" tabindex=\"0\">t</div>')");
+    const l = await s.look();
+    const sels = l.controls!.map((c) => c.selector);
+    assert.ok(sels.includes("#nohref"), sels.join(","));
+    assert.ok(sels.includes("#tabby"), sels.join(","));
+    assert.ok(sels.includes("#shadow-btn"), sels.join(","));
+    assert.match(l.shot!, /\.jpg$/);
+    assert.ok(s.sql("SELECT url FROM shots WHERE url IS NOT NULL LIMIT 1").length > 0);
+    await s.page.evaluate("document.getElementById('nohref').remove(); document.getElementById('tabby').remove()");
+    await g.ctl.set({ timeoutMs: 300 });
+    try {
+      await s.act("wait for the session dialog", async () => {}, { until: () => s.page.locator("#session-timeout").waitFor(), max: 4000 });
+      const d = await s.look("#session-timeout");
+      assert.match(d.dialogs[0], /session-timeout .*\(unnamed/);
+      reached(await s.act("stay", (p) => p.locator("#session-timeout button").first().click(), { until: () => s.page.locator("#session-timeout").waitFor({ state: "hidden" }) }));
+    } finally { await g.ctl.reset(); }
+  });
+  it("json prefers a path-boundary match over a longer sibling", async () => {
+    reached(await s.act("record 1", (p) => p.evaluate(() => fetch("/api/record/1").then((r) => r.json()))));
+    reached(await s.act("record 12", (p) => p.evaluate(() => fetch("/api/record/12").then((r) => r.json()))));
+    const j = await s.json<{ id: number }>("/api/record/1");
+    assert.equal(j?.id, 1, JSON.stringify(j));
+  });
+});
+
 describe("the log", () => {
   it("sql errors name the columns; body returns a blob by prefix", async () => {
     assert.throws(() => s.sql("SELECT id FROM ws_frames"), /no such column: id — ws_frames\(run, seq, t, url, dir, payload, action_id\)/);

@@ -4,7 +4,6 @@
 import type { BrowserContext, Locator, Page } from "playwright-core";
 import type { Store } from "./store.ts";
 import type { Recorder } from "./record.ts";
-import { join } from "node:path";
 
 /** A marks screenshot is the whole page, up to this many pixels tall. */
 const MARKS_MAX_H = 4000;
@@ -31,7 +30,7 @@ export interface Look {
 }
 export interface LookCtx { page: Page; context: BrowserContext; store: Store; recorder: Recorder; current: () => string | null }
 
-const CONTROLS = 'button,a[href],input,select,textarea,summary,[contenteditable=""],[contenteditable="true"],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[role="textbox"],[role="searchbox"],[role="slider"],[role="spinbutton"],[role="treeitem"]';
+const CONTROLS = 'button,a,input,select,textarea,summary,[contenteditable],[tabindex],[onclick],[draggable="true"],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[role="textbox"],[role="searchbox"],[role="slider"],[role="spinbutton"],[role="treeitem"]';
 
 /** Runs in the page: every visible interactive control with what look needs to name it and to build a durable selector. */
 function pageControls(_el: Element, sel: string) {
@@ -39,8 +38,14 @@ function pageControls(_el: Element, sel: string) {
   const nameOf = (h: HTMLElement) => (h.getAttribute("aria-label") || (h.getAttribute("aria-labelledby") ? Array.from(h.getAttribute("aria-labelledby")!.split(/\s+/)).map((i) => document.getElementById(i)?.textContent ?? "").join(" ") : "") || (h.id ? (document.querySelector(`label[for="${CSS.escape(h.id)}"]`) as HTMLElement | null)?.innerText : "") || h.closest("label")?.innerText || h.innerText || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || h.getAttribute("alt") || "").trim().replace(/\s+/g, " ").slice(0, 60);
   const roleOf = (h: HTMLElement) => {
     const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase();
-    return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" || type === "reset" ? "button" : type === "range" ? "slider" : type === "number" ? "spinbutton" : type === "search" ? "searchbox" : "textbox") : "textbox");
+    return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" || type === "reset" ? "button" : type === "range" ? "slider" : type === "number" ? "spinbutton" : type === "search" ? "searchbox" : "textbox") : h.isContentEditable ? "textbox" : h.getAttribute("draggable") === "true" ? "draggable" : "clickable");
   };
+  // walk open shadow roots too: a button inside a web component is a control like any other
+  const collect = (root: Document | ShadowRoot | Element, out: Element[]) => {
+    for (const el of Array.from(root.querySelectorAll(sel))) out.push(el);
+    for (const host of Array.from(root.querySelectorAll("*"))) if (host.shadowRoot) collect(host.shadowRoot, out);
+  };
+  const found: Element[] = []; collect(document, found);
   const cssPath = (el: Element): string => {
     const parts: string[] = [];
     for (let e: Element | null = el; e && e !== document.body && parts.length < 5; e = e.parentElement) {
@@ -52,8 +57,11 @@ function pageControls(_el: Element, sel: string) {
     }
     return parts.join(" > ");
   };
-  for (const el of Array.from(document.querySelectorAll(sel))) {
+  const seen = new Set<Element>();
+  for (const el of found) {
+    if (seen.has(el)) continue; seen.add(el);
     const h = el as HTMLElement;
+    if (h.getAttribute("tabindex") === "-1" && !h.matches('button,a,input,select,textarea,summary,[role],[onclick],[contenteditable]')) continue;
     const r = h.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) continue;
     const st = getComputedStyle(h);
@@ -80,7 +88,7 @@ function pageHit(node: Element) {
   if (!out.box) return out;
   if (!out.inViewport) {
     let fixed: Element | null = node; while (fixed && getComputedStyle(fixed).position !== "fixed") fixed = fixed.parentElement;
-    out.why = `outside the ${vw}×${vh} viewport at (${Math.round(r.left)}, ${Math.round(r.top)})${fixed ? `; ${d(fixed)} is position: fixed, so scrolling cannot bring it in — open whatever slides it in, or dispatchEvent("click")` : " — scroll it into view (locator.scrollIntoViewIfNeeded) or open whatever slides it in; a panel parked off-canvas still counts as visible"}`;
+    out.why = `outside the ${vw}×${vh} viewport (page position ${Math.round(r.left + scrollX)}, ${Math.round(r.top + scrollY)}; scrolled to ${Math.round(scrollY)})${fixed ? `; ${d(fixed)} is position: fixed, so scrolling cannot bring it in — open whatever slides it in, or dispatchEvent("click")` : " — scroll it into view (locator.scrollIntoViewIfNeeded) or open whatever slides it in; a panel parked off-canvas still counts as visible"}`;
     return out;
   }
   for (let e: Element | null = node; e; e = e.parentElement) if (getComputedStyle(e).pointerEvents === "none") { out.why = `ignores the mouse: pointer-events: none on ${d(e)} — the app wants the keyboard (pressSequentially / ArrowDown / Enter), or dispatchEvent("click")`; return out; }
@@ -101,8 +109,11 @@ export function dialogCensus(page: Page): Promise<string[]> {
     for (const el of Array.from(document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],dialog[open]'))) {
       const r = (el as HTMLElement).getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
-      const title = el.querySelector("h1,h2,h3,h4,[role=heading]")?.textContent?.trim() || (el as HTMLElement).innerText?.trim().slice(0, 80) || "";
-      out.push(`${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""} "${title.slice(0, 80)}"`);
+      const labelled = el.getAttribute("aria-labelledby");
+      const name = (el.getAttribute("aria-label") || (labelled ? labelled.split(/\s+/).map((i) => document.getElementById(i)?.textContent ?? "").join(" ") : "")).trim();
+      const heading = el.querySelector("h1,h2,h3,h4,[role=heading]")?.textContent?.trim() || (el as HTMLElement).innerText?.trim().slice(0, 80) || "";
+      // an unnamed dialog is `dialog:` in the aria tree — getByRole("dialog") without a name reaches it; the heading is only shown
+      out.push(`${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""} "${(name || heading).slice(0, 80)}"${name ? "" : " (unnamed: getByRole(\"dialog\") without { name }; the heading is shown)"}`);
     }
     return out;
   }).catch(() => []);
@@ -162,9 +173,9 @@ async function marks(ctx: LookCtx, boxes: Array<{ n: number; box: Box }>, reason
     await scratch.setViewportSize(vp);
     await scratch.goto("data:text/html;base64," + Buffer.from(html).toString("base64"), { waitUntil: "load", timeout: 5000 });
     const out = await scratch.screenshot({ type: "jpeg", quality: 70 });
-    const hash = store.writeBlob(new Uint8Array(out));
-    store.insert("shots", { t: store.now(), hash, reason, action_id: ctx.current() });
-    return { hash, path: join(store.dir, "blobs", hash.slice(0, 2), hash) };
+    const hash = store.writeBlob(new Uint8Array(out), ".jpg");
+    store.insert("shots", { t: store.now(), hash, reason, url: page.url(), action_id: ctx.current() });
+    return { hash, path: store.blobFile(hash) };
   } catch { return null; } finally {
     if (scratch) await scratch.close().catch(() => {});
     await page.bringToFront().catch(() => {});

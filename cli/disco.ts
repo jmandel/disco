@@ -31,11 +31,12 @@ Examples:
 --app <name> on any command (default: the last opened); --json prints data instead of text.`;
 
 type Args = { _: string[]; [k: string]: string | boolean | string[] | undefined };
+const BOOL = new Set(["json", "headed"]);   // flags that never take a value, wherever they appear
 function parse(argv: string[]): Args {
   const a: Args = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const x = argv[i];
-    if (x.startsWith("--") && x.length > 2) { const k = x.slice(2); const next = argv[i + 1]; a[k] = next !== undefined && !(next.startsWith("--") && next.length > 2) ? (i++, next) : true; }
+    if (x.startsWith("--") && x.length > 2) { const k = x.slice(2); const next = argv[i + 1]; a[k] = !BOOL.has(k) && next !== undefined && !(next.startsWith("--") && next.length > 2) ? (i++, next) : true; }
     else a._.push(x);
   }
   return a;
@@ -94,7 +95,7 @@ async function main() { switch (cmd) {
     const s = await open(app, { url, attach: args.attach as any, headed: args.headed === true });
     writeFileSync(currentFile, app);
     const others = s.context.pages().filter((p) => !p.url().startsWith("data:")).length - 1;
-    const line = `${app}: ${s.run > 0 ? `run ${s.run}` : ""}  page ${s.page.url()}${others > 0 ? `  (+${others} other page${others > 1 ? "s" : ""} open)` : ""}\nstore: ${appStoreDir(app)}`;
+    const line = `${app}: run ${s.run}  ${s.opened === "navigated" ? "navigated to" : "joined at"} ${s.page.url()}${others > 0 ? `  (+${others} other page${others > 1 ? "s" : ""} open)` : ""}\nstore: ${appStoreDir(app)}`;
     await s.close();
     const rec = await startRecorder(app);
     console.log(line + (rec ? `\nrecording: pid ${rec} (everything until \`disco close\`)` : "\nrecording: only while commands run (recorder did not start; see store/recorder.log)"));

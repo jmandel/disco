@@ -22,7 +22,11 @@ describe("cli", () => {
   it("open → act → act --until → look → sql → close", async () => {
     const o = disco("open", "c", g.origin);
     assert.equal(o.code, 0, o.out);
-    assert.match(o.out, /run 1/); assert.match(o.out, /recording: pid \d+/);
+    assert.match(o.out, /run 1/); assert.match(o.out, /navigated to|joined at/); assert.match(o.out, /recording: pid \d+/);
+    const flag = disco("sql", "--json", "SELECT 1 n");
+    assert.equal(flag.code, 0, flag.out); assert.equal(JSON.parse(flag.stdout)[0].n, 1);
+    const long = disco("act", 'page.evaluate(() => "x".repeat(1000))');
+    assert.match(long.out, /clipped, 1000 chars/);
     // the detached recorder captures what the page does BETWEEN commands
     const armed = disco("act", 'page.evaluate(() => { setTimeout(() => fetch("/api/chart/b"), 700); return "armed"; })', "--quiet", "50");
     assert.equal(armed.code, 0, armed.out); assert.match(armed.out, /value: armed/);

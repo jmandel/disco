@@ -55,6 +55,8 @@ export interface Report<T = unknown> {
   ui: { added: string[]; removed: string[]; more?: number };
   requests: WireLine[];
   static: { count: number; types: Record<string, number> };
+  /** requests to other sites (telemetry, fonts CDNs) — folded out of `requests`, `writes` and `pending`; the log has them */
+  thirdParty: { count: number; hosts: Record<string, number> };
   /** requests started in the window and still in flight when it closed */
   pending: string[];
   /** the non-GET app requests in the window — what this act may have persisted */
@@ -76,6 +78,10 @@ const DEFAULT_QUIET = 500;
 const STATIC_TYPES = new Set(["script", "stylesheet", "image", "font", "media", "texttrack", "manifest"]);
 
 function originOf(u: string): string { try { return new URL(u).origin; } catch { return ""; } }
+/** CDP target info for a page — its id survives reconnects, and openerId marks a popup, which Page.opener() cannot see from a new connection. */
+async function targetInfoOf(context: BrowserContext, page: Page): Promise<{ targetId?: string; openerId?: string }> {
+  try { const cdp = await context.newCDPSession(page); const { targetInfo } = await cdp.send("Target.getTargetInfo") as any; await cdp.detach().catch(() => {}); return { targetId: targetInfo?.targetId, openerId: targetInfo?.openerId }; } catch { return {}; }
+}
 function sameUrl(a: string, b: string): boolean { const n = (x: string) => x.replace(/#.*$/, "").replace(/\/+$/, ""); return n(a) === n(b); }
 const isScratch = (p: Page) => { try { return p.url().startsWith("data:"); } catch { return false; } };
 
@@ -94,10 +100,16 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
   const browser = await connect(info);
   const context = browser.contexts()[0] ?? (await browser.newContext());
   const pages = context.pages().filter((p) => !isScratch(p));
-  // pages() is not in creation order after a reconnect: prefer the page already at `url` (then its origin), never a popup by accident
-  let page: Page | undefined;
-  if (opts.url) page = pages.find((p) => sameUrl(p.url(), opts.url!)) ?? pages.find((p) => p.url().includes(opts.url!)) ?? pages.find((p) => originOf(p.url()) === originOf(opts.url!));
-  page = page ?? pages[0] ?? (await context.newPage());
+  // pages() is not in creation order after a reconnect, and a popup left by an earlier script must not become the driven
+  // page: prefer the page this browser was opened on (remembered by target id), then the page at `url` (then its origin),
+  // and among candidates one that no other page opened
+  const targets = await Promise.all(pages.map((p) => targetInfoOf(context, p)));
+  const remembered = pages.find((_, i) => info!.pageTarget && targets[i].targetId === info!.pageTarget);
+  const pick = (cands: Page[]) => (cands.length ? [...cands].sort((a, b) => (targets[pages.indexOf(a)].openerId ? 1 : 0) - (targets[pages.indexOf(b)].openerId ? 1 : 0))[0] : undefined);
+  let page: Page | undefined = remembered;
+  if (!page && opts.url) page = pick(pages.filter((p) => sameUrl(p.url(), opts.url!))) ?? pick(pages.filter((p) => p.url().includes(opts.url!))) ?? pick(pages.filter((p) => originOf(p.url()) === originOf(opts.url!)));
+  page = page ?? pick(pages) ?? (await context.newPage());
+  if (!info.pageTarget || !remembered) { const ti = pages.includes(page) ? targets[pages.indexOf(page)] : await targetInfoOf(context, page); if (ti.targetId) { info.pageTarget = ti.targetId; writeBrowserInfo(storeDir, info); } }
   await page.bringToFront().catch(() => {});
   const store = new Store(storeDir);
   if (fresh || !store.resumeRun()) store.beginRun({ url: opts.url ?? page.url(), mode: info.mode });
@@ -105,8 +117,11 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
   const external = !opts.recorder && pidAlive(info.recorderPid);
   const s = new Session(app, dir, store, browser, context, page, info, !external);
   await Session._ready(s);
-  // navigate when we just launched, or when the page is somewhere else; joining a browser that is already there leaves its state alone
-  if (opts.url && (fresh || !sameUrl(page.url(), opts.url))) await page.goto(opts.url, { waitUntil: "load", timeout: 15000 }).catch(() => {});
+  // navigate when we just launched, or when the page is somewhere else; joining a browser that is already there leaves its
+  // state alone. The navigation is an act like any other, so open returns once the new page is quiet (SPA redirects and
+  // first fetches included) and its wire is in the log.
+  const absolute = !!opts.url && /^[a-z][a-z0-9+.-]*:\/\//i.test(opts.url);
+  if (absolute && (fresh || !sameUrl(page.url(), opts.url!))) { await s.act(`open ${opts.url}`, (p) => p.goto(opts.url!, { waitUntil: "commit" }), { max: 15000 }); s.opened = "navigated"; }
   return s;
 }
 
@@ -120,6 +135,8 @@ export class Session {
   page: Page;
   context: BrowserContext;
   browser: Browser;
+  /** whether open navigated the page (as its first act) or joined it where it was */
+  opened: "navigated" | "joined" = "joined";
 
   #store: Store;
   #reader: StoreReader | null = null;
@@ -174,6 +191,7 @@ export class Session {
     store.insert("actions", { id, n, t0, label, code: fnSource(run) });
     this.#current = id;
     if (this.context.pages().filter((p) => !isScratch(p)).length > 1) await page.bringToFront().catch(() => {});
+    const pageSite = siteOf(safe(() => new URL(page.url()).host, ""));
     const tDispatch = performance.now();
     let ok = true, value: T | undefined, runError: unknown, landedNote: string | undefined;
     try { value = await run(page); } catch (e) {
@@ -193,7 +211,7 @@ export class Session {
     } else if (untilP) {
       const remaining = Math.max(0, max - (tRun1 - tDispatch));
       if (!armed.done) await Promise.race([untilP.catch(() => {}), sleep(remaining)]);
-      if (armed.done && !armed.error) { returned = "until"; until = { ok: true, elapsedMs: Math.max(0, ms(tDispatch, armed.resolvedAt!)) }; if (armed.resolvedAt! <= tDispatch) until.alreadyTrue = true; if (armed.value !== undefined && (typeof armed.value !== "object" || armed.value === null)) until.value = armed.value; }
+      if (armed.done && !armed.error) { returned = "until"; until = { ok: true, elapsedMs: Math.max(0, ms(tDispatch, armed.resolvedAt!)) }; if (armed.resolvedAt! <= tDispatch) until.alreadyTrue = true; if (armed.value !== undefined) until.value = plainValue(armed.value); }
       else { returned = "max"; until = { ok: false, elapsedMs: ms(tDispatch, performance.now()), error: armed.error ?? `did not hold within max (${max} ms)` }; untilP.catch(() => {}); }
     } else {
       const deadline = tDispatch + max;
@@ -204,7 +222,7 @@ export class Session {
         await sleep(Math.min(quiet, left));
         const cur = await this.#fingerprint();
         const idle = store.now() - rec.lastActivity();
-        const awaiting = store.get<{ n: number }>("SELECT count(*) n FROM requests WHERE run=? AND t_start >= ? AND t_response IS NULL AND t_end IS NULL", store.run, t0 - 1)?.n ?? 0;
+        const awaiting = store.all<{ host: string | null }>("SELECT host FROM requests WHERE run=? AND t_start >= ? AND t_response IS NULL AND t_end IS NULL", store.run, t0 - 1).filter((r) => !isThirdParty(r.host, pageSite)).length;
         if (cur === prev && idle >= quiet && awaiting === 0) { returned = "quiet"; break; }
         prev = cur;
         if (performance.now() >= deadline) { returned = "max"; break; }
@@ -219,12 +237,12 @@ export class Session {
     const postStorage = await this.#storage();
     const url = safe(() => page.url(), "");
     const diagnosis = ok ? undefined : await this.#diagnose(runError);
-    const { requests, static: st, pending, matchedRows } = this.#wire(t0, t1);
+    const { requests, static: st, thirdParty, pending, matchedRows } = this.#wire(t0, t1, pageSite);
     const ui = diffAria(preAria, postAria, 40);
     const storage = diffStorage(preStorage, postStorage);
     const report: Report<T> = {
       action: id, label, ok, ...(value !== undefined ? { value } : {}), diagnosis, returned, until, url,
-      ui, requests, static: st, pending,
+      ui, requests, static: st, thirdParty, pending,
       writes: requests.filter((w) => !["GET", "HEAD", "OPTIONS"].includes(w.method) && !w.earlier).map((w) => `${w.method} ${w.path}${w.status != null ? " " + w.status : ""}`),
       storage,
       console: store.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", store.run, t0, t1 + 1),
@@ -237,6 +255,8 @@ export class Session {
     };
     const notes: string[] = [];
     if (landedNote) notes.push(landedNote);
+    if (!ui.added.length && !ui.removed.length && preAria && postAria && preAria !== postAria) notes.push("the accessibility tree changed without additions or removals: lines moved (a sort or a reorder)");
+    if (until && (until.alreadyTrue || !until.ok) && opts.until) notes.push(...(await this.#untilNotes(fnSource(opts.until), until, t0)));
     if (!preAria || !postAria) notes.push("the aria snapshot exceeded 1.5 s on this page; the ui diff is unreliable");
     if (until && !until.ok && /finished\(\)/.test(fnSource(opts.until!)) && requests.some((w) => w.state === "missing")) notes.push("a matching response arrived but the page never read its body, so finished() cannot resolve — drop it and read the status, or read the body from the log");
     if (until && !until.ok && returned === "max" && !opts.until!.toString().includes("timeout")) notes.push(`Playwright calls inside until inherit max (${max} ms) as their timeout`);
@@ -259,10 +279,13 @@ export class Session {
     const where = ["url LIKE ?", "status IS NOT NULL"]; const args: unknown[] = [`%${urlPart}%`];
     if (scope.action) { where.push("action_id=?"); args.push(scope.action); }
     if (scope.method) { where.push("method=?"); args.push(scope.method.toUpperCase()); }
-    const q = `SELECT id, body_hash, body_state FROM requests WHERE ${where.join(" AND ")} ORDER BY run DESC, t_start DESC LIMIT 20`;
+    const q = `SELECT id, url, body_hash, body_state FROM requests WHERE ${where.join(" AND ")} ORDER BY run DESC, t_start DESC LIMIT 50`;
+    // "/queue-entry" must not pick "/queue-entry-metrics": prefer matches that end at a path boundary, when there are any
+    const boundary = (u: string) => { const i = u.indexOf(urlPart); if (i < 0) return false; const c = u[i + urlPart.length]; return c === undefined || "?#/&".includes(c); };
     const t0 = Date.now();
     for (;;) {
-      const rows = this.#store.all<{ id: string; body_hash: string | null; body_state: string }>(q, ...args);
+      const every = this.#store.all<{ id: string; url: string; body_hash: string | null; body_state: string }>(q, ...args);
+      const rows = every.some((r) => boundary(r.url)) ? every.filter((r) => boundary(r.url)) : every;
       if (!rows.length) return null;
       if (rows[0].body_state === "pending" && Date.now() - t0 < 1000) { await sleep(50); continue; }
       const row = rows.find((r) => r.body_hash);
@@ -302,16 +325,38 @@ export class Session {
     } catch {}
     return out;
   }
-  #wire(t0: number, t1: number): { requests: WireLine[]; static: Report["static"]; pending: string[]; matchedRows: any[] } {
+  #wire(t0: number, t1: number, pageSite: string): { requests: WireLine[]; static: Report["static"]; thirdParty: Report["thirdParty"]; pending: string[]; matchedRows: any[] } {
     const store = this.#store;
-    const rows = store.all<any>("SELECT id, method, path, url, status, t_start, t_response, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?))) ORDER BY t_start", store.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1);
+    const every = store.all<any>("SELECT id, method, path, url, host, status, t_start, t_response, t_end, mime, body_hash, body_size, body_state, resource_type FROM requests WHERE run=? AND ((t_start BETWEEN ? AND ?) OR (t_start < ? AND (t_end BETWEEN ? AND ? OR t_response BETWEEN ? AND ?))) ORDER BY t_start", store.run, t0 - 1, t1 + 1, t0 - 1, t0 - 1, t1 + 1, t0 - 1, t1 + 1);
+    const hosts: Record<string, number> = {}; let tpCount = 0;
+    const rows = every.filter((r) => { if (isThirdParty(r.host, pageSite)) { tpCount++; hosts[r.host] = (hosts[r.host] ?? 0) + 1; return false; } return true; });
     const all: WireLine[] = rows.map((r) => ({ id: r.id, method: r.method, path: pathOf(r.url, r.path), status: r.status, ms: r.t_end != null ? Math.round(r.t_end - r.t_start) : null, mime: shortMime(r.mime), body: r.body_hash ? r.body_hash.slice(0, 16) : null, size: r.body_size, state: r.body_state, type: r.resource_type, ...(r.t_start < t0 - 1 ? { earlier: true } : {}) }));
     const types: Record<string, number> = {}; let count = 0;
     const requests = all.filter((w) => { const isStatic = STATIC_TYPES.has(w.type ?? ""); if (isStatic) { count++; types[w.type!] = (types[w.type!] ?? 0) + 1; } return !isStatic; });
     const pending = rows.filter((r) => r.t_start >= t0 - 1 && r.t_end == null && !STATIC_TYPES.has(r.resource_type) && r.body_state !== "streaming" && r.resource_type !== "websocket" && r.resource_type !== "eventsource" && r.body_state !== "missing")
       .map((r) => `${r.method} ${pathOf(r.url, r.path).slice(0, 80)} (${((t1 - r.t_start) / 1000).toFixed(1)}s${r.status != null ? `, ${r.status}, body pending` : ""})`);
-    return { requests, static: { count, types }, pending, matchedRows: rows.filter((r) => r.t_start >= t0 - 1 && !STATIC_TYPES.has(r.resource_type)) };
+    return { requests, static: { count, types }, thirdParty: { count: tpCount, hosts }, pending, matchedRows: rows.filter((r) => r.t_start >= t0 - 1 && !STATIC_TYPES.has(r.resource_type)) };
   }
+  /** What the until's own target looks like now, and — for a response wait that failed — what answered just before the act. */
+  async #untilNotes(src: string, until: NonNullable<Report["until"]>, t0: number): Promise<string[]> {
+    const notes: string[] = [];
+    const desc = src.match(/page\.((?:locator|getBy[A-Z]\w*|frameLocator)\(.*?\)(?:\.(?:first|last)\(\)|\.nth\(\d+\))?)\.waitFor\(/)?.[1];
+    const loc = desc ? locatorFromDescription(this.page, desc) : null;
+    if (loc) {
+      const n = await loc.count().catch(() => -1);
+      if (n === 0) notes.push(`the until's target ${desc} matches nothing now`);
+      else if (n > 0) {
+        const m = await inspect(this.page, loc.first());
+        notes.push(`the until's target ${desc}: ${n} match${n === 1 ? "" : "es"} now; the first is ${m.visible ? "visible" : "hidden"}${m.enabled ? "" : ", disabled"}${m.box ? ` at (${m.box.x},${m.box.y} ${m.box.w}×${m.box.h})` : ""}${m.why ? ` — ${m.why}` : ""}${until.alreadyTrue ? " — it existed before the action; anchor on what the action changes: a state (aria-selected, aria-hidden, aria-expanded), a value, or the element that leaves" : ""}`);
+      }
+    }
+    if (!until.ok && /waitForResponse|waitFor\(\s*["']response["']/.test(src)) {
+      const before = this.#store.all<any>("SELECT method, url, status, t_response FROM requests WHERE run=? AND t_response IS NOT NULL AND t_response BETWEEN ? AND ? AND resource_type IN ('xhr','fetch','document') ORDER BY t_response DESC LIMIT 6", this.#store.run, t0 - 5000, t0);
+      if (before.length) notes.push(`no response matched during the wait; these answered in the 5 s BEFORE this act (a cache or a de-duplicated fetch answers before you click — anchor on the screen, or read that earlier body from the log): ${before.map((r) => `${r.method} ${pathOf(r.url, null).slice(0, 70)} ${r.status} (−${Math.round(t0 - r.t_response)} ms)`).join(", ")}`);
+    }
+    return notes;
+  }
+
   async #diagnose(e: unknown): Promise<Diagnosis> {
     const full = String((e as Error)?.message ?? e).replace(/\x1b\[\d+m/g, "");
     const msg = full.split("\n").filter((l) => l.trim() && !/^\s*[-=]+\s*$/.test(l) && !/^Call log:/.test(l)).slice(0, 6).map((l) => l.trim()).join(" | ").slice(0, 600);
@@ -354,9 +399,10 @@ export class Session {
     else if (reason === "timeout") hint = ` — the wait inherited this act's max (${this.#max === DEFAULT_MAX ? DEFAULT_MAX : this.#max} ms); look() shows what is on the screen now`;
     else if (reason === "disabled") hint = " — the form is not ready; wait for whatever enables it";
     else if (reason === "hidden") hint = " — it is rendered but collapsed, off-screen or display:none; open what reveals it";
+    else if (reason === "error" && /is not defined|Failed to parse URL|fetch failed|ReferenceError/.test(full)) hint = " — your act code runs in Node, not in the page: page.evaluate(() => …) for the DOM, and for a fetch that should carry the page's cookies";
     d.message = msg + hint;
     d.dialogs = await dialogCensus(page);
-    try { const buf = await page.screenshot({ type: "jpeg", quality: 60 }); const hash = this.#store.writeBlob(new Uint8Array(buf)); this.#store.insert("shots", { t: this.#store.now(), hash, reason: "diagnosis", action_id: this.#current }); d.shot = `${this.#store.dir}/blobs/${hash.slice(0, 2)}/${hash}`; } catch {}
+    try { const buf = await page.screenshot({ type: "jpeg", quality: 60 }); const hash = this.#store.writeBlob(new Uint8Array(buf), ".jpg"); this.#store.insert("shots", { t: this.#store.now(), hash, reason: "diagnosis", url: safe(() => page.url(), ""), action_id: this.#current }); d.shot = this.#store.blobFile(hash); } catch {}
     return d;
   }
 }
@@ -393,14 +439,16 @@ function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLi
   const parsed = (line: string) => {
     const m = line.match(/^-\s+([a-z]+)(?:\s+"((?:[^"\\]|\\.)*)")?((?:\s*\[[^\]]*\])*)\s*:?\s*(.*)$/); if (!m) return null;
     const states = [...(m[3] ?? "").matchAll(/\[([a-z]+)\]/g)].map((x) => x[1]).filter((x) => STATES.includes(x));
-    return { role: m[1], name: m[2], states, rest: m[4]?.trim().replace(/^"|"$/g, ""), key: `${m[1]}|${m[2] ?? ""}|${states.join(",")}` };
+    const rest = m[4]?.trim().replace(/^"|"$/g, "");
+    return { role: m[1], name: m[2], states, rest, key: `${m[1]}|${m[2] ?? rest ?? ""}|${states.join(",")}` };
   };
-  const before = new Set(preLines.map(parsed).filter(Boolean).flatMap((x) => [x!.key, `${x!.role}|${x!.name ?? ""}|`]));
+  const before = new Set(preLines.map(parsed).filter(Boolean).flatMap((x) => [x!.key, `${x!.role}|${x!.name ?? x!.rest ?? ""}|`]));
   const added = ui.added.map(parsed).filter((x): x is NonNullable<typeof x> => !!x && !before.has(x.key) && x.role !== "generic" && x.role !== "list" && x.role !== "listitem" && x.role !== "group" && x.role !== "region").sort((a, b) => rank(a.role) - rank(b.role));
   let n = 0;
   for (const a of added) {
     if (n >= 3) break;
-    if (a.role === "text") { const t = a.rest; if (!t || t.length < 3 || t.length > 40) continue; out.push({ kind: "appeared", code: `() => page.getByText(${JSON.stringify(t)}).first().waitFor()`, atMs: null }); n++; continue; }
+    // a text line often merges sibling elements (a label and a value span), which no single getByText matches: wait on the page's text instead
+    if (a.role === "text") { const t = a.rest; if (!t || t.length < 3 || t.length > 60) continue; out.push({ kind: "appeared", code: `() => page.waitForFunction(t => document.body.innerText.replace(/\\s+/g, "").includes(t), ${JSON.stringify(t.replace(/\s+/g, ""))})`, atMs: null }); n++; continue; }
     if (!a.name) continue;
     const st = a.states.map((x) => `, ${x}: true`).join("");
     out.push({ kind: "appeared", code: `() => page.getByRole(${JSON.stringify(a.role)}, { name: ${JSON.stringify(a.name.slice(0, 60))}, exact: true${st} }).first().waitFor()`, atMs: null }); n++;
@@ -432,6 +480,14 @@ export function diffAria(pre: string, post: string, cap = 40): Report["ui"] {
 }
 
 function fnSource(f: unknown): string { try { return String(f).slice(0, 4000); } catch { return ""; } }
+/** What an until resolved with, kept when it is JSON and small; otherwise a short description. */
+function plainValue(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  try { const s = JSON.stringify(v); if (s !== undefined && s.length <= 2000) return JSON.parse(s); return `${(s ?? String(v)).slice(0, 200)}… (${s?.length ?? 0} chars)`; } catch { return String(v).slice(0, 200); }
+}
+/** The site a host belongs to: its last two labels (an IP or a single label stands alone). Good enough to tell telemetry from the app's API. */
+function siteOf(host: string | null | undefined): string { if (!host) return ""; const h = host.replace(/:\d+$/, ""); if (/^[\d.]+$/.test(h) || h.startsWith("[") || !h.includes(".")) return h; return h.split(".").slice(-2).join("."); }
+function isThirdParty(host: string | null | undefined, pageSite: string): boolean { const s = siteOf(host); return !!s && !!pageSite && s !== pageSite; }
 function firstLine(e: unknown): string { return String((e as any)?.message ?? e).split("\n")[0].slice(0, 300); }
 function ms(a: number, b: number): number { return Math.round(b - a); }
 function safe<T>(f: () => T, d: T): T { try { return f(); } catch { return d; } }
