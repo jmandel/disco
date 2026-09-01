@@ -3,8 +3,14 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["node"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
@@ -13,5 +19,11 @@
     "noEmit": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "cli", "scripts", "test"]
+  "include": [
+    "src",
+    "cli",
+    "scripts",
+    "test",
+    "apps"
+  ]
 }
