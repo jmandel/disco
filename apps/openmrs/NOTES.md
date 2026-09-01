@@ -1,78 +1,22 @@
-# NOTES — openmrs (dev3.openmrs.org), 2026-09-01
+# openmrs — notes
 
-Raw observations in the order they were made, with act ids from run 1. Distilled into README.md / wire.md.
+Appended by `disco note` / `s.note()`. Distill into README.md when it settles.
 
-- `act:1` `./disco open openmrs https://dev3.openmrs.org/openmrs/spa/login` — 4.6 s to a committed page.
-- `act:2` `./disco until --until-text "Login"` — **20 s burned**, `timeout`. The login screen never
-  says "Login"; it says *Username* then *Continue*. Screenshot + `eval document.body.innerText` (0.3 s)
-  answered what the 20 s wait could not. Lesson: probe the text before waiting on it.
-- Shell off the wire: `GET /openmrs/spa/login` (3.3 K HTML) + `importmap.json` + `routes.registry.json`
-  (67 K) + ~20 hashed JS/CSS chunks. This is **single-spa**: the HTML is an empty shell, the app is an
-  import map of `@openmrs/esm-*` microfrontends. Reading `routes.registry.json` is the fastest way to
-  learn what pages exist.
-- `GET /openmrs/ws/rest/v1/session` before login → `{"authenticated":false,...}`. Same URL is the
-  login endpoint.
-- `act:3-5` login is two screens in one page. `#username` + `button "Continue"` reveals `#password` +
-  `button "Log in"`. My `until: {selector:"[role=alert]"}` on Continue came back **alreadyTrue** — an
-  empty `role=alert` live region is on the login page from the start. Use `role=button[name='Log in']`.
-- `act:7` `click role=button[name='Log in']` → `until { url: "/spa/home" }` held in **242 ms**. One wire
-  fact: `GET /openmrs/ws/rest/v1/session` with `Authorization: Basic YWRtaW46QW…`, 200, `set-cookie:
-  JSESSIONID=…; Path=/openmrs; HttpOnly`. No POST anywhere. Body carries user, roles
-  (System Developer, Provider), `sessionLocation` (Outpatient Clinic), `currentProvider`.
-- No location picker for `admin` — `user.userProperties.defaultLocation` is set. O3 shows one otherwise;
-  kept as an `any` arm in `login()`. **Unverified.**
-- `act:8` `/spa/home` redirects to `/spa/home/service-queues`. Left nav: Service queues, Appointments,
-  Patient lists, Wards, Laboratory, Billing. Header: Change location · Search patient · Implementer
-  Tools · Add patient · My Account · App Menu.
-- `act:9` **FAILED not-found** `button:has-text('Search patient')` — while the diagnosis's own
-  `visible controls` list printed `button "Search patient"`. The button has an icon and an
-  `aria-label`, no text node. `role=button[name='Search patient']` works (`act:10`). See friction #3.
-- `act:10` search panel: `input[placeholder='Search for a patient by name or identifier number']`.
-  Its DOM id is React-generated (`search-input-:r1d:`) — never usable.
-- `act:11` `type` "John" → one debounced `GET /openmrs/ws/rest/v1/patient?q=John&v=custom:(…)`, 200,
-  26 K, 8 results. `until: { request: "/rest/v1/patient?q=John", landed: true }` held at 604 ms.
-  Each row is `a[href='/openmrs/spa/patient/<uuid>/chart/']`.
-- Before typing, the panel shows "10 recent search results" — from
-  `user.userProperties.patientsVisited` (a comma-separated uuid list), each hydrated with its own
-  `GET patient/<uuid>` + `visit?patient=` + `obs?patient=` fan-out. ~30 requests of noise per panel open.
-- `act:12` clicking a result: `until { url: "/chart" }` held in 210 ms but the page was still the
-  header only — the chart microfrontend had not been fetched. **URL is not a chart anchor.**
-- `act:13` the real anchor is `[aria-label='patient banner']` (aria `banner "patient banner"`).
-- `act:15` cold `navigate(chartUrl)` + banner anchor: ~2.9 s, 220 requests. Wire during it:
-  `fhir2/R4/Patient/<uuid>`, `rest/v1/visit?patient=`, `rest/v1/systemsetting/visits.enabled`,
-  `rest/v1/obs?patient=&concept=736e8771…` (sticky note), `fhir2/R4/Observation?…code=5085,5086,…`
-  (vitals), `fhir2/R4/Condition?patient=…&category=problem-list-item`,
-  `rest/v1/order?patient=&careSetting=…&orderTypes=…`, `rest/v1/conceptreferencerange/?…`.
-- Chart left nav (12 tabs): patient-summary, vitals-and-biometrics, medications, orders, results,
-  visits, allergies, conditions, procedures, immunizations, attachments, programs, appointments,
-  billing-history, growth-chart. Right rail: Order basket, Visit note, Task list, Clinical forms,
-  Patient lists.
-- `act:17` `click nav a[href$='/chart/allergies']` → `h4 "Allergies"` in 436 ms, one request:
-  `GET /openmrs/ws/fhir2/R4/AllergyIntolerance?patient=<uuid>…` 200 2.3 K.
-- Conditions tab issues **no request at all** — the patient-summary widget already fetched
-  `Condition?patient=`, and the app's SWR cache serves the tab. A `{ request }` predicate there
-  never fires; the check asserts `body === null || Bundle`.
-- `act:18-21` home apps, each with its own wire:
-  appointments → `rest/v1/appointmentService/all/default` + `rest/v1/appointments?forDate=…`;
-  patient-lists → `rest/v1/cohortm/cohort?v=custom:(…)`;
-  laboratory → 7× `rest/v1/order?orderTypes=52a447d3-…` (one per tab);
-  ward → `rest/v1/admissionLocation/<loc>` + `rest/v1/emrapi/inpatient/admission` + `…/request`.
-  `patient-lists` and `laboratory` have **no `<main>` heading** — my `main h1..h4` anchor expired twice
-  at 25 s each (50 s). Their anchors are tabs: `role=tab[name='Starred lists']`,
-  `role=tab[name='Tests ordered']`.
-- `act:23-24` Logout: the "User menu options" list is always in the DOM *and* always `visible` to
-  Playwright — the header only slides it in. `until: {selector: "role=button[name='Logout']"}` on the
-  My Account click is `alreadyTrue`. Click My Account bare, then Logout with `#username` as the
-  postcondition (~1.5 s).
-- `act:25-28` re-login lands on `/spa/home/service-queues` directly, so `{ url: "/spa/home" }` covers
-  both landings.
-- `act:155` App Menu (header): System Administration, Queue screen, Dispensing, Fast Data Entry —
-  each a separately lazy-loaded `openmrs-esm-*-app` chunk fetched on menu open.
-- Modules on this server (`rest/v1/module`): fhir2 4.2.0, webservices.rest 3.5.0, queue 3.1.0,
-  appointments 2.1.0, bedmanagement 7.2.0, billing 2.4.0, cohort 3.7.3, idgen 5.0.4, attachments 4.0.0,
-  o3forms 2.3.0, stockmanagement 3.0.0, emrapi 3.5.0, patientflags 3.0.10, … (31 total).
-- Patient lists (cohorts) present: nini (3), Uche Happiness U (0), Adama Hospital Medical College (0),
-  Akash Hospital patient (0), GYMNOTT (0).
-- Console noise on every page: `Failed to load resource: 404` (the PWA manifest icon
-  `$SPA_PATH/icon_144x144…png` — an unsubstituted template variable) and
-  `Unknown config key '@openmrs/esm-laboratory-app.labTableColumns'`. Both are constant; ignore.
+- [run 2 · 77718ms] SHAPE — OpenMRS 3.x (O3) single-page app. Document /openmrs/spa/login is a 3.3 KB shell; everything else is ES-module microfrontends served from /openmrs/spa/openmrs-esm-*-app-<version>/ and configured by GET /openmrs/spa/config-core_demo.json (act:1, body 8fb130b78d5b). All facts travel on two JSON APIs under the same origin: the OpenMRS REST API /openmrs/ws/rest/v1/* and a FHIR R4 facade /openmrs/ws/fhir2/R4/*.
+- [run 2 · 77736ms] AUTH — login is GET /openmrs/ws/rest/v1/session with `Authorization: Basic base64(user:pass)` and `Disable-WWW-Authenticate: true` (that header suppresses the browser's native basic-auth dialog). Response sets `JSESSIONID=...; Path=/openmrs; HttpOnly` (act:5, body 24cd60f44e47). Logout is DELETE on the same URL -> 204 (act:79). Wrong credentials still return HTTP 200 with `authenticated:false` — status code is NOT the signal.
+- [run 2 · 77736ms] LOGIN UI — two screens: textbox 'Username' -> button 'Continue' -> input[type=password] -> button 'Log in' (act:2..act:5). A failed attempt resets the form back to the username screen and raises a [role=status] toast 'Error Invalid username or password' (act:83) which LINGERS; the [role=alert] node on that page is a Carbon text-input counter, permanently present and empty — never anchor on it.
+- [run 2 · 77736ms] LOGIN IS NOT A CREDENTIAL TEST WHEN A COOKIE EXISTS — with a live JSESSIONID the /spa/login page redirects itself to /spa/home after ~1-2 s, so a deliberately wrong password reached the shell (check step 'reject bad credentials' failed with which=shell). Log out first.
+- [run 2 · 77736ms] SHELL — after login the URL is /openmrs/spa/home and immediately becomes /openmrs/spa/home/service-queues. Anchor: nav[aria-label='Left navigation'] a[href$='/home/appointments'] (act:42). Left nav apps: Service queues, Appointments, Patient lists, Laboratory, Wards, Billing. Header: 'Change location' (Outpatient Clinic), 'Search patient', 'Add patient', 'My Account', 'App Menu'.
+- [run 2 · 77736ms] USER MENU LIES — the user-menu panel's contents (Super User / English / Password / Logout) are always in the DOM and always 'visible' to Playwright; the panel is parked off the right edge. until:{selector:"role=button[name='Logout']"} is alreadyTrue and clicking Logout is diagnosed `occluded`. The honest anchor for the open panel is the Carbon class .cds--header-panel--expanded, and the aria diff after clicking 'My Account' is EMPTY (act:130).
+- [run 2 · 77736ms] PATIENT SEARCH — header button 'Search patient' opens an overlay with searchbox 'Search for a patient by name or identifier number' (act:6). Typing hits GET /openmrs/ws/rest/v1/patient?q=<q>&v=custom:(patientId,uuid,identifiers,display,person:(...)) (act:7 / act:91). s.fill is enough (controlled React input). q='1000' -> 10 hits (CR Numbers start 1000), q='Miller' -> 2, q='a' -> 0 (server needs a longer term).
+- [run 2 · 77736ms] PATIENT CHART — /openmrs/spa/patient/<uuid>/chart/<tab>. Anchor: [aria-label='patient banner']. Left nav tabs: patient-summary, vitals-and-biometrics, medications, orders, results, visits, allergies, conditions, immunizations, procedures, attachments, programs, appointments, billing-history, growth-chart (act:9).
+- [run 2 · 77737ms] CHART DATA IS SPLIT ACROSS TWO APIs — FHIR R4 for Patient, Observation (vitals/biometrics), Condition (problem list), AllergyIntolerance, Immunization; REST for order (medications), obstree (results tree), visit/encounter, programenrollment, procedure, attachment, appointments/search, billing/bill (act:30..act:41).
+- [run 2 · 77737ms] CACHE — react-query. patient-summary already fetches Conditions, Vitals, Medications and Visits, so clicking those tabs afterwards issues NO request and an until:{request} expires for its whole budget. Read the body from the log scoped by the patient uuid instead, and keep the request budget short (2.5 s).
+- [run 2 · 77737ms] VISITS TAB issues GET /openmrs//ws/rest/v1/visit?... — note the DOUBLE SLASH after /openmrs (act:33). A path-prefix predicate that assumes one slash will miss it.
+- [run 2 · 77737ms] SERVICE QUEUES — GET /openmrs/ws/rest/v1/queue-entry?... fires TWICE per load (one per dashboard section); the newer response is the empty 'waiting' one, so store.latestJson returns [] while the rows on screen came from the earlier, larger body (act:61: 29 271 B vs 29 B). Pick by body_size, not by recency.
+- [run 2 · 77737ms] PATIENT LISTS = COHORTS — GET /openmrs/ws/rest/v1/cohortm/cohort?v=custom:(uuid,name,description,display,size,...) (act:55). Opening one: /home/patient-lists/<uuid> -> GET cohortm/cohortmember?cohort=<uuid>&startIndex=0&limit=10&v=full (act:57).
+- [run 2 · 77737ms] APPOINTMENTS — GET /openmrs/ws/rest/v1/appointments?forDate=<ISO> for the day view, POST /openmrs/ws/rest/v1/appointments/search for a patient's chart tab, GET /openmrs/ws/rest/v1/appointmentService/all/default for the service list (act:59, act:40).
+- [run 2 · 77737ms] WORKSPACES — the right side rail (Order basket, Visit note, Clinical forms, Task list, Patient lists) opens a panel inside #omrs-workspaces-container. Anchor: '#omrs-workspaces-container [aria-label=\'Workspace header\']' plus the title text. They SURVIVE SPA route changes and stack: four clicks left four containers in the DOM and the aria diff went empty (act:65..act:69). Always close.
+- [run 2 · 77737ms] CHART VIEW WRITES — opening a chart POSTs /openmrs/ws/rest/v1/user/<uuid> to append the patient to the `patientsVisited` user property (act:8). Unavoidable side effect of reading; no clinical record is touched.
+- [run 2 · 77737ms] REGISTRATION — header 'Add patient' -> /openmrs/spa/patient-registration, heading 'Create new patient', button 'Register patient' [disabled] until required fields are filled (act:92). Safe to open, never submitted.
+- [run 2 · 77737ms] SELECTOR — mixing engines in one target needs '>>': "#omrs-workspaces-container role=button[name='Close']" throws 'Unexpected token "=" while parsing css selector'; "#omrs-workspaces-container >> role=button[name='Close']" works.

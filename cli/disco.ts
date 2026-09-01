@@ -6,11 +6,14 @@ import { join } from "node:path";
 import { open, type ActSpec, type Pred, type Kind } from "../src/session.ts";
 import { formatReport } from "../src/format.ts";
 import { appsRoot, appStoreDir, openStore, SCHEMA } from "../src/store.ts";
-import { readBrowserInfo, killLaunched, writeBrowserInfo, isAlive } from "../src/browser.ts";
+import { readBrowserInfo, killLaunched, writeBrowserInfo, isAlive, pidAlive } from "../src/browser.ts";
+import { spawn } from "node:child_process";
+import { openSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const HELP = `disco — drive an unfamiliar web app, keep every wait short and named, leave a pack behind.
 
-  disco open <app> <url> [--headed] [--dialogs accept|dismiss] [--fresh]   launch Chromium, navigate, record
+  disco open <app> <url> [--headed] [--dialogs accept|dismiss] [--fresh]   launch Chromium, navigate, start recording (until close)
   disco open <app> --attach <port|host:port|ws://…> [--url <substring>]     attach to a running browser (page matching --url, else the first)
   disco close [<app>]                          kill the launched browser (forget an attached one)
   disco ls                                     apps with a store, and whether their browser is alive
@@ -30,7 +33,7 @@ const HELP = `disco — drive an unfamiliar web app, keep every wait short and n
   disco sql <query> [--json]                   the log (disco schema for the tables)
   disco body <hash-or-prefix>                  a captured body / screenshot blob
   disco note <text>                            append to apps/<app>/NOTES.md
-  disco record                                 keep recording until Ctrl-C (between commands nothing is recorded)
+  disco record                                 record in the foreground (open already runs one in the background)
   disco pages [--close N | --close-others]     list open pages (* = driven); --page N picks one for any command
   disco schema
 
@@ -90,6 +93,24 @@ function printReport(r: any) { console.log(json ? JSON.stringify(r, null, 2) : f
 
 const KINDS: Record<string, Kind> = { click: "click", dblclick: "dblclick", rightclick: "click", hover: "hover", fill: "fill", type: "type", press: "press", select: "select", scroll: "scroll", drag: "drag", navigate: "navigate", act: "noop" };
 
+/** Spawn a detached `disco record --detached` for the app; resolves with its pid once it has attached (or null). */
+async function startRecorder(app: string, dialogs: string): Promise<number | null> {
+  const dir = appStoreDir(app);
+  const before = readBrowserInfo(dir); if (!before) return null;
+  if (pidAlive(before.recorderPid)) return before.recorderPid!;
+  const fd = openSync(join(dir, "recorder.log"), "a");
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "record", "--app", app, "--dialogs", dialogs, "--detached"], { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, DISCO_APPS_DIR: appsRoot() } });
+  child.unref();
+  const t0 = Date.now();
+  while (Date.now() - t0 < 8000) {
+    const now = readBrowserInfo(dir);
+    if (now?.recorderPid === child.pid) return child.pid!;
+    if (child.exitCode !== null) return null;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return null;
+}
+
 try { await main(); } catch (e) {
   const msg = String((e as Error)?.message ?? e).split("\n")[0];
   console.error("error: " + msg + (/no such column|no such table/.test(msg) ? "  (./disco schema lists the tables and columns; requests uses t_start/t_end, other tables t)" : ""));
@@ -104,14 +125,17 @@ async function main() { switch (cmd) {
     if (!args.attach && !url) fail("usage: disco open <app> <url> | disco open <app> --attach <port>");
     const s = await open(app, { url, attach: args.attach as any, headed: args.headed === true, dialogs: (args.dialogs as any) ?? "accept", fresh: args.fresh === true });
     writeFileSync(currentFile, app);
-    console.log(`${app}: ${s.info.mode} ${s.info.endpoint} run ${s.log.run}  page ${s.page.url()}${s.context.pages().length > 1 ? `  (+${s.context.pages().length - 1} other pages open — ./disco pages)` : ""}\nstore: ${s.log.dir}`);
+    const line = `${app}: ${s.info.mode} ${s.info.endpoint} run ${s.log.run}  page ${s.page.url()}${s.context.pages().length > 1 ? `  (+${s.context.pages().length - 1} other pages open — ./disco pages)` : ""}\nstore: ${s.log.dir}`;
     await s.close();
+    const rec = await startRecorder(app, (args.dialogs as any) ?? "accept");
+    console.log(line + (rec ? `\nrecording: pid ${rec} (everything until \`disco close\`)` : "\nrecording: only while commands run (recorder did not start; see store/recorder.log)"));
     break;
   }
   case "close": {
     const app = args._[1] ?? currentApp();
     const dir = appStoreDir(app); const info = readBrowserInfo(dir);
     if (!info) { console.log(`${app}: no browser`); break; }
+    if (pidAlive(info.recorderPid)) { try { process.kill(info.recorderPid!, "SIGTERM"); } catch {} await new Promise((r) => setTimeout(r, 400)); }
     killLaunched(info); writeBrowserInfo(dir, null);
     try { const st = openStore(dir, { readonly: false }); st.db.prepare("UPDATE runs SET ended_wall=? WHERE ended_wall IS NULL").run(new Date().toISOString()); st.close(); } catch {}
     if (existsSync(currentFile) && readFileSync(currentFile, "utf8").trim() === app) rmSync(currentFile);
@@ -124,7 +148,7 @@ async function main() { switch (cmd) {
     for (const d of existsSync(root) ? readdirSync(root) : []) {
       const dir = join(root, d, "store"); if (!existsSync(join(dir, "store.sqlite"))) continue;
       const info = readBrowserInfo(dir);
-      console.log(`${d}\t${info ? `${info.mode} ${info.endpoint} ${(await isAlive(info.endpoint)) ? "alive" : "dead"}` : "no browser"}`);
+      console.log(`${d}\t${info ? `${info.mode} ${info.endpoint} ${(await isAlive(info.endpoint)) ? "alive" : "dead"}${pidAlive(info.recorderPid) ? " recording" : ""}` : "no browser"}`);
     }
     break;
   }
@@ -205,10 +229,16 @@ async function main() { switch (cmd) {
     break;
   }
   case "record": {
-    await withSession(async (s) => {
-      console.log(`recording ${s.app} (run ${s.log.run}) — Ctrl-C to stop`);
-      await new Promise<void>((resolve) => { process.on("SIGINT", () => resolve()); process.on("SIGTERM", () => resolve()); });
-    });
+    const app = currentApp();
+    const info = readBrowserInfo(appStoreDir(app));
+    if (!info) fail(`no browser for app ${app}`);
+    if (pidAlive(info.recorderPid) && info.recorderPid !== process.pid) fail(`a recorder is already running for ${app} (pid ${info.recorderPid})`);
+    const s = await open(app, { recorder: true, dialogs: (args.dialogs as any) ?? "accept" });
+    writeBrowserInfo(s.log.dir, { ...(readBrowserInfo(s.log.dir) ?? info), recorderPid: process.pid });
+    if (args.detached !== true) console.log(`recording ${s.app} (run ${s.log.run}) — Ctrl-C to stop`);
+    await new Promise<void>((resolve) => { process.on("SIGINT", () => resolve()); process.on("SIGTERM", () => resolve()); s.browser.on("disconnected", () => resolve()); });
+    await s.close();
+    const cur = readBrowserInfo(s.log.dir); if (cur?.recorderPid === process.pid) writeBrowserInfo(s.log.dir, { ...cur, recorderPid: undefined });
     break;
   }
   case "pages": {

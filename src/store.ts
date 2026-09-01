@@ -9,6 +9,7 @@ import { join } from "node:path";
 export const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 3000;
 
 CREATE TABLE IF NOT EXISTS runs (
   run INTEGER PRIMARY KEY,           -- one \`open\` = one run; every other table carries it
@@ -265,6 +266,10 @@ export function openStore(dir: string, opts: { readonly?: boolean } = {}) {
     latestJson<T = any>(urlPart: string, action?: string): T | null {
       const r = api.requests({ url: urlPart, action }).filter((x) => x.body_hash).at(-1);
       return r ? api.json<T>(r.body_hash!) : null;
+    },
+    /** Every JSON body whose URL contains `urlPart` (optionally within an action), oldest first — when one screen calls one endpoint twice, pick by shape, not by recency. */
+    jsonAll<T = any>(urlPart: string, action?: string): T[] {
+      return api.requests({ url: urlPart, action }).filter((x) => x.body_hash).map((x) => { try { return api.json<T>(x.body_hash!); } catch { return null as any; } }).filter((x) => x !== null);
     },
     /** The stored action row with its report parsed. */
     action(id: string): any | null { const r = one<any>("SELECT * FROM actions WHERE id=?", id); if (r?.report) r.report = JSON.parse(r.report); return r; },

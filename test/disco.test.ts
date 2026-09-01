@@ -306,6 +306,29 @@ describe("openmrs friction", () => {
   });
 });
 
+describe("openmrs run-2 friction", () => {
+  it("an any-of arm that resolves before dispatch is alreadyTrue even when it is a fn arm", async () => {
+    const r = await s.click("#noop", { until: { any: [{ url: "/never" }, { fn: "document.querySelector('#load-chart') !== null", label: "fn" }] } });
+    assert.equal(r.until?.ok, true);
+    assert.equal(r.until?.alreadyTrue, true);
+  });
+  it("a panel translated exactly to the viewport edge is offscreen, not occluded", async () => {
+    await s.evaluate("document.body.insertAdjacentHTML('beforeend', '<div id=\"panel\" style=\"position:fixed;top:0;left:100vw;width:200px;height:100px;background:#eee\"><button id=\"panel-btn\">Logout</button></div>')");
+    const r = await s.click("#panel-btn");
+    assert.equal(r.diagnosis?.reason, "offscreen", r.diagnosis?.message);
+    await s.evaluate("document.getElementById('panel').remove()");
+  });
+  it("aria on a missing selector throws; a request predicate that expires lists what did arrive", async () => {
+    await assert.rejects(() => s.aria("#nope"), /no element matches #nope/);
+    const r = await s.click("#load-chart", { until: { request: "/api/nothing-like-this" }, timeout: 700 });
+    assert.match(r.until!.diagnosis!.message, /what did arrive: .*\/api\/(chart|slow)/);
+  });
+  it("jsonAll returns every body for an endpoint family", async () => {
+    const all = s.store.jsonAll("/api/chart/");
+    assert.ok(all.length >= 2, String(all.length));
+  });
+});
+
 describe("the log without a browser", () => {
   it("openApp reads what was recorded", async () => {
     const st = openApp("t", appsDir);

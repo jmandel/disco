@@ -12,7 +12,10 @@ export interface BrowserInfo {
   port?: number;
   pid?: number;              // only when launched by us
   startedWall: string;
+  recorderPid?: number;      // a detached `disco record` process capturing everything until `close`
 }
+
+export function pidAlive(pid: number | undefined): boolean { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } }
 
 export function chromiumPath(): string {
   const env = process.env.DISCO_CHROMIUM; if (env) return env;

@@ -23,6 +23,13 @@ describe("cli", () => {
     const o = disco("open", "c", g.origin);
     assert.equal(o.code, 0, o.out);
     assert.match(o.out, /launch http:\/\/127\.0\.0\.1:\d+ run 1/);
+    assert.match(o.out, /recording: pid \d+/);
+    // the recorder captures what the page does BETWEEN commands
+    const e = disco("eval", "setTimeout(() => fetch('/api/chart/b'), 700); 'armed'");
+    assert.equal(e.code, 0, e.out);
+    await new Promise((r) => setTimeout(r, 1800));
+    const between = disco("sql", "SELECT count(*) n FROM requests WHERE path='/api/chart/b' AND action_id IS NULL");
+    assert.match(between.out, /\n1/, between.out);
     const c = disco("click", "#noop", "--json");
     assert.equal(c.code, 0, c.out);
     const rep = JSON.parse(c.stdout);
@@ -34,6 +41,9 @@ describe("cli", () => {
     assert.equal(t.code, 0, t.out);
     assert.match(t.out, /until: ✓ request \/api\/slow landed/);
     assert.match(t.out, /GET \/api\/chart\/a 200/);
+    const stamped = disco("sql", "SELECT count(*) n FROM requests WHERE action_id='act:4' AND path LIKE '/api/chart/%'");
+    assert.match(stamped.out, /\n2/, stamped.out);
+    assert.match(disco("ls").out, /c\t.*alive recording/);
     const a = disco("aria", "#s-13");
     assert.match(a.out, /button "Do nothing"/);
     const q = disco("sql", "SELECT count(*) n FROM actions");
@@ -43,6 +53,7 @@ describe("cli", () => {
     assert.ok(existsSync(join(appsDir, "c", "NOTES.md")));
     const x = disco("close", "c");
     assert.match(x.out, /killed/);
+    assert.doesNotMatch(disco("ls").out, /recording/);
   });
   it("run-check runs a pack's check.ts", async () => {
     mkdirSync(join(appsDir, "chk"), { recursive: true });

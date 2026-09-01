@@ -1,183 +1,204 @@
-# friction.md — driving dev3.openmrs.org with disco, 2026-09-01
+# friction — driving dev3.openmrs.org with disco
 
-Format: **what I tried · what happened · what I expected · what I did instead · cost.**
-Ordered roughly by how much they hurt. Wall clock for the whole job (recon -> app folder -> green check) was **16 min**; roughly **6 min**
-of that was friction cost, and item 1 shaped how every later probe had to be written.
+Everything below happened while characterising OpenMRS O3 in one session (2 runs, ~140 acts,
+~35 minutes of tool time). Ordered roughly by cost. I never had to open `src/`.
 
 ---
 
-### 1. There is no way to see the page. Only the *diff*. — ~5 min + shaped the whole session
+### 1. The CLI silently loses most of a SPA's traffic, and `apps/README.md` recommends the CLI first
 
-**Tried:** `./disco until --until-text "Login" --timeout 20000` — the obvious first move on an
-unknown login screen.
-**Got:**
+**Tried:** followed `apps/README.md`'s first-hour recipe — `./disco open`, `./disco click`,
+`./disco sql "SELECT method, path, resource_type FROM requests …"`.
+After 8 CLI acts including opening a patient chart, the endpoint map was:
+
 ```
-act:2 until  ok  20072ms (act 0 · until 20010 · report 6)  https://dev3.openmrs.org/openmrs/spa/login
-  until: ✗  20001ms — locator.waitFor: Timeout 20000ms exceeded.
-    timeout — until text "Login" did not happen
+GET /openmrs/ws/rest/v1/visit    11
+GET /openmrs/ws/rest/v1/obs       8
+GET /openmrs/ws/rest/v1/session   3
+…20 rows total
 ```
-The screen says *Username* and *Continue*; it never says "Login".
-**Expected:** to be able to ask "what is on this page?" before guessing. The README's recon recipe
-(`apps/README.md` step 2) is *"Read the shell off the wire: `SELECT body_hash … resource_type='document'`
-→ `./disco body <hash>`. Section ids and control names come for free."* For this app the document is
-**3.3 KB of empty single-spa shell** — no sections, no controls, no names. That advice is written for
-server-rendered apps and silently fails on every SPA, which is most of what an agent will be pointed at.
-**Did instead:** `./disco screenshot` + `./disco eval "document.body.innerText.slice(0,600)"` — 0.3 s,
-and the answer. Then for the rest of the session I used a scratch script calling
-`s.page.locator("body").ariaSnapshot()` and wrote it to a file, because:
-- `report.ui` is only the **diff**, and it truncates (`… 272 more (267 added, 40 removed; report.ui has them all)`);
-- from the CLI there is no way to get "them all" — the hint `report.ui has them all` is only actionable
-  from a script;
-- `ariaSnapshot()` is never mentioned in the README, even though the report is built out of it.
 
-**Ask:** `./disco aria [selector]` (full accessibility tree of the current page) and a sentence in
-"Working an unfamiliar app" saying that for an SPA the document body is empty and the aria tree is the
-substitute. This single missing command is the difference between a 0.3 s and a 20 s first question.
+**Expected:** the chart's traffic. **Happened:** the chart loaded *between* two CLI invocations, so
+none of its ~25 requests were recorded. The same single screen, re-driven from a script, logged 30
+xhr rows in one window. The root README does say "The CLI records only while a command runs" and
+mentions `./disco record`, but it is a parenthetical under *What is recorded when*, while
+`apps/README.md` step 1–3 is an explicitly CLI-first recipe. On an app whose every screen keeps
+fetching for 2–3 s after the click returns, that recipe produces a map with holes and no warning
+that it is incomplete.
+**Did instead:** threw away the CLI recon and redid everything as scripts (one `Session` open for the
+whole pass). **Cost:** ~5 minutes and a wrong first impression of the app's API surface.
+**Fix I'd want:** `apps/README.md` step 1 should be "open a script session (or `./disco record` in a
+second terminal) — the CLI is for one-off probes", or the CLI should warn when a page is still
+loading at disconnect.
 
----
+### 2. `until: { any: [...] }` does not flag `alreadyTrue`, and it made me believe a successful login had failed
 
-### 2. The `not-found` diagnosis suggests a selector that cannot work — ~2 min
-
-**Tried:** `s.click("button:has-text('Search patient')")`.
-**Got:**
+**Tried:**
+```ts
+await s.click("role=button[name='Log in']", { until: { any: [
+  { url: "/spa/home", label: "home" },
+  { text: "Invalid username or password", label: "bad-credentials" } ] }, timeout: 25000 });
 ```
-act:9 click button:has-text('Search patient')  FAILED  1199ms
-  diagnosis: not-found — no element matches button:has-text('Search patient')
-    visible controls: …, button "Change location", button "Search patient", button "Implementer Tools", …
+**Happened:** `until.ok true, which "bad-credentials", elapsedMs 16, alreadyTrue undefined` — and the
+login had in fact *succeeded*. The failure toast from a previous probe was still on screen; the arm
+was true before the click.
+**Expected:** the README says flatly "A predicate that is already true when you act is flagged
+`alreadyTrue`" and `reached()` "throws when the `until` was `alreadyTrue`". Neither happened for an
+`any` arm. Whether `any` is meant to be excluded is not stated anywhere.
+**Did instead:** made `login()` navigate to a fresh login document every time, so no stale toast can
+exist. **Cost:** ~4 minutes, and I nearly wrote "login is broken" into the notes.
+
+### 3. `occluded` did not name what covered the element — and the same element passed `visible`
+
+**Tried:** `s.click("role=button[name='Logout']", { until: { selector: loginBox } })` after
+`until: { selector: "role=button[name='Logout']", visible: true }` had reported `alreadyTrue`.
+**Happened (check output, verbatim):**
 ```
-**Expected:** if the diagnosis prints `button "Search patient"` as a *visible control*, a selector
-built from that string to match. It cannot: the candidate list prints **accessible names**, and O3's
-header buttons are icons with `aria-label` and **no text node**, while `:has-text()` matches text
-content. The diagnosis and the fix speak different languages.
-**Did instead:** `role=button[name='Search patient']` — worked first try.
-**Ask:** print candidates in a form you can paste — `role=button[name="Search patient"]` — or add one
-line to the `not-found` row of the diagnosis table: *"candidates are accessible names; use
-`role=…[name=…]`, not `:has-text()`, unless you can see the text on screen."*
+FAIL log out …: logout: occluded — locator.click: Timeout 3000ms exceeded. | Call log:
+  - waiting for locator('role=button[name=\'Logout\']').first()
+    - locator resolved to <button … class="-esm-login__logout__logout___fmll0 cds--btn cds--btn--ghost">Logout</button>
+    - attempting click action
+      - waiting for element to be visible, enabled and stable
+      - element is visible, enabled and stable
+      - scrolling into view if needed
+ [shot 6313f2adec11]
+```
+**Expected:** the promise table says `occluded` gives "`diagnosis: disabled / hidden / occluded`
+naming what covers it" and the diagnosis table says "another element is under the pointer (`over`)".
+The `reason` was right but the message was Playwright's timeout text with no `over` element — the one
+field that would have answered the question. `dialogs` was empty (correctly: it is not a dialog).
+The element is a Carbon slide-out panel parked at `x: 1280` in a 1280-wide viewport — off-screen to
+the right, yet `visible: true`.
+**Did instead:** wrote a throwaway `s.evaluate` probe dumping `getBoundingClientRect()` and class
+names before/after clicking `My Account`, and found `.cds--header-panel--expanded` by hand.
+**Cost:** ~5 minutes. **Fix I'd want:** put `over` in the message, and/or say in the diagnosis table
+that an element translated outside the viewport still passes `visible` — `offscreen` would have been
+the honest reason here.
+
+### 4. Guessing a `request` predicate costs the whole budget, and the diagnosis will not tell you what did arrive
+
+**Tried:** `./disco type "role=searchbox[…]" "Barbara" --until-request /openmrs/ws/rest/v1/search/patient --landed --timeout 10000`
+**Happened:** 10.1 s, then
+```
+until: ✗ 10003ms — page.waitForResponse: Timeout 10000ms exceeded …
+  timeout — until request /openmrs/ws/rest/v1/search/patient landed did not happen … — no request
+  matching /openmrs/ws/rest/v1/search/patient was issued during the wait
+```
+The report's own `wire (3)` block two lines below showed `GET /openmrs/ws/rest/v1/patient?q=Barbara…`.
+**Expected:** the README promises "the diagnosis says whether a matching request was issued at all,
+and with what status". It does — but it stops there. The diagnosis knows the window's requests (they
+are printed right under it); listing them *inside* the diagnosis, the way `not-found` lists
+`candidates`, would have turned a 10 s dead end into a 10 s answer.
+**Did instead:** read the `wire` block. **Cost:** 10 s wasted and a habit change (always run one bare
+act per screen before writing any `request` predicate). Two later guesses cost 9 s each
+(`fhir2/R4/Observation` on a cached tab, `Procedure` when the endpoint is REST `/v1/procedure`).
+
+### 5. There is no way to wait for "the request, or nothing at all" — a cache hit always costs the full budget
+
+**Tried:** `chartTab()` waits `until: { request: <tab endpoint>, landed: true }` after the route
+changes. Four of the chart's tabs were already fetched by the patient-summary screen, so react-query
+serves them with **zero** requests and the predicate can only expire.
+**Expected:** the README anticipates exactly this ("A second visit may issue no request") and says to
+"wait on the DOM and read the body from the log" — but the DOM anchor for these tabs *is* the data,
+which may be legitimately empty, so there is nothing false-then-true to wait on. And there is no
+predicate meaning "no matching request within N ms".
+**Did instead:** kept the budget at 2.5 s and reported `fromCache: true` when it expires — i.e. I pay
+2.5 s per cached tab, every run, to learn a fact disco already knows.
+**Cost:** ~10 s per `check.ts` pass, forever. **Fix I'd want:** `until: { quiet: <pattern>, forMs: N }`,
+or let `any` arms include a "budget elapsed" arm so the expiry is a result rather than a failure.
+
+### 6. `store.latestJson` is the wrong tool when one screen calls one endpoint twice
+
+**Tried:** `s.store.latestJson("queue-entry?", r.action)` on the Service queues screen, which showed
+three patients in "Attending".
+**Happened:** `{results: []}` — `totalCount 0`. The screen fires `queue-entry` **twice** in the same
+act, and the *newer* response is the empty "waiting" filter (29 B); the rows on screen came from the
+earlier 29 KB body.
+**Expected:** the README's guidance is "scope wire reads to the act that produced them
+(`action: report.action`)". That is exactly what I did, and it does not help — both calls are in one
+act. Nothing in the docs warns that "latest" can be the wrong one *within* an act.
+**Did instead:** selected by `body_size DESC` in SQL. **Cost:** ~3 minutes, and I briefly wrote down
+"the queue is empty" for a screen that visibly was not.
+
+### 7. `Report.requests[]` item shape is undocumented
+
+**Tried:** `(r.requests||[]).forEach(q => console.log(q.method, q.url, q.status))`
+**Happened:** `GET undefined 200 undefined` — `method` and `status` exist, `url` does not.
+**Expected:** the README documents the *printed* wire line and the `requests` **table** columns
+(`id, t_start, method, url, path, status, …`), so I assumed the report array carried the same field
+names. The report table entry just says "`requests` | the app's own traffic started in the window".
+**Did instead:** stopped using `report.requests` entirely and read the log with SQL scoped to
+`window.t0/t1`. **Cost:** ~2 minutes. **Fix I'd want:** one line naming the fields, or make them the
+`RequestRow` fields.
+
+### 8. `s.aria(selector)` returns an empty string for a selector that matches nothing — no error, no hint
+
+**Tried:** `await s.aria("body > div, main")` (a comma list, because I did not know which container
+held the appointments app).
+**Happened:** empty output. Twice, on two different screens, before I realised the call — not the
+screen — was the problem.
+**Expected:** either the union of matches, or a "no match" signal. The README says
+"`s.aria(selector?)` — the page (or one element)" and nothing about multi-match or no-match.
+**Did instead:** `./disco aria` with no selector and grepped. **Cost:** ~2 minutes and one wasted
+script run.
+
+### 9. Mixing selector engines without `>>` fails at click time with a raw Playwright parse error
+
+**Tried:** `s.click("#omrs-workspaces-container role=button[name='Close']")`
+**Happened:** `close workspace: error — locator.count: Unexpected token "=" while parsing css
+selector "#omrs-workspaces-container role=button[name='Close']". Did you mean to CSS.escape it?`
+**Expected:** the README's `target` line does say selectors are "chained with `>>`", but every
+example in the document is single-engine, and the `frame:` option's `"#outer >> #inner"` reads like
+the `>>` is a *frame* thing. The failure surfaces as `reason: error` with Playwright's message
+rather than as a disco-level "did you mean `>>`?".
+**Did instead:** `"#omrs-workspaces-container >> role=button[name='Close']"`. **Cost:** ~2 minutes
+(one failing `run-check` pass). **Fix I'd want:** one scoped example in the `target` line, e.g.
+`"#panel >> role=button[name='Close']"`.
+
+### 10. `./disco body <hash>` prints the body for text, the *path* for a screenshot — and the README says both
+
+**Tried:** `P=$(./disco body 24cd60f44e47b6fd); head -c 2500 "$P"`
+**Happened:** `head: cannot open '{"authenticated":true,…}' for reading: File name too long`
+**Expected:** the *Diagnoses* section says "`shot` (JPEG blob hash; `./disco body <hash>` prints its
+path)" while the quickstart says "`./disco body 7a3f2c1e` — a captured body by hash prefix". Both are
+true, for different content types, and neither says so.
+**Did instead:** piped the command's stdout directly. **Cost:** ~1 minute. **Fix I'd want:** say the
+rule (text → stdout, binary → path), or add `--path`.
+
+### 11. `resource_type` values are never listed
+
+**Tried:** the README's own recon one-liner uses `resource_type IN ('xhr','fetch')` and the report
+mentions "documents, xhr/fetch, streams, sockets" and `static` "scripts, stylesheets, images, fonts".
+I needed `document` to see navigations and guessed it.
+**Expected:** `./disco schema` gives the DDL, not the domain of a text column. **Cost:** ~1 minute of
+guessing. **Fix I'd want:** list the values next to the `requests` table description.
 
 ---
 
-### 3. Wire reports are unreadable on a chunk-loading SPA — ~3 min, every single act
+## Waits that expired, and why
 
-**Tried:** reading the report of a chart navigation.
-**Got:** `wire (2)` … `… 215 more (sql: SELECT * FROM requests WHERE action_id='act:15')`, where the
-25 printed lines were 22 hashed `.js`/`.css` chunks and 3 pending API calls. One `navigate` on this app
-is **220 requests**, ~95 % of them static assets.
-**Expected:** some way to say "just the XHR/fetch". `requests` has `resource_type`, the README's own
-endpoint-map one-liner filters on it — but nothing on the report or the CLI does.
-**Did instead:** wrote my own filter in every probe script:
-`formatReport(r).split("\n").filter(l => !/\.js |\.css |\.woff/.test(l))`, and dropped to
-`s.store.requests({ action }).filter(q => /\/ws\//.test(q.path))` for anything real.
-**Ask:** a `--wire xhr` / `wire: "xhr"` report option, or simply rank `xhr|fetch` rows above
-`script|stylesheet|font|image` rows before truncating at 25.
+| Wait | Budget | Why it expired |
+|---|---|---|
+| `--until-request /ws/rest/v1/search/patient --landed` | 10 s | guessed endpoint name; the real one is `patient?q=` (item 4) |
+| `{request:"fhir2/R4/Observation"}` on the vitals tab | 9 s | already fetched by patient-summary — react-query cache (item 5) |
+| `{request:"Procedure"}` on the procedures tab | 9 s | that tab is REST `/v1/procedure`, not FHIR; case-sensitive substring |
+| `{request: spec.req}` on 4 cached chart tabs | 2.5 s each, every run | item 5 — unavoidable with the current predicate set |
+| `role=button[name='Logout']` click | 3 s (action) | off-screen panel; `visible` said yes (item 3) |
 
----
+Nothing else ran long. dev3 answered every read in 50–900 ms; the only slow thing is a full SPA
+document load (~3 s), and `timeouts.until` never needed to go above 30 s.
 
-### 4. `latestJson` returns `undefined` for "cached, no request" and for "no such request" alike — ~3 min
+## Moments I did not know what to do next
 
-**Tried:** `openChartTab(s, uuid, "conditions")` returning `s.store.latestJson("/fhir2/R4/Condition?patient=", act)`;
-`check.ts` asserted `body.resourceType === "Bundle"`.
-**Got:** `FAIL chart tab: Conditions round-trips through FHIR (245ms): conditions body is not a FHIR Bundle`.
-The real cause: the app's SWR cache had the Condition bundle from the patient-summary widget, so the
-tab issued **no request at all**. `latestJson` returned `undefined` with no way to tell that from
-"the request happened but the page never read the body" (`body_state: missing`), which the README
-discusses at length as a *different* failure.
-**Expected:** `latestJson` to be documented on the miss path, or to throw/return a discriminated result.
-**Did instead:** documented `body: null` as "the tab was cache-served" and made the check assert
-`body === null || body.resourceType === "Bundle"` plus an independent `fetch`-in-page re-read.
-**Ask:** one line in the log section — *"`latestJson` returns `undefined` when nothing matched; use
-`store.requests(...)` to tell 'no request' from 'no body'."*
-
----
-
-### 5. The lazy SPA does its real work between your commands — ~4 min of wrong conclusions
-
-**Tried:** `p7.ts` clicked into a chart with `until: { url: "/chart" }`, closed the session, then a
-separate `p8.ts` waited for the content and I ran `SELECT … FROM requests` over the run.
-**Got:** no `Condition`, `Observation` or `AllergyIntolerance` rows anywhere — I briefly concluded the
-chart rendered from cache. It hadn't: the chart's ~40 API calls fired in the ~2 s gap **between** the
-two sessions, when nothing was recording.
-**Expected:** the README does say *"The CLI records only while a command runs — between commands,
-nothing is written"* — so this is documented. What is not said is the consequence that bites on every
-lazy-loading SPA: **your `until` holds before the interesting traffic starts**, so a
-`navigate → close → reopen → inspect` loop systematically loses the payload you came for.
-**Did instead:** one script per question, holding the session open across `navigate` **and** the
-content anchor, then reading `s.store.requests({ action })`.
-**Ask:** put that consequence next to the sentence — *"an `until` that holds on a route change is
-before the data; keep one session open across both, or run `./disco record`."*
-
----
-
-### 6. A guessed anchor costs the full budget, twice — 50 s
-
-**Tried:** probing four unknown home apps with a generic anchor
-`until: { selector: "main h1, main h2, main h3, main h4" }, timeout: 25000`.
-**Got:** `appointments` ✓, `ward` ✓, `patient-lists` ✗ 25 s, `laboratory` ✗ 25 s — both are tab-first
-screens with no heading in `<main>`.
-**Expected:** my own fault; the README explicitly says *"While exploring, pass a short timeout
-(1000–1500) to probes whose outcome you are unsure of."* I had raised the session default to 25 s for
-this slow server and the probe inherited it. The trap is that **`open(app, { timeouts: { until } })`
-silently becomes the exploration budget**, so the "short probe" advice quietly stops applying the
-moment you accommodate a slow server.
-**Did instead:** bare `navigate` first, dump `[...document.querySelectorAll('main [role=tab],main button')]`,
-then anchor. Recorded `role=tab[name='Starred lists']` / `role=tab[name='Tests ordered']`.
-**Ask:** README "Timeouts": *"raising `timeouts.until` for a slow server also raises the cost of every
-wrong guess — pass an explicit short `timeout` on probes."*
-
----
-
-### 7. `ORDER BY seq` on `requests` — ~1 min
-
-**Tried:** `./disco sql "SELECT … FROM requests … ORDER BY seq"`.
-**Got:** `error: no such column: seq  (./disco schema lists the tables and columns; requests uses t_start/t_end, other tables t)` — an excellent error message.
-**Expected:** the README says both *"`requests` is keyed by `id`; every other table by `seq`"* (correct)
-and, two paragraphs later, *"order by `seq` (or `run, t_start`)"* in a passage about ordering wire rows
-(wrong for the only table that passage is about).
-**Did instead:** `ORDER BY run, t_start`.
-**Ask:** drop `seq` from the "Newest is per run" sentence, it is about `requests`.
-
----
-
-### 8. `./disco close` orphans the CLI from a store that is still perfectly readable — ~1 min
-
-**Tried:** `./disco close openmrs`, then `./disco sql "SELECT … FROM actions"` to gather act ids for
-this write-up.
-**Got:** `error: no app: pass --app <name> or run 'disco open' first`.
-**Expected:** the log is a file; reading it should not need a browser. The message's first branch
-(`--app <name>`) is right, but it is offered as an alternative to `disco open`, which implies you need
-a browser again.
-**Did instead:** `./disco --app openmrs sql "…"` — works fine.
-**Ask:** say that `close` clears `apps/.current`, and that `--app` is all a read needs.
-
----
-
-### 9. Column aliases silently shadow real columns in `disco sql` — ~1 min
-
-**Tried:** `SELECT run, id, kind, substr(target,1,60) t FROM actions ORDER BY t`.
-**Got:** rows ordered by the *alias* (the target text), not by time, with no warning — output looked
-plausibly wrong (all navigates, then all fills).
-**Expected:** SQLite behaviour, not disco's fault. Worth one line in the log section anyway, because
-`t` is disco's universal time column and a two-character alias is the natural thing to type.
-
----
-
-### 10. `alreadyTrue` fired twice on selectors that *look* conditional — 0 cost, credit where due
-
-`until: { selector: "[role=alert]" }` on the login page (an empty live region is always there) and
-`until: { selector: "role=button[name='Logout']" }` on the account menu (the menu is always in the DOM
-and always `visible` — the header only slides it into view). Both were caught instantly and by name.
-Without that flag I would have written a `logout()` that "worked" and proved nothing. **This is the
-feature that most earned its place.**
-
----
-
-## Things the README got exactly right on this app
-
-- `{ request, landed: true }` on the debounced search box — the postcondition that made
-  `searchPatients` deterministic on the first attempt.
-- `s.evaluate("fetch(…)")` running with the page cookie *and* landing in the log — on an API-first app
-  like this it is half the tool.
-- `reached()` messages carrying the diagnosis: every `check.ts` failure in this session explained
-  itself without a second run.
-- "Never anchor on the URL" is not stated, but *is* implied by "prefer a specific element"; this app
-  punishes URL anchors hard (`{ url: "/chart" }` holds ~2.5 s before the chart exists) and it would be
-  worth an explicit line in **Gotchas** about client-side routing.
+* **After the first chart click**, `./disco aria` showed a screen full of widgets and the log showed
+  almost nothing (item 1). I could not tell whether the app was quiet or disco was not looking.
+  Nothing in the report says "I stopped recording"; the report's `window` closed and that was that.
+* **When the workspaces stopped reacting.** After four side-rail clicks the aria diff went empty for
+  every subsequent click. The panels had *stacked* — four workspace containers in the DOM, one
+  visible — and the report has no vocabulary for "you already opened this". I found it with an
+  `evaluate` dumping class names. The root README's *State leaks between scripts — by design* covers
+  page/dialog state; a panel stack inside one page is the same hazard and reads the same way
+  (clicks that "do nothing").
+* **Choosing between "click the tab" and "navigate to the tab URL."** Both work; one is 200 ms and
+  cache-poisoned, the other is 3 s and always truthful. The README's cache paragraph names the
+  hazard but gives no rule of thumb, so I had to measure both and decide per workflow.

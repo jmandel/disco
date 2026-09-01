@@ -212,7 +212,7 @@ act:6 click #record-2  ok  299ms (act 78 · until 200 · report 10)  http://loca
 | `until` | `{ ok, elapsedMs, which?, error?, diagnosis?, alreadyTrue? }` |
 | `url` | the page URL after the window |
 | `ui` | `{ added, removed }` lines of the aria snapshot (the page's accessibility tree) that changed. The main frame only — iframes appear as nodes, their contents do not |
-| `requests` | the app's own traffic started in the window — documents, xhr/fetch, streams, sockets — plus any request that started *earlier* and answered inside it (`(started earlier)`: the long-poll that just delivered). `← until` marks the response a `request` predicate matched (`until.request` is its id). `[pending]` = still in flight at report time; `[body pending]` = headers in, body not yet |
+| `requests` | `{ id, method, path, status, ms, mime, body, size, state, type, earlier?, until? }` — the app's own traffic started in the window — documents, xhr/fetch, streams, sockets — plus any request that started *earlier* and answered inside it (`(started earlier)`: the long-poll that just delivered). `← until` marks the response a `request` predicate matched (`until.request` is its id). `[pending]` = still in flight at report time; `[body pending]` = headers in, body not yet |
 | `static` | scripts, stylesheets, images, fonts started in the window, folded out of `requests` as a count by type (a chunk-loading SPA issues hundreds per route). `wire: "all"` (CLI `--wire all`) lists them |
 | `console` | errors, exceptions and warnings inside the window |
 | `dialogs` | native dialogs inside the window and how they were handled |
@@ -232,7 +232,7 @@ that fires during your window is in your report; you will recognise it because i
 | `hidden` | matched, not visible | it is rendered but collapsed/off-screen/`display:none`; open the thing that reveals it |
 | `disabled` | matched, disabled | the form is not ready; wait for what enables it (`until: { fn }` on `!el.disabled` is fine) |
 | `occluded` | another element is under the pointer (`over`) | usually a dialog — `dialogs` lists open ones; dismiss it, then retry |
-| `offscreen` | the element is outside the viewport and cannot be scrolled to (`position: fixed` menus opened near the bottom) | scroll the page so it is visible, or `{ js: true }` when its handler is delegated |
+| `offscreen` | the element is outside the viewport and cannot be scrolled to: fixed menus opened near the bottom, slide-out panels parked at `left: 100vw` — such elements still count as *visible* | open whatever slides it in and wait for that; scroll the page; or `{ js: true }` when its handler is delegated |
 | `unclickable` | the element or an ancestor has `pointer-events: none` | it is a keyboard widget: `type` / `press("ArrowDown")` / `press("Enter")`; or `{ js: true }` |
 | `detached` | the element was replaced while Playwright was clicking it | the app re-renders it continuously (on hover, on a timer): `s.click(target, { js: true })` |
 | `timeout` | Playwright's actionability wait or your `until` expired | read `message` and the `shot` |
@@ -301,12 +301,14 @@ import { openApp } from "./src/index.ts";
 const st = openApp("shop");                       // read-only; same object as s.store
 st.requests({ url: "/api/orders", method: "GET", action: "act:9", status: 200, run: 2 });   // RequestRow[] — fields are the requests columns: id, t_start, method, url, path, status, mime, body_hash, body_size, body_state, req_body, resp_headers, action_id…
 st.latestJson("/api/me", "act:9");                 // parsed body of the newest matching response — scope it to the act whose report showed it
+st.jsonAll("/api/queue-entry", "act:9");         // every body for that family in that act — when a screen calls one endpoint twice, pick by shape
 st.json(hash) · st.body(hash) · st.bytes(hash)     // a body by hash or 16-char prefix
 st.action("act:9")                                 // the stored row, report parsed
 st.sql("SELECT … WHERE path=? AND status=?", "/api/me", 200)   // anything, with bind arguments
 ```
 
-Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (headers as JSON, `req_body`,
+`resource_type` is Playwright's: `document | xhr | fetch | eventsource | websocket | script | stylesheet |
+image | font | media | manifest | other`. Tables (`./disco schema` prints the DDL): `runs` · `actions` · `requests` (headers as JSON, `req_body`,
 `body_hash`, `body_state` = `ok | truncated | missing | streaming | error | pending`, `action_id`) ·
 `bodies` (text under 512 KB, FTS5 as `bodies_fts`) · `ws_frames` · `console` · `dialogs` · `nav` ·
 `shots` · `notes`. `requests` is keyed by `id` (`r<run>-<n>`) and ordered by `t_start`; every other table has
@@ -336,9 +338,13 @@ what makes a `check.ts` pass on a cold browser as well as a warm one.
 **Calling the app's API yourself.** `s.evaluate("fetch('/ctl', { method: 'POST', body: … })")` runs with the
 page's cookies *and* lands in the log like any other request; `s.page.request.post(...)` does neither.
 
-**What is recorded when.** A script records for as long as its `Session` is open. The CLI records only
-while a command runs — between commands, nothing is written. `./disco record` keeps recording until
-Ctrl-C; run it in a second terminal when the app's background traffic matters.
+**What is recorded when.** `./disco open` starts a detached recorder (`disco record`, pid in the `open`
+output and in `./disco ls`) that captures everything the browser does until `./disco close` — including
+what a SPA loads after a command has returned. While it runs, CLI commands and scripts that join the
+browser only act; their reports read the shared log, and each act stamps its window's rows with its id
+afterwards. A script that opens a browser itself (no recorder) records for as long as its `Session` is
+open — so `navigate → close → reopen` in three scripts loses what happened in between; keep one session
+open, or `./disco open` first.
 
 ### CLI reference
 
@@ -353,7 +359,8 @@ Ctrl-C; run it in a second terminal when the app's background traffic matters.
 ./disco until [until…]           until…: --until-selector S [--visible] | --until-gone S | --until-text T
                                          --until-url U | --until-request R [--landed] | --until-fn JS   (repeat → any-of)  --timeout MS
 ./disco aria [<selector>]        ./disco eval <js>                   ./disco screenshot [--out f.jpg]    ./disco sql <query> [--json]
-./disco body <hash>              ./disco note <text>                 ./disco record
+./disco body <hash>   (text bodies print; a screenshot prints its file path)
+./disco note <text>              ./disco record   (foreground; open already runs one)
 ```
 
 `--app <name>` on any command (default: the last `open`, kept in `apps/.current`; `close` clears it, so
@@ -442,7 +449,8 @@ response that carried it is in the log; retry a diagnosis without reading it.
 needs nothing — Playwright's css pierces open shadow roots, so `s.click("#shadow-btn")` and
 `until: { selector: "#shadow-count:has-text('1')" }` work as if there were no boundary.
 
-**Selector gotchas.** `:has-text("armed")` is a case-sensitive *substring* match — it matches "unarmed";
+**Selector gotchas.** One engine per segment — `role=button[name='Save'] >> css=svg`, never
+`role=button[name='Save'] svg` (a raw Playwright parse error at click time). `:has-text("armed")` is a case-sensitive *substring* match — it matches "unarmed";
 use `:text-is("armed")` or `text="armed"` for whole strings. A lingering toast from the previous step
 makes `[role=status]:has-text("Saved")` already true — wait for it to be `gone` first. When a report's
 `ui` line reads `text: "status: idle Chart loaded (3 responses)"`, that is two adjacent elements glued
@@ -450,8 +458,10 @@ into one aria line; anchor on the element you mean (`#chart`), not on the line.
 
 **A second visit may issue no request.** Apps cache: opening a tab you opened a minute ago can render from a
 client-side cache with nothing on the wire, so a `{ request }` predicate expires and `latestJson` returns the
-*earlier* body (or `null` if there never was one). When a screen can be served from cache, wait on the DOM
-and read the body from the log by `action` of the visit that fetched it.
+*earlier* body (or `null` if there never was one). Write such waits as `any: [{ request }, { selector }]` —
+the DOM arm resolves on a cache hit, the request arm on a fetch — and read the body from the log by the
+`action` of whichever visit fetched it. Prefer clicking the app's own navigation over `navigate(url)` for
+screens inside a SPA: a click keeps the app's state and caches, a navigate reloads the shell.
 
 **Slow servers and wrong guesses.** Raising `timeouts.until` for a slow server also raises the price of
 every wrong predicate: a guessed anchor on a screen you have not looked at costs the whole budget. Look

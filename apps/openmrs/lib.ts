@@ -1,320 +1,405 @@
-// apps/openmrs/lib.ts — OpenMRS 3.x ("O3") demo instance, driven read-only.
+// apps/openmrs/lib.ts — OpenMRS 3.x ("O3") on https://dev3.openmrs.org as workflows.
 //
 // Rules kept throughout: anchor in -> anchor out, an `until` on every transition,
-// facts read from the wire when they travel on it, `reached()` on every step.
+// facts read from the wire (the app is a thin renderer over REST + FHIR), `reached()`
+// on every step that must succeed.
 //
-// NOTHING HERE WRITES. Every function is a read: navigation, search, and GETs.
-// The write affordances the UI offers (Add patient, Add allergy/condition, the
-// order basket, visit note, appointment status) are deliberately not wrapped.
-import { reached, type Session } from "../../src/index.ts";
+// READ-ONLY PACK. Nothing here submits a form or creates/edits a record. The one
+// unavoidable write is the app's own: opening a chart POSTs the "recently viewed"
+// user property (see README, "Gotchas").
+import { reached, type Session, type Report } from "../../src/index.ts";
 
 export const ORIGIN = "https://dev3.openmrs.org";
-export const SPA = `${ORIGIN}/openmrs/spa`;
-export const HOME = `${SPA}/home`;
-export const LOGIN = `${SPA}/login`;
+export const BASE = `${ORIGIN}/openmrs`;
+export const SPA = `${BASE}/spa`;
+export const LOGIN_URL = `${SPA}/login`;
+export const HOME_URL = `${SPA}/home`;
+export const chartUrl = (uuid: string, tab = "patient-summary") => `${SPA}/patient/${uuid}/chart/${tab}`;
 
-/** Cheap anchors: URL fragment + one specific element that only that screen has. */
+/** Cheap anchors: a URL fragment + one specific element. */
 export const anchors = {
-  login:      { url: "/spa/login",  el: "#username" },
-  loginPw:    { url: "/spa/login",  el: "role=button[name='Log in']" },
-  loginLoc:   { url: "/login/location", el: "role=button[name='Confirm']" },
-  // The app shell (header + left nav) is the same on every /home/* route.
-  shell:      { url: "/spa/home",   el: "nav a[href$='/home/appointments']" },
-  chart:      { url: "/chart",      el: "[aria-label='patient banner']" },
-  searchPanel:{ url: "",            el: "input[placeholder='Search for a patient by name or identifier number']" },
-} as const;
+  login: { url: "/spa/login", el: "role=textbox[name='Username']" },
+  password: { url: "/spa/login", el: "input[type=password]" },
+  shell: { url: "/spa/", el: "nav[aria-label='Left navigation']" },
+  home: { url: "/spa/home", el: "nav[aria-label='Left navigation'] a[href$='/home/appointments']" },
+  chart: { url: "/chart", el: "[aria-label='patient banner']" },
+  search: { url: "/spa/", el: "role=searchbox[name='Search for a patient by name or identifier number']" },
+  workspace: { url: "/spa/", el: "#omrs-workspaces-container [aria-label='Workspace header']" },
+  registration: { url: "/patient-registration", el: "role=button[name='Register patient']" },
+};
 
-/** The header search box. Its DOM id is a React-generated `search-input-:r1d:` — never use it. */
-export const SEARCH_BOX = anchors.searchPanel.el;
+/** The login form renders a permanently-visible empty Carbon `[role=alert]`; the real
+ *  error is this text in a `[role=status]` toast. Never anchor on `[role=alert]`. */
+export const BAD_CREDENTIALS = "Invalid username or password";
 
-/**
- * Aria-diff noise. The patient banner re-renders a vitals strip and the queue
- * dashboard a wait-time counter; neither is ever the fact you want.
- */
-export const uiIgnore = [/Avg\. wait time/, /These vitals are/, /^\s*[-+] - img$/];
+/** Aria noise: the header clock-ish bits and the ever-present empty alert. */
+export const uiIgnore = [/^- alert$/, /Toggle Implementer Tools/];
 
-// ------------------------------------------------------------------ helpers
+// ---------------------------------------------------------------- wire helpers
 
-/** Fetch from inside the page: uses the JSESSIONID cookie AND lands in the log. */
-export async function api(s: Session, path: string): Promise<any> {
-  return await s.evaluate(
-    `fetch(${JSON.stringify(path)}, { headers: { accept: 'application/json' } }).then(r => r.json())`);
+/** Newest 200 response in THIS run whose URL contains every fragment. Parsed JSON, or null.
+ *  Scoping by URL fragment (usually the patient uuid) survives react-query cache hits,
+ *  where a second visit to a tab issues no request at all. */
+export function wireJson(s: Session, ...contains: string[]): any {
+  const where = contains.map(() => "url LIKE ?").join(" AND ");
+  const rows = s.store.sql(
+    `SELECT body_hash FROM requests WHERE run=? AND status=200 AND body_hash IS NOT NULL AND ${where}` +
+    ` ORDER BY t_start DESC LIMIT 1`, s.run, ...contains.map((c) => `%${c}%`)) as any[];
+  return rows[0] ? s.store.json(rows[0].body_hash) : null;
 }
 
-/** The REST session: who am I, am I authenticated, which location am I at. */
-export async function readSession(s: Session) {
-  const j = await api(s, "/openmrs/ws/rest/v1/session");
+/** Every xhr/fetch row that started inside a report's window — the endpoint map, act by act. */
+export function wireOf(s: Session, r: Report) {
+  return s.store.sql(
+    "SELECT method, url, status, body_hash, body_size FROM requests WHERE run=? AND resource_type IN ('xhr','fetch')" +
+    " AND t_start >= ? AND t_start <= ? ORDER BY t_start", s.run, r.window.t0, r.window.t1) as any[];
+}
+
+/** The REST session resource, fetched from inside the page (page cookies, and it lands in the log). */
+export async function session(s: Session): Promise<any> {
+  return await s.evaluate(
+    `fetch('${BASE}/ws/rest/v1/session',{headers:{'Disable-WWW-Authenticate':'true'}}).then(r=>r.json())`);
+}
+
+export async function whoami(s: Session) {
+  const j = await session(s);
   return {
-    authenticated: !!j.authenticated,
-    user: j.user?.display ?? null,
-    person: j.user?.person?.display ?? null,
-    roles: (j.roles ?? []).map((r: any) => r.name),
-    location: j.sessionLocation?.display ?? null,
-    provider: j.currentProvider?.display ?? null,
+    authenticated: !!j?.authenticated,
+    user: j?.user?.display ?? null,
+    roles: (j?.user?.roles ?? []).map((r: any) => r.display),
+    location: j?.sessionLocation?.display ?? null,
+    provider: j?.currentProvider?.display ?? null,
   };
 }
 
-// ------------------------------------------------------------------ auth
+// ---------------------------------------------------------------- auth
 
 /**
- * Log in from anywhere. Two screens in one page: username + "Continue",
- * then password + "Log in".  The wire fact is a single
- * `GET /openmrs/ws/rest/v1/session` carrying `Authorization: Basic …`;
- * its 200 sets `JSESSIONID` (Path=/openmrs, HttpOnly).
+ * Log in. Two screens: username -> Continue -> password -> Log in.
+ * Always navigates to the login URL first: a fresh document is the only way to be sure
+ * the previous attempt's "Invalid username or password" toast is not still on screen
+ * (it lingers and would satisfy the failure arm instantly). ~4-8 s on a cold browser.
  *
- * `which`: "home" when the user has a default location (this instance's admin does),
- * "location" when OpenMRS asks for a session location first, "bad" on wrong credentials.
+ * Returns `which: "shell" | "bad-credentials"`; it does not throw on bad credentials,
+ * so a caller can probe. `reached()` the returned report if you need it to have worked.
+ *
+ * IMPORTANT: this only tests credentials when you are logged OUT. With a live JSESSIONID
+ * the login page redirects itself to the shell after ~1-2 s, so ANY password "succeeds".
+ * Call `logout(s)` first when probing. `ensureLoggedIn` is the normal entry point.
  */
-export async function login(s: Session, username: string, password: string) {
+export async function login(s: Session, username = "admin", password = "Admin123") {
   s.uiIgnore = uiIgnore;
-  reached(await s.navigate(LOGIN, { until: { any: [
-    { selector: anchors.login.el, label: "login" },
-    { selector: anchors.shell.el, label: "already-in" },
-  ] }, timeout: 25000 }), "reach login");
-  if (await s.page.locator(anchors.shell.el).isVisible()) return { which: "home" as const, act: null };
+  reached(await s.navigate(LOGIN_URL, { until: { selector: anchors.login.el, visible: true }, timeout: 30000 }), "login page");
+  reached(await s.fill(anchors.login.el, username));
+  reached(await s.click("role=button[name='Continue']", { until: { selector: anchors.password.el, visible: true }, timeout: 10000 }), "password step");
+  reached(await s.fill(anchors.password.el, password));
+  const r = await s.click("role=button[name='Log in']", {
+    until: { any: [
+      { selector: anchors.home.el, label: "shell" },
+      { text: BAD_CREDENTIALS, label: "bad-credentials" },
+    ] }, timeout: 30000,
+  });
+  return { act: r.action, which: (r.until?.which ?? "none") as "shell" | "bad-credentials" | "none", report: r };
+}
 
-  reached(await s.fill("#username", username), "username");
-  reached(await s.click("role=button[name='Continue']",
-    { until: { selector: anchors.loginPw.el }, timeout: 8000 }), "continue");
-  reached(await s.fill("#password", password), "password");
-  const r = await s.click("role=button[name='Log in']", { until: { any: [
-    { url: "/spa/home", label: "home" },
-    { url: "/login/location", label: "location" },
-    { selector: "[role=alert]:has-text('Invalid')", label: "bad" },
-  ] }, timeout: 25000 });
-  if (!r.until?.ok) throw new Error(`login: ${r.until?.diagnosis?.message ?? "no landing"}`);
-  const which = r.until.which as "home" | "location" | "bad";
-  if (which === "bad") throw new Error("login: invalid credentials");
-  if (which === "location") {
-    // Not seen on dev3 with the `admin` user (it has userProperties.defaultLocation),
-    // but O3 shows a location picker when the user has none. Confirm the first option.
-    reached(await s.click("role=button[name='Confirm']",
-      { until: { url: "/spa/home" }, timeout: 20000 }), "confirm location");
-  }
-  reached(await s.until({ selector: anchors.shell.el }, { timeout: 20000 }), "shell after login");
-  return { which, act: r.action };
+/** Reach the shell, logging in only if the app asks. Cheap when already logged in (~2 s). */
+export async function ensureLoggedIn(s: Session, username = "admin", password = "Admin123") {
+  s.uiIgnore = uiIgnore;
+  const r = await s.navigate(HOME_URL, { until: { any: [
+    { selector: anchors.home.el, label: "shell" },
+    { selector: anchors.login.el, label: "login" },
+  ] }, timeout: 30000 });
+  if (r.until?.which === "shell") return { act: r.action, which: "shell" as const };
+  const l = await login(s, username, password);
+  if (l.which !== "shell") throw new Error(`login failed: ${l.which} (${l.act})`);
+  return { act: l.act, which: "logged-in" as const };
 }
 
 /**
- * Log out. The "User menu options" list (Super User / English / Password / Logout) is
- * ALWAYS in the DOM and always `visible` to Playwright — the header only slides it into
- * view — so `until: { selector: "role=button[name='Logout']" }` on the My Account click
- * is `alreadyTrue` and proves nothing. Open the menu with a bare act (or skip it), then
- * click Logout with the login screen as the postcondition.
+ * Open the header's user menu panel.
+ * The panel's contents (Super User / English / Password / Logout) are ALWAYS in the DOM
+ * and always "visible" to Playwright — the panel is parked off the right edge, so
+ * `until: { selector: "role=button[name='Logout']" }` is `alreadyTrue` and a click on
+ * Logout is diagnosed `occluded`. The honest anchor is the Carbon slide-in class.
+ * The aria tree does not change at all when the panel opens (`ui` diff is empty).
  */
+export async function openUserMenu(s: Session) {
+  const already = await s.until({ selector: ".cds--header-panel--expanded" }, { timeout: 400 });
+  if (already.until?.ok) return { act: already.action, opened: false };
+  const r = reached(await s.click("role=button[name='My Account']", {
+    until: { selector: ".cds--header-panel--expanded" }, timeout: 8000,
+  }), "open user menu");
+  return { act: r.action, opened: true };
+}
+
+/** Log out. `DELETE /ws/rest/v1/session` -> 204 -> redirect to the login page. */
 export async function logout(s: Session) {
-  await s.click("role=button[name='My Account']", { window: 200 });   // bare: no postcondition exists
-  const r = reached(await s.click("role=button[name='Logout']",
-    { until: { selector: anchors.login.el }, timeout: 25000 }), "logout");
+  await openUserMenu(s);
+  const r = reached(await s.click("role=button[name='Logout']", {
+    until: { selector: anchors.login.el, visible: true }, timeout: 20000,
+  }), "logout");
   return { act: r.action };
 }
 
-// ------------------------------------------------------------------ shell
+// ---------------------------------------------------------------- shell navigation
 
-/** Assert we are on the app shell without navigating. */
-export async function atShell(s: Session) {
-  return reached(await s.until({ selector: anchors.shell.el }, { timeout: 3000 }), "at shell");
-}
-
-/**
- * Reach the shell. Always navigates — a cold reload of /spa/home is ~2-6 s on dev3.
- * The login page is an arm of the anchor, so an expired session costs a redirect, not a budget.
- */
-export async function goHome(s: Session, opts: { allowLogin?: boolean } = {}) {
-  s.uiIgnore = uiIgnore;
-  const r = reached(await s.navigate(HOME, { until: { any: [
-    { selector: anchors.shell.el, label: "shell" },
-    { selector: anchors.login.el, label: "login" },
-  ] }, timeout: 25000 }), "go home");
-  const which = r.until?.which as "shell" | "login";
-  if (which === "login" && !opts.allowLogin) throw new Error(`go home: bounced to ${s.page.url()} — log in first`);
-  return { act: r.action, which };
-}
-
-/** The six home apps, each with the element that proves it rendered (not just routed). */
+/** The left-nav apps of the home shell. */
 export const homeApps = {
-  "service-queues": { el: "h2:has-text('Waiting list')" },
-  "appointments":   { el: "h2:has-text('Appointments for')" },
-  "patient-lists":  { el: "role=tab[name='Starred lists']" },
-  "ward":           { el: "main h2" },
-  "laboratory":     { el: "role=tab[name='Tests ordered']" },
-  "billing":        { el: "main" },
+  "service-queues": { req: "/ws/rest/v1/queue-entry?", text: "Waiting list" },
+  appointments: { req: "/ws/rest/v1/appointments?forDate=", text: "Appointments for" },
+  "patient-lists": { req: "/ws/rest/v1/cohortm/cohort?", text: "Patient lists" },
+  laboratory: { req: "/ws/rest/v1/order?orderTypes=", text: "Tests ordered" },
+  ward: { req: "/ws/rest/v1/admissionLocation/", text: "" },
+  billing: { req: "/ws/rest/v1/billing/bill?", text: "Bill list" },
 } as const;
 export type HomeApp = keyof typeof homeApps;
 
 /**
- * Open one of the left-nav home apps. `via: "nav"` clicks the link (client-side route,
- * fast); `via: "url"` reloads (slow, but works from the patient chart, whose left nav
- * is the *chart's* nav, not the home nav).
+ * Open one of the home apps by full navigation (a fresh document guarantees the fetch;
+ * clicking the left-nav link inside the SPA can be served from the react-query cache).
  */
-export async function openHomeApp(s: Session, app: HomeApp, opts: { via?: "nav" | "url" } = {}) {
-  const via = opts.via ?? (await s.page.locator(anchors.shell.el).isVisible() ? "nav" : "url");
-  const until = { selector: homeApps[app].el };
-  const r = via === "nav"
-    ? reached(await s.click(`nav a[href$='/home/${app}']`, { until, timeout: 25000 }), `open ${app}`)
-    : reached(await s.navigate(`${HOME}/${app}`, { until, timeout: 25000 }), `open ${app}`);
-  return { act: r.action, url: s.page.url() };
+export async function openHomeApp(s: Session, app: HomeApp, timeout = 30000) {
+  const spec = homeApps[app];
+  const r = reached(await s.navigate(`${HOME_URL}/${app}`, {
+    until: { all: [{ selector: anchors.home.el }, { request: spec.req, landed: true }] }, timeout,
+  }), `open ${app}`);
+  return { act: r.action, report: r };
 }
 
-// ------------------------------------------------------------------ patient search
+// ---------------------------------------------------------------- patient search
 
-export type PatientHit = {
-  uuid: string; display: string; name: string; identifier: string;
-  gender: string; age: number; birthdate: string; chartUrl: string;
-};
-
-/** Open the header patient-search panel (idempotent: no-op when it is already open). */
-export async function openSearchPanel(s: Session) {
-  if (await s.page.locator(SEARCH_BOX).isVisible()) return { act: null, alreadyOpen: true };
-  const r = reached(await s.click("role=button[name='Search patient']",
-    { until: { selector: SEARCH_BOX }, timeout: 10000 }), "open search panel");
-  return { act: r.action, alreadyOpen: false };
+/** Header search overlay. Idempotent: opens it only when its box is not already visible. */
+export async function openPatientSearch(s: Session) {
+  const already = await s.until({ selector: anchors.search.el, visible: true }, { timeout: 600 });
+  if (already.until?.ok) return { act: already.action, opened: false };
+  const r = reached(await s.click("role=button[name='Search patient']", {
+    until: { selector: anchors.search.el, visible: true }, timeout: 15000,
+  }), "open patient search");
+  return { act: r.action, opened: true };
 }
+
+export type Hit = { uuid: string; name: string; identifier: string | null; gender: string | null; age: number | null; birthdate: string | null };
 
 /**
- * Search patients from the header. Keystrokes (`type`, not `fill`) — the box is
- * debounced and fires one `GET /openmrs/ws/rest/v1/patient?q=…` after the last key.
- * The rows on screen are a rendering of that body; the facts come off the wire.
+ * Search patients by name or identifier. `fill` (not `type`) is enough — the box is a
+ * controlled React input and one input event starts the request. The hits come off the
+ * wire, not the DOM: `GET /ws/rest/v1/patient?q=<q>&v=custom:(...)`.
+ * Queries under ~3 characters return 0 results server-side ("a" -> 0 hits).
  */
-export async function searchPatients(s: Session, q: string, budgetMs = 20000): Promise<{ act: string; hits: PatientHit[] }> {
-  await openSearchPanel(s);
-  reached(await s.fill(SEARCH_BOX, ""), "clear search box");
-  const r = await s.type(SEARCH_BOX, q, { until: { request: `/rest/v1/patient?q=${encodeURIComponent(q)}`, landed: true }, timeout: budgetMs });
-  if (!r.until?.ok) throw new Error(`searchPatients(${q}): ${r.until?.diagnosis?.message ?? "no search response"}`);
-  const body = s.store.latestJson(`/rest/v1/patient?q=${encodeURIComponent(q)}`, r.action);
-  const hits: PatientHit[] = (body?.results ?? []).map((p: any) => ({
+export async function searchPatients(s: Session, q: string, timeout = 20000): Promise<{ act: string; hits: Hit[] }> {
+  await openPatientSearch(s);
+  const r = reached(await s.fill(anchors.search.el, q, {
+    until: { request: "/ws/rest/v1/patient?q=", landed: true }, timeout,
+  }), `search "${q}"`);
+  const body = s.store.latestJson("/ws/rest/v1/patient?q=", r.action) as any;
+  const hits: Hit[] = (body?.results ?? []).map((p: any) => ({
     uuid: p.uuid,
-    display: p.display,
-    name: p.person?.personName?.display ?? p.display,
-    identifier: p.patientIdentifier?.identifier ?? p.identifiers?.[0]?.identifier ?? "",
-    gender: p.person?.gender ?? "",
-    age: p.person?.age ?? -1,
-    birthdate: (p.person?.birthdate ?? "").slice(0, 10),
-    chartUrl: `${SPA}/patient/${p.uuid}/chart/`,
+    name: p.person?.display ?? p.display,
+    identifier: p.identifiers?.[0]?.identifier ?? null,
+    gender: p.person?.gender ?? null,
+    age: p.person?.age ?? null,
+    birthdate: p.person?.birthdate ?? null,
   }));
   return { act: r.action, hits };
 }
 
-/** Close the search panel and return to whatever was behind it. */
-export async function closeSearchPanel(s: Session) {
-  if (!(await s.page.locator(SEARCH_BOX).isVisible())) return { act: null };
-  const r = reached(await s.click("role=button[name='Close Search Panel']",
-    { until: { gone: SEARCH_BOX }, timeout: 8000 }), "close search panel");
-  return { act: r.action };
+// ---------------------------------------------------------------- patient chart
+
+export type Demographics = { uuid: string; name: string | null; gender: string | null; birthDate: string | null; identifiers: string[]; deceased: boolean };
+
+/**
+ * Open a patient chart. Navigates (fresh document -> the FHIR Patient read always fires;
+ * an in-SPA click can be a cache hit). Demographics come from
+ * `GET /ws/fhir2/R4/Patient/<uuid>?_summary=data`, not from the banner text.
+ */
+export async function openChart(s: Session, uuid: string, tab = "patient-summary", timeout = 30000) {
+  const r = reached(await s.navigate(chartUrl(uuid, tab), {
+    until: { all: [
+      { selector: anchors.chart.el },
+      { request: `fhir2/R4/Patient/${uuid}`, landed: true },
+    ] }, timeout,
+  }), `open chart ${uuid}`);
+  const p = wireJson(s, `fhir2/R4/Patient/${uuid}`);
+  const demographics: Demographics = {
+    uuid: p?.id ?? uuid,
+    name: p?.name?.[0]?.text ?? null,
+    gender: p?.gender ?? null,
+    birthDate: p?.birthDate ?? null,
+    identifiers: (p?.identifier ?? []).map((i: any) => i.value).filter(Boolean),
+    deceased: !!p?.deceasedDateTime || p?.deceasedBoolean === true,
+  };
+  return { act: r.action, demographics, patient: p };
 }
 
-// ------------------------------------------------------------------ patient chart
-
+/**
+ * The chart's left-nav tabs. `req` is the fragment an `until: { request }` matches;
+ * `owns` is the extra URL fragment (always the patient uuid) that scopes the log read,
+ * so a cached second visit still returns the right body.
+ */
 export const chartTabs = {
-  "patient-summary":      { el: "h4:text-is('Conditions')",      wire: "/fhir2/R4/Condition?patient=" },
-  "vitals-and-biometrics":{ el: "h4:has-text('Vitals')",         wire: "/fhir2/R4/Observation?" },
-  "medications":          { el: "h4:has-text('medications')",    wire: "/rest/v1/order?patient=" },
-  "orders":               { el: "h4:has-text('Orders')",         wire: "/rest/v1/order?patient=" },
-  "results":              { el: "main",                          wire: "/fhir2/R4/Observation?" },
-  "visits":               { el: "h4:has-text('Visits')",         wire: "/rest/v1/visit?patient=" },
-  "allergies":            { el: "h4:text-is('Allergies')",       wire: "/fhir2/R4/AllergyIntolerance?patient=" },
-  "conditions":           { el: "h4:text-is('Conditions')",      wire: "/fhir2/R4/Condition?patient=" },
-  "programs":             { el: "h4:has-text('Program')",        wire: "/rest/v1/programenrollment" },
-  "appointments":         { el: "h4:has-text('Appointments')",   wire: "/rest/v1/appointment" },
-  "attachments":          { el: "h4:has-text('Attachments')",    wire: "/rest/v1/attachment" },
-  "immunizations":        { el: "h4:has-text('Immunizations')",  wire: "/fhir2/R4/Immunization" },
+  "patient-summary": { req: "fhir2/R4/Patient/", text: "Vitals" },
+  "vitals-and-biometrics": { req: "fhir2/R4/Observation", text: "Vitals" },
+  medications: { req: "/ws/rest/v1/order?patient=", text: "medications" },
+  results: { req: "/ws/rest/v1/obstree?patient=", text: "Results" },
+  visits: { req: "ws/rest/v1/visit?patient=", text: "Visits" },
+  allergies: { req: "fhir2/R4/AllergyIntolerance?patient=", text: "Allergies" },
+  conditions: { req: "fhir2/R4/Condition?patient=", text: "Conditions" },
+  immunizations: { req: "fhir2/R4/Immunization?patient=", text: "Immunizations" },
+  procedures: { req: "/ws/rest/v1/procedure?patient=", text: "Procedures" },
+  attachments: { req: "/ws/rest/v1/attachment?patient=", text: "Attachments" },
+  programs: { req: "/ws/rest/v1/programenrollment?patient=", text: "Programs" },
+  appointments: { req: "/ws/rest/v1/appointments/search", text: "Appointments" },
+  "billing-history": { req: "/ws/rest/v1/billing/bill?", text: "" },
 } as const;
 export type ChartTab = keyof typeof chartTabs;
 
-export const chartUrl = (uuid: string, tab = "") => `${SPA}/patient/${uuid}/chart/${tab}`;
+/**
+ * Click a chart tab from inside the chart and return the body the tab rendered from.
+ * Precondition: already on this patient's chart (`openChart`).
+ * The `until` is the URL only; the request is then waited for with a SHORT budget,
+ * because a tab you already visited in this document is served from the react-query
+ * cache and issues nothing. Either way the body is read from the log, scoped to this
+ * patient's uuid, so the answer is the same.
+ */
+export async function chartTab(s: Session, uuid: string, tab: ChartTab, timeout = 20000, cacheGraceMs = 2500) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: 3000 }), `on a chart before opening ${tab}`);
+  const r = reached(await s.click(`nav[aria-label='Left navigation'] a[href$="/chart/${tab}"]`, {
+    until: { url: `/chart/${tab}` }, timeout,
+  }), `chart tab ${tab}`);
+  const spec = chartTabs[tab];
+  // Short on purpose: the patient-summary screen already fetched Conditions, Vitals,
+  // Medications and Visits, so those tabs are cache hits and this budget is pure waste
+  // when it expires. 2.5 s is enough for a real fetch on dev3 (observed 200-900 ms).
+  const w = await s.until({ request: spec.req, landed: true }, { timeout: cacheGraceMs });
+  const body = wireJson(s, spec.req.replace(/\?.*$/, "").replace(/=$/, ""), uuid);
+  return { act: r.action, fromCache: !w.until?.ok, body };
+}
+
+/** FHIR Bundle of problem-list Conditions. */
+export const conditions = (s: Session, uuid: string) => chartTab(s, uuid, "conditions");
+/** FHIR Bundle of AllergyIntolerance. */
+export const allergies = (s: Session, uuid: string) => chartTab(s, uuid, "allergies");
+/** FHIR Bundle of vitals/biometrics Observations (BP, pulse, temp, SpO2, height, weight...). */
+export const vitals = (s: Session, uuid: string) => chartTab(s, uuid, "vitals-and-biometrics");
+/** REST page of visits with their encounters, obs and orders (large: ~250 KB). */
+export const visits = (s: Session, uuid: string) => chartTab(s, uuid, "visits");
+
+/** Count the entries of a FHIR searchset Bundle and pull one field per entry. */
+export function bundleEntries(bundle: any, pick: (r: any) => any = (r) => r) {
+  return (bundle?.entry ?? []).map((e: any) => pick(e.resource));
+}
+
+// ---------------------------------------------------------------- workspaces (right side rail)
+
+/** The right side-rail buttons that open a workspace over the chart. */
+export const workspaces = ["Clinical forms", "Order basket", "Visit note", "Task list", "Patient lists"] as const;
 
 /**
- * Open a patient chart cold (full reload). The `{ url: "/chart" }` predicate is NOT
- * enough — client-side routing changes the URL long before the chart app is fetched.
- * Anchor on the patient banner; the demographics come off `GET /ws/fhir2/R4/Patient/<uuid>`.
+ * Open a chart workspace. The container `#omrs-workspaces-container` is always in the
+ * DOM; the honest anchor is its `[aria-label='Workspace header']` plus the title text.
+ * Workspaces survive SPA route changes — always `closeWorkspace` when done.
  */
-export async function openChart(s: Session, uuid: string, budgetMs = 30000) {
-  s.uiIgnore = uiIgnore;
-  const r = reached(await s.navigate(chartUrl(uuid), {
-    until: { selector: anchors.chart.el }, timeout: budgetMs }), "open chart");
-  const fhir = s.store.latestJson(`/fhir2/R4/Patient/${uuid}`, r.action);
-  const name = fhir?.name?.[0];
+export async function openWorkspace(s: Session, name: (typeof workspaces)[number], timeout = 20000) {
+  const r = reached(await s.click(`role=button[name="${name}"]`, {
+    until: { selector: `#omrs-workspaces-container [aria-label='Workspace header']:has-text("${name}")` }, timeout,
+  }), `open workspace ${name}`);
+  return { act: r.action };
+}
+
+/** Close whatever workspace is open (no-op if none). */
+export async function closeWorkspace(s: Session) {
+  const open = await s.until({ selector: anchors.workspace.el }, { timeout: 600 });
+  if (!open.until?.ok) return { act: open.action, closed: false };
+  const r = reached(await s.click("#omrs-workspaces-container >> role=button[name='Close']", {
+    until: { gone: anchors.workspace.el }, timeout: 10000,
+  }), "close workspace");
+  return { act: r.action, closed: true };
+}
+
+/** The patient's form list, from the "Clinical forms" workspace. Read-only: never opens a form. */
+export async function clinicalForms(s: Session, uuid: string) {
+  reached(await s.until({ selector: anchors.chart.el }, { timeout: 3000 }), "on a chart");
+  const o = await openWorkspace(s, "Clinical forms");
+  const rows = (await s.evaluate(
+    `Array.from(document.querySelectorAll('#omrs-workspaces-container table tbody tr'))` +
+    `.map(tr=>Array.from(tr.cells).map(c=>c.innerText.trim()))`)) as string[][];
+  await closeWorkspace(s);
+  return { act: o.act, forms: rows.map((r) => ({ name: r[0], lastCompleted: r[1] })) };
+}
+
+// ---------------------------------------------------------------- home apps as data
+
+/** Patient lists = "cohorts". Returns every list the user can see. */
+export async function patientLists(s: Session) {
+  const r = await openHomeApp(s, "patient-lists");
+  const body = s.store.latestJson("/ws/rest/v1/cohortm/cohort?", r.act) as any;
+  return {
+    act: r.act,
+    lists: (body?.results ?? []).map((c: any) => ({
+      uuid: c.uuid, name: c.name, size: c.size, type: c.cohortType?.display ?? null,
+    })),
+  };
+}
+
+/** Open one patient list and read its members off the wire. */
+export async function openPatientList(s: Session, uuid: string, timeout = 20000) {
+  const r = reached(await s.navigate(`${HOME_URL}/patient-lists/${uuid}`, {
+    until: { all: [
+      { selector: anchors.home.el },
+      { request: `cohortm/cohortmember?cohort=${uuid}`, landed: true },
+    ] }, timeout,
+  }), `open list ${uuid}`);
+  const body = wireJson(s, `cohortm/cohortmember?cohort=${uuid}`);
   return {
     act: r.action,
-    uuid,
-    banner: (await s.page.locator(anchors.chart.el).innerText()).replace(/\s+/g, " ").trim(),
-    patient: fhir ? {
-      id: fhir.id,
-      name: name ? [ (name.given ?? []).join(" "), name.family ].filter(Boolean).join(" ") : (name?.text ?? null),
-      gender: fhir.gender ?? null,
-      birthDate: fhir.birthDate ?? null,
-      identifiers: (fhir.identifier ?? []).map((i: any) => `${i.type?.text ?? i.system ?? "id"}=${i.value}`),
-      deceased: !!fhir.deceasedDateTime || fhir.deceasedBoolean === true,
-    } : null,
+    members: (body?.results ?? []).map((m: any) => ({
+      uuid: m.patient?.uuid, name: m.patient?.person?.display ?? m.patient?.display,
+      identifier: m.patient?.identifiers?.[0]?.identifier ?? null, startDate: m.startDate ?? null,
+    })),
   };
 }
 
 /**
- * Move to another tab of the chart that is already open (client-side, ~0.5 s).
- * Returns the body the tab fetched, scoped to this act — or `null` when the tab was
- * served from the app's SWR cache and issued no request at all (the patient-summary
- * widgets pre-fetch Condition, Observation and order for the same patient, so the
- * Conditions / Vitals / Medications tabs are usually silent). Never make `body` a
- * postcondition: anchor on `spec.el` and re-read with `conditions()`/`allergies()`
- * when you need the data regardless.
+ * Service queues (the default home app): who is waiting / in service at this location.
+ * Two `queue-entry` requests fire per load — one per tab of the dashboard — so the
+ * *newest* body is not necessarily the one with rows. This reads the largest.
  */
-export async function openChartTab(s: Session, uuid: string, tab: ChartTab, budgetMs = 25000) {
-  reached(await s.until({ selector: anchors.chart.el }, { timeout: 3000 }), "chart is open");
-  const spec = chartTabs[tab];
-  const r = reached(await s.click(`nav a[href$='/chart/${tab}']`,
-    { until: { selector: spec.el }, timeout: budgetMs }), `chart tab ${tab}`);
-  return { act: r.action, url: s.page.url(), body: s.store.latestJson(spec.wire, r.action) ?? null };
+export async function serviceQueues(s: Session) {
+  const r = await openHomeApp(s, "service-queues");
+  const rows = s.store.sql(
+    "SELECT body_hash, body_size FROM requests WHERE run=? AND status=200 AND url LIKE '%/ws/rest/v1/queue-entry?%'" +
+    " AND t_start >= ? ORDER BY body_size DESC LIMIT 1", s.run, r.report.window.t0) as any[];
+  const body = rows[0] ? s.store.json(rows[0].body_hash) : null;
+  return {
+    act: r.act,
+    entries: (body?.results ?? []).map((e: any) => ({
+      patient: e.patient?.person?.display ?? e.display,
+      patientUuid: e.patient?.uuid,
+      queue: e.queue?.display ?? null,
+      status: e.status?.display ?? null,
+      priority: e.priority?.display ?? null,
+      startedAt: e.startedAt ?? null,
+    })),
+  };
 }
 
-/** Rows of a Carbon data table as arrays of cell text. Use for a table with no wire body. */
-export async function tableRows(s: Session, tableSelector = "main table"): Promise<string[][]> {
-  return await s.evaluate(
-    `[...document.querySelectorAll(${JSON.stringify(tableSelector)} + ' tbody tr')]` +
-    `.map(tr => [...tr.querySelectorAll('td')].map(td => td.innerText.trim()))`) as string[][];
+/** Appointments for a date (default: whatever date the app opens on — today). */
+export async function appointmentsForDate(s: Session) {
+  const r = await openHomeApp(s, "appointments");
+  const body = s.store.latestJson("/ws/rest/v1/appointments?forDate=", r.act) as any;
+  const list = Array.isArray(body) ? body : (body?.results ?? []);
+  return {
+    act: r.act,
+    appointments: list.map((a: any) => ({
+      uuid: a.uuid, patient: a.patient?.name ?? null, service: a.service?.name ?? null,
+      startDateTime: a.startDateTime ?? null, status: a.status ?? null,
+    })),
+  };
 }
 
-// ------------------------------------------------------------------ wire-first reads (no UI at all)
-
-/** Allergies as the chart shows them, straight off FHIR. */
-export async function allergies(s: Session, uuid: string) {
-  const b = await api(s, `/openmrs/ws/fhir2/R4/AllergyIntolerance?patient=${uuid}&_summary=data`);
-  return (b.entry ?? []).map((e: any) => ({
-    allergen: e.resource?.code?.text ?? e.resource?.code?.coding?.[0]?.display ?? null,
-    severity: e.resource?.reaction?.[0]?.severity ?? null,
-    reactions: (e.resource?.reaction?.[0]?.manifestation ?? []).map((m: any) => m.text ?? m.coding?.[0]?.display),
-  }));
-}
-
-/** Active problem-list conditions, straight off FHIR. */
-export async function conditions(s: Session, uuid: string) {
-  const b = await api(s, `/openmrs/ws/fhir2/R4/Condition?patient=${uuid}&_count=100`);
-  return (b.entry ?? []).map((e: any) => ({
-    text: e.resource?.code?.text ?? e.resource?.code?.coding?.[0]?.display ?? null,
-    clinicalStatus: e.resource?.clinicalStatus?.coding?.[0]?.code ?? null,
-    onset: e.resource?.onsetDateTime ?? null,
-  }));
-}
-
-/** Visits (REST, not FHIR — the chart's Visits tab uses this shape). */
-export async function visits(s: Session, uuid: string) {
-  const b = await api(s, `/openmrs/ws/rest/v1/visit?patient=${uuid}&v=custom:(uuid,display,startDatetime,stopDatetime,location:(display),visitType:(display))`);
-  return (b.results ?? []).map((v: any) => ({
-    uuid: v.uuid, type: v.visitType?.display ?? null, location: v.location?.display ?? null,
-    start: v.startDatetime, stop: v.stopDatetime,
-  }));
-}
-
-/** Today's appointments, as the Appointments home app loads them. */
-export async function appointmentsForDate(s: Session, isoDate: string) {
-  const b = await api(s, `/openmrs/ws/rest/v1/appointments?forDate=${encodeURIComponent(isoDate)}`);
-  return (Array.isArray(b) ? b : b.results ?? []).map((a: any) => ({
-    uuid: a.uuid, patient: a.patient?.name ?? null, service: a.service?.name ?? null,
-    status: a.status, start: a.startDateTime,
-  }));
-}
-
-/** The patient lists (cohorts) the Patient lists home app shows. */
-export async function patientLists(s: Session) {
-  const b = await api(s, "/openmrs/ws/rest/v1/cohortm/cohort?v=custom:(uuid,name,description,size,cohortType:(display))");
-  return (b.results ?? []).map((c: any) => ({ uuid: c.uuid, name: c.name, size: c.size, type: c.cohortType?.display ?? null }));
+/** Lab orders worklist. `tab` is one of the dashboard's four tabs; this reads "Tests ordered". */
+export async function laboratory(s: Session) {
+  const r = await openHomeApp(s, "laboratory");
+  const body = s.store.latestJson("/ws/rest/v1/order?orderTypes=", r.act) as any;
+  return { act: r.act, orders: (body?.results ?? []) };
 }

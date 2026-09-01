@@ -21,7 +21,9 @@ export interface Recorder {
 }
 export interface WsFrame { dir: "in" | "out"; payload: string; url: string }
 
-export function attachRecorder(context: BrowserContext, store: Store, current: () => string | null, dialogs: DialogPolicy): Recorder {
+/** `silent`: handle dialogs and watch WebSocket frames (for the `ws` predicate) but write nothing — another process is recording this browser. */
+export function attachRecorder(context: BrowserContext, store: Store, current: () => string | null, dialogs: DialogPolicy, opts: { silent?: boolean } = {}): Recorder {
+  const silent = opts.silent === true;
   const ids = new WeakMap<Request, string>();
   let counter = store.get<{ n: number }>("SELECT COUNT(*) n FROM requests")?.n ?? 0;
   const pending = new Set<Promise<unknown>>();
@@ -32,6 +34,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   const hostPath = (url: string) => { try { const u = new URL(url); return { host: u.host, path: u.pathname }; } catch { return { host: null, path: null }; } };
 
   const onRequest = (r: Request) => {
+    if (silent) return;
     const id = idOf(r);
     let frameUrl: string | null = null; try { frameUrl = r.frame().url(); } catch {}
     store.insert("requests", {
@@ -40,6 +43,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     });
   };
   const onResponse = (res: Response) => {
+    if (silent) return;
     const id = idOf(res.request());
     const mime = res.headers()["content-type"] ?? null;
     const streaming = /event-stream/i.test(mime ?? "");
@@ -49,6 +53,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     track(res.allHeaders().then((h) => store.update("requests", { resp_headers: h }, "id=?", [id])));
   };
   const onFinished = (r: Request) => {
+    if (silent) return;
     const id = idOf(r);
     const tEnd = store.now();
     const rt = r.resourceType();
@@ -68,6 +73,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     track(p);
   };
   const onFailed = (r: Request) => {
+    if (silent) return;
     store.update("requests", { t_end: store.now(), body_state: "error", error: r.failure()?.errorText ?? "failed" }, "id=?", [idOf(r)]);
   };
 
@@ -84,35 +90,37 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     const urlOf = (id: string) => urls.get(id) ?? "(opened before recording)";
     const frame = (dir: "in" | "out", id: string, payload: string) => {
       const f: WsFrame = { dir, payload: String(payload), url: urlOf(id) };
-      store.insert("ws_frames", { t: store.now(), url: f.url, dir, payload: cap(f.payload, WS_PAYLOAD_CAP), action_id: current() });
+      if (!silent) store.insert("ws_frames", { t: store.now(), url: f.url, dir, payload: cap(f.payload, WS_PAYLOAD_CAP), action_id: current() });
       for (const cb of frameCbs) cb(f);
     };
-    cdp.on("Network.webSocketCreated", (e: any) => { urls.set(e.requestId, e.url); store.insert("ws_frames", { t: store.now(), url: e.url, dir: "open", action_id: current() }); });
+    cdp.on("Network.webSocketCreated", (e: any) => { urls.set(e.requestId, e.url); if (!silent) store.insert("ws_frames", { t: store.now(), url: e.url, dir: "open", action_id: current() }); });
     cdp.on("Network.webSocketFrameReceived", (e: any) => frame("in", e.requestId, e.response?.payloadData ?? ""));
     cdp.on("Network.webSocketFrameSent", (e: any) => frame("out", e.requestId, e.response?.payloadData ?? ""));
-    cdp.on("Network.webSocketClosed", (e: any) => { store.insert("ws_frames", { t: store.now(), url: urlOf(e.requestId), dir: "close", action_id: current() }); urls.delete(e.requestId); });
+    cdp.on("Network.webSocketClosed", (e: any) => { if (!silent) store.insert("ws_frames", { t: store.now(), url: urlOf(e.requestId), dir: "close", action_id: current() }); urls.delete(e.requestId); });
     page.once("close", () => { cdpSessions.delete(cdp); cdp.detach().catch(() => {}); });
   };
   const onPage = (page: Page) => {
     const handlers = {
-      console: (m: any) => store.insert("console", { t: store.now(), level: m.type(), text: cap(m.text(), 2000), url: m.location()?.url ?? null, action_id: current() }),
-      pageerror: (e: Error) => store.insert("console", { t: store.now(), level: "exception", text: cap(String(e?.message ?? e), 2000), action_id: current() }),
+      console: (m: any) => { if (!silent) store.insert("console", { t: store.now(), level: m.type(), text: cap(m.text(), 2000), url: m.location()?.url ?? null, action_id: current() }); },
+      pageerror: (e: Error) => { if (!silent) store.insert("console", { t: store.now(), level: "exception", text: cap(String(e?.message ?? e), 2000), action_id: current() }); },
       dialog: (d: any) => {
-        store.insert("dialogs", { t: store.now(), type: d.type(), message: cap(d.message(), 2000), handled: dialogs, action_id: current() });
+        if (!silent) store.insert("dialogs", { t: store.now(), type: d.type(), message: cap(d.message(), 2000), handled: dialogs, action_id: current() });
         (dialogs === "accept" ? d.accept() : d.dismiss()).catch(() => {});
       },
-      framenavigated: (f: any) => { if (f === page.mainFrame()) store.insert("nav", { t: store.now(), kind: "navigated", url: f.url(), action_id: current() }); },
-      close: () => store.insert("nav", { t: store.now(), kind: "closed", url: safeUrl(page), action_id: current() }),
-      download: (d: any) => store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }),
+      framenavigated: (f: any) => { if (!silent && f === page.mainFrame()) store.insert("nav", { t: store.now(), kind: "navigated", url: f.url(), action_id: current() }); },
+      close: () => { if (!silent) store.insert("nav", { t: store.now(), kind: "closed", url: safeUrl(page), action_id: current() }); },
+      download: (d: any) => { if (!silent) store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }); },
     };
     for (const [ev, fn] of Object.entries(handlers)) page.on(ev as any, fn as any);
     track(watchSockets(page));
     pageCleanups.set(page, () => { for (const [ev, fn] of Object.entries(handlers)) page.off(ev as any, fn as any); });
   };
   const onNewPage = (page: Page) => {
-    const seq = store.insert("nav", { t: store.now(), kind: "popup", url: safeUrl(page), action_id: current() });
-    // a popup's URL is usually still about:blank when the event fires; fill it in once it commits
-    track(page.waitForURL((u) => u.href !== "about:blank", { timeout: 3000, waitUntil: "commit" }).then(() => store.update("nav", { url: safeUrl(page) }, "seq=?", [seq])));
+    if (!silent) {
+      const seq = store.insert("nav", { t: store.now(), kind: "popup", url: safeUrl(page), action_id: current() });
+      // a popup's URL is usually still about:blank when the event fires; fill it in once it commits
+      track(page.waitForURL((u) => u.href !== "about:blank", { timeout: 3000, waitUntil: "commit" }).then(() => store.update("nav", { url: safeUrl(page) }, "seq=?", [seq])));
+    }
     onPage(page);
   };
 
