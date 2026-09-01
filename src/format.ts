@@ -8,7 +8,7 @@ export function formatReport(r: Report): string {
   const secs = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${n}ms`);
   L.push(`${r.action} "${r.label}"  ${r.ok ? "ok" : "FAILED"}  ${secs(tm.totalMs)} (run ${tm.runMs} · observe ${tm.observeMs} · report ${tm.reportMs})  returned: ${r.returned}${r.returned === "max" && !r.until ? ` (still changing${r.pending.length ? `; ${r.pending.length} in flight` : ""})` : ""}  ${r.url}${r.openPages > 1 ? `  (+${r.openPages - 1} other page${r.openPages > 2 ? "s" : ""} open)` : ""}`);
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
-  if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action — it proves nothing; wait for something that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}`);
+  if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action (which still ran) — it proves nothing; wait for something that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}`);
   if (r.note) L.push("  note: " + r.note);
   if (r.proposed.length) {
     L.push("  proposed until (each was false before the action):");
@@ -22,6 +22,13 @@ export function formatReport(r: Report): string {
     if (lines.length > 25) L.push(`    … ${lines.length - 25} more (sql: SELECT * FROM requests WHERE action_id='${r.action}')`);
   }
   if (r.pending.length) L.push("  pending: " + r.pending.join(" · "));
+  L.push("  writes: " + (r.writes?.length ? r.writes.join(" · ") : "none"));
+  const st = [...r.storage.cookies.map((x) => "cookie " + x), ...r.storage.local.map((x) => "local " + x), ...r.storage.session.map((x) => "session " + x)];
+  if (st.length) L.push("  storage: " + st.join(" · ").slice(0, 400));
+  for (const c of r.console.slice(0, 5)) L.push(`  console ${c.level}: ${c.text.slice(0, 160)}`);
+  for (const d of r.dialogs) L.push(`  dialog ${d.type} "${(d.message ?? "").slice(0, 100)}" → ${d.handled}`);
+  for (const p of r.pages) L.push(`  new page: ${p}`);
+  for (const d of r.downloads ?? []) L.push(`  download: ${d}`);
   if (r.ui.added.length || r.ui.removed.length) {
     L.push("  ui:");
     for (const l of r.ui.added.slice(0, 25)) L.push("    + " + l.slice(0, 120));
@@ -29,12 +36,6 @@ export function formatReport(r: Report): string {
     const hidden = Math.max(0, r.ui.added.length - 25) + Math.max(0, r.ui.removed.length - 10) + (r.ui.more ?? 0);
     if (hidden) L.push(`    … ${hidden} more (report.ui has them all)`);
   }
-  if (r.writes?.length) L.push("  writes: " + r.writes.join(" · "));
-  const st = [...r.storage.cookies.map((x) => "cookie " + x), ...r.storage.local.map((x) => "local " + x), ...r.storage.session.map((x) => "session " + x)];
-  if (st.length) L.push("  storage: " + st.join(" · ").slice(0, 400));
-  for (const c of r.console.slice(0, 5)) L.push(`  console ${c.level}: ${c.text.slice(0, 160)}`);
-  for (const d of r.dialogs) L.push(`  dialog ${d.type} "${(d.message ?? "").slice(0, 100)}" → ${d.handled}`);
-  for (const p of r.pages) L.push(`  new page: ${p}`);
   if ("value" in r && r.value !== undefined) { const v = typeof r.value === "string" ? r.value : JSON.stringify(r.value) ?? ""; L.push("  value: " + (v.length > 400 ? v.slice(0, 400) + `… (clipped, ${v.length} chars — --json or report.value for all of it)` : v)); }
   return L.join("\n");
 }
@@ -66,7 +67,7 @@ export function formatLook(l: Look): string {
     if (l.aria) L.push(l.aria.split("\n").map((x) => "  " + x).join("\n"));
     if (l.controls?.length) {
       L.push("  controls:");
-      for (const c of l.controls) L.push(`  ${String(c.n).padStart(3)}  ${c.selector.padEnd(48).slice(0, 48)}  ${c.role} "${c.name}"${c.disabled ? " (disabled)" : ""}  ${box(c.box)}`);
+      for (const c of l.controls) L.push(`  ${String(c.n).padStart(3)}  ${c.selector.padEnd(48).slice(0, 48)}  ${c.role} "${c.name}"${c.disabled ? " (disabled)" : ""}${c.offCanvas ? " (off-canvas: parked outside the page — Playwright calls it visible, a user cannot see it)" : ""}  ${box(c.box)}`);
     }
   }
   if (l.dialogs.length) L.push("  open dialogs: " + l.dialogs.join("; "));

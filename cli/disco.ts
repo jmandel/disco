@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // disco — the CLI. Five commands. Every command reconnects to the app's browser, does one thing, prints, and
 // disconnects; the browser (and a detached recorder) keep running between commands.
-import { existsSync, readFileSync, writeFileSync, rmSync, openSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -108,8 +108,7 @@ async function main() { switch (cmd) {
     if (pidAlive(info.recorderPid)) { try { process.kill(info.recorderPid!, "SIGTERM"); } catch {} await new Promise((r) => setTimeout(r, 400)); }
     killLaunched(info); writeBrowserInfo(dir, null);
     try { const st = openStore(dir, { readonly: false }); st.db.prepare("UPDATE runs SET ended_wall=? WHERE ended_wall IS NULL").run(new Date().toISOString()); st.close(); } catch {}
-    if (existsSync(currentFile) && readFileSync(currentFile, "utf8").trim() === app) rmSync(currentFile);
-    console.log(`${app}: ${info.mode === "launch" ? "browser killed" : "detached"}`);
+    console.log(`${app}: ${info.mode === "launch" ? "browser killed" : "detached"} (the log stays; ${app} remains the default app)`);
     break;
   }
   case "look": {
@@ -124,7 +123,9 @@ async function main() { switch (cmd) {
     let run: (...a: unknown[]) => Promise<unknown>; let until: ((...a: unknown[]) => unknown) | undefined;
     try { run = new AsyncFunction("page", "s", `return (${src}\n);`); } catch { try { run = new AsyncFunction("page", "s", src); } catch (e) { fail(`act: the code does not parse — ${(e as Error).message}`); } }
     if (typeof args.until === "string") { try { until = new Function("page", "s", `return (${args.until});`) as any; } catch (e) { fail(`--until: the code does not parse — ${(e as Error).message}`); } }
-    const r = await withSession((s) => s.act((args.label as string) ?? src.slice(0, 70), (page) => run(page, s), { until: until ? () => Promise.resolve(until!(s.page, s)) : undefined, quiet: num(args.quiet), max: num(args.max) }));
+    // an expression that evaluates to a function (e.g. a pasted `(page) => …`) is called, not returned
+    const call = async (page: unknown, s: Session) => { const v = await run(page, s); return typeof v === "function" ? await (v as (...a: unknown[]) => unknown)(page, s) : v; };
+    const r = await withSession((s) => s.act((args.label as string) ?? src.slice(0, 70), (page) => call(page, s), { until: until ? () => Promise.resolve(until!(s.page, s)) : undefined, quiet: num(args.quiet), max: num(args.max) }));
     console.log(json ? JSON.stringify(r, null, 2) : String(r));
     if (!r.ok || (r.until && (!r.until.ok || r.until.alreadyTrue))) process.exit(1);
     break;
@@ -133,7 +134,9 @@ async function main() { switch (cmd) {
     const q = args._.slice(1).join(" "); if (!q) fail("usage: disco sql <query>");
     const st = openStore(appStoreDir(currentApp()));
     const rows = st.sql(q);
-    if (json) console.log(JSON.stringify(rows, null, 2));
+    // one row, one column, holding JSON → print that JSON itself (a report, a body), not an array wrapping a string
+    const scalar = json && rows.length === 1 && Object.keys(rows[0]).length === 1 ? (() => { const v = Object.values(rows[0])[0]; if (typeof v !== "string" || !/^[\[{]/.test(v.trim())) return undefined; try { return JSON.parse(v); } catch { return undefined; } })() : undefined;
+    if (json) console.log(JSON.stringify(scalar ?? rows, null, 2));
     else if (!rows.length) console.log("(no rows)");
     else {
       const cols = Object.keys(rows[0]);

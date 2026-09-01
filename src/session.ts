@@ -1,9 +1,10 @@
 // The surface. open → Session with three verbs: look (the screen), act (any Playwright code, bracketed by an
 // observation that returns when the app is quiet or your until holds), sql (the log). Plus waitFor over the
 // recorder's event stream, body/json for bodies, and reached to assert a report.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
-import { Store, appStoreDir, appDir, openStore, type StoreReader } from "./store.ts";
+import { Store, appStoreDir, appDir, appsRoot, openStore, type StoreReader } from "./store.ts";
 import { attachRecorder, type Recorder, type EventKind, type Events } from "./record.ts";
 import { readBrowserInfo, writeBrowserInfo, isAlive, launchChromium, attachEndpoint, connect, killLaunched, pidAlive, type BrowserInfo } from "./browser.ts";
 import { lookAt, controls, inspect, dialogCensus, locatorFromDescription, type Look, type LookCtx } from "./look.ts";
@@ -65,6 +66,8 @@ export interface Report<T = unknown> {
   console: Array<{ level: string; text: string }>;
   dialogs: Array<{ type: string; message: string | null; handled: string | null }>;
   pages: string[];
+  /** files the page started downloading in the window (suggested file names) */
+  downloads: string[];
   openPages: number;
   /** pasteable until code for what this act caused — each was false before the action */
   proposed: Proposal[];
@@ -97,6 +100,7 @@ export async function open(app: string, opts: OpenOptions = {}): Promise<Session
   } else if (!info || !(await isAlive(info.endpoint))) {
     info = await launchChromium(storeDir, { headed: opts.headed }); fresh = true;
   }
+  if (fresh) { try { writeFileSync(join(appsRoot(opts.appsDir), ".current"), app); } catch {} }   // the CLI's default app follows whoever opened a browser last
   const browser = await connect(info);
   const context = browser.contexts()[0] ?? (await browser.newContext());
   const pages = context.pages().filter((p) => !isScratch(p));
@@ -206,7 +210,7 @@ export class Session {
     store.insert("actions", { id, n, t0, label, code: fnSource(run) });
     this.#current = id;
     if (this.context.pages().filter((p) => !isScratch(p)).length > 1) await page.bringToFront().catch(() => {});
-    const pageSite = siteOf(safe(() => new URL(page.url()).host, ""));
+    const siteNow = () => siteOf(safe(() => new URL(page.url()).host, ""));
     const tDispatch = performance.now();
     let ok = true, value: T | undefined, runError: unknown, landedNote: string | undefined;
     try { value = await run(page); } catch (e) {
@@ -220,6 +224,7 @@ export class Session {
     const tRun1 = performance.now();
     let returned: Report["returned"];
     let until: Report["until"];
+    let lastDom = tRun1;
     if (!ok) {
       returned = "error";
       if (untilP) { until = { ok: false, elapsedMs: 0, error: "the code threw before the until could be judged" }; untilP.catch(() => {}); }
@@ -235,9 +240,11 @@ export class Session {
         const left = deadline - performance.now();
         if (left <= 0) { returned = "max"; break; }
         await sleep(Math.min(quiet, left));
+        const site = siteNow();
         const cur = await this.#fingerprint();
-        const idle = store.now() - rec.lastActivity();
-        const awaiting = store.all<{ host: string | null }>("SELECT host FROM requests WHERE run=? AND t_start >= ? AND t_response IS NULL AND t_end IS NULL", store.run, t0 - 1).filter((r) => !isThirdParty(r.host, pageSite)).length;
+        const idle = store.now() - rec.lastActivity((h) => !isThirdParty(h, site));
+        const awaiting = store.all<{ host: string | null }>("SELECT host FROM requests WHERE run=? AND t_start >= ? AND t_response IS NULL AND t_end IS NULL", store.run, t0 - 1).filter((r) => !isThirdParty(r.host, site)).length;
+        if (cur !== prev) lastDom = performance.now();
         if (cur === prev && idle >= quiet && awaiting === 0) { returned = "quiet"; break; }
         prev = cur;
         if (performance.now() >= deadline) { returned = "max"; break; }
@@ -252,6 +259,7 @@ export class Session {
     const postStorage = await this.#storage();
     const url = safe(() => page.url(), "");
     const diagnosis = ok ? undefined : await this.#diagnose(runError);
+    const pageSite = siteNow() || siteOfFirstDocument(store, t0, t1);
     const { requests, static: st, thirdParty, pending, matchedRows } = this.#wire(t0, t1, pageSite);
     const ui = diffAria(preAria, postAria, 40);
     const storage = diffStorage(preStorage, postStorage);
@@ -263,6 +271,7 @@ export class Session {
       console: store.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", store.run, t0, t1 + 1),
       dialogs: store.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1),
       pages: store.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='popup' AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1).map((x) => x.url),
+      downloads: store.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='download' AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1).map((x) => x.url),
       openPages: this.context.pages().filter((p) => !isScratch(p)).length,
       proposed: propose(matchedRows, t0, ms(tStart, tDispatch), ui, preAria.split("\n").map((l) => l.trim()), preUrl, url, storage),
       window: { t0: Math.round(t0), t1: Math.round(t1) },
@@ -270,6 +279,7 @@ export class Session {
     };
     const notes: string[] = [];
     if (landedNote) notes.push(landedNote);
+    if (returned === "quiet" && !opts.until && tObs1 - tRun1 > quiet + 400) { const domMs = Math.round(lastDom - tRun1), netMs = Math.round(rec.lastActivity((h) => !isThirdParty(h, pageSite)) - (t0 + ms(tStart, tDispatch))); notes.push(`quiet arrived after ${Math.round(tObs1 - tRun1)} ms: the last DOM change was at +${domMs} ms, the last app request event at about +${Math.max(0, netMs)} ms`); }
     if (!ui.added.length && !ui.removed.length && preAria && postAria && preAria !== postAria) notes.push("the accessibility tree changed without additions or removals: lines moved (a sort or a reorder)");
     if (until && (until.alreadyTrue || !until.ok) && opts.until) notes.push(...(await this.#untilNotes(fnSource(opts.until), until, t0)));
     if (!preAria || !postAria) notes.push("the aria snapshot exceeded 1.5 s on this page; the ui diff is unreliable");
@@ -295,12 +305,24 @@ export class Session {
     if (scope.action) { where.push("action_id=?"); args.push(scope.action); }
     if (scope.method) { where.push("method=?"); args.push(scope.method.toUpperCase()); }
     const q = `SELECT id, url, body_hash, body_state FROM requests WHERE ${where.join(" AND ")} ORDER BY run DESC, t_start DESC LIMIT 50`;
-    // "/queue-entry" must not pick "/queue-entry-metrics": prefer matches that end at a path boundary, when there are any
+    // "/queue-entry" must not pick "/queue-entry-metrics": prefer matches that end at a path boundary, when there are any;
+    // a fragment found only in query strings that spans several endpoints is ambiguous — say so instead of guessing
     const boundary = (u: string) => { const i = u.indexOf(urlPart); if (i < 0) return false; const c = u[i + urlPart.length]; return c === undefined || "?#/&".includes(c); };
+    const inPath = (u: string) => { try { return new URL(u).pathname.includes(urlPart); } catch { return u.split("?")[0].includes(urlPart); } };
+    const pathOnly = (u: string) => { try { return new URL(u).pathname; } catch { return u.split("?")[0]; } };
+    const scopeText = `${JSON.stringify(urlPart)}${scope.action ? ` in ${scope.action}` : ""}${scope.method ? ` (${scope.method.toUpperCase()})` : ""}`;
     const t0 = Date.now();
     for (;;) {
       const every = this.#store.all<{ id: string; url: string; body_hash: string | null; body_state: string }>(q, ...args);
-      const rows = every.some((r) => boundary(r.url)) ? every.filter((r) => boundary(r.url)) : every;
+      if (!every.length) {
+        const near = this.#store.all<{ method: string; url: string }>(`SELECT method, url FROM requests WHERE status IS NOT NULL ${scope.action ? "AND action_id=?" : ""} AND resource_type IN ('xhr','fetch','document') ORDER BY run DESC, t_start DESC LIMIT 8`, ...(scope.action ? [scope.action] : []));
+        throw new Error(`json: no JSON body matched ${scopeText}${near.length ? ` — what did answer: ${near.map((r) => `${r.method} ${pathOf(r.url, null).slice(0, 70)}`).join(", ")}` : " — nothing answered there"}`);
+      }
+      const byPath = every.filter((r) => inPath(r.url));
+      const pool = byPath.length ? byPath : every;
+      const paths = new Set(pool.map((r) => pathOnly(r.url)));
+      if (!byPath.length && paths.size > 1) throw new Error(`json: ${scopeText} matches only query strings, on ${paths.size} different endpoints (${[...paths].map((p) => p.slice(-60)).join(", ")}) — name the path`);
+      const rows = pool.some((r) => boundary(r.url)) ? pool.filter((r) => boundary(r.url)) : pool;
       if (!rows.length) return null;
       if (rows[0].body_state === "pending" && Date.now() - t0 < 1000) { await sleep(50); continue; }
       const row = rows.find((r) => r.body_hash);
@@ -425,7 +447,7 @@ export class Session {
 /** Throw unless the code ran and its until (if any) held — and throw when the until was already true before the action, because that proved nothing. */
 export function reached<T>(r: Report<T>, what?: string): Report<T> {
   const who = `${what ?? r.label} (${r.action})`;
-  if (r.ok && r.until?.alreadyTrue) throw new Error(`${who}: the until was already true before the action — it proves nothing; wait for something that is false beforehand (the report's proposed untils all were)`);
+  if (r.ok && r.until?.alreadyTrue) throw new Error(`${who}: the until was already true before the action — it proves nothing (the action itself ran and may have changed the page); wait for something that is false beforehand (the report's proposed untils all were)`);
   if (r.ok && (!r.until || r.until.ok)) return r;
   const d = r.diagnosis;
   throw new Error(`${who}: ${r.ok ? `until failed after ${r.until?.elapsedMs}ms — ${r.until?.error ?? ""}${r.note ? ` (${r.note})` : ""}` : `${d?.reason} — ${d?.message}${d?.dialogs?.length ? ` (open: ${d.dialogs.join("; ")})` : ""}${d?.shot ? ` [shot ${d.shot}]` : ""}`}`);
@@ -458,17 +480,28 @@ function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLi
     return { role: m[1], name: m[2], states, rest, key: `${m[1]}|${m[2] ?? rest ?? ""}|${states.join(",")}` };
   };
   const before = new Set(preLines.map(parsed).filter(Boolean).flatMap((x) => [x!.key, `${x!.role}|${x!.name ?? x!.rest ?? ""}|`]));
+  const preText = preLines.join("").replace(/\s+/g, "");
   const added = ui.added.map(parsed).filter((x): x is NonNullable<typeof x> => !!x && !before.has(x.key) && x.role !== "generic" && x.role !== "list" && x.role !== "listitem" && x.role !== "group" && x.role !== "region").sort((a, b) => rank(a.role) - rank(b.role));
   let n = 0;
   for (const a of added) {
     if (n >= 3) break;
-    // a text line often merges sibling elements (a label and a value span), which no single getByText matches: wait on the page's text instead
-    if (a.role === "text") { const t = a.rest; if (!t || t.length < 3 || t.length > 60) continue; out.push({ kind: "appeared", code: `() => page.waitForFunction(t => document.body.innerText.replace(/\\s+/g, "").includes(t), ${JSON.stringify(t.replace(/\s+/g, ""))})`, atMs: null }); n++; continue; }
+    // a text line often merges sibling elements (a label and a value span), which no single getByText matches: wait on the page's
+    // text instead — collected through open shadow roots, and only when the fragment was not already on screen (substrings lie: "armed" is in "unarmed")
+    if (a.role === "text") {
+      const t = a.rest; if (!t || t.length < 3 || t.length > 60) continue;
+      const frag = t.replace(/\s+/g, "");
+      if (preText.includes(frag)) continue;
+      out.push({ kind: "appeared", code: `() => page.waitForFunction(t => { const txt = (n) => n.nodeType === 3 ? n.textContent : [...(n.shadowRoot ? [n.shadowRoot] : []), ...n.childNodes].map(txt).join(""); return txt(document.body).replace(/\\s+/g, "").includes(t); }, ${JSON.stringify(frag)})`, atMs: null }); n++; continue;
+    }
     if (!a.name) continue;
     const st = a.states.map((x) => `, ${x}: true`).join("");
-    out.push({ kind: "appeared", code: `() => page.getByRole(${JSON.stringify(a.role)}, { name: ${JSON.stringify(a.name.slice(0, 60))}, exact: true${st} }).first().waitFor()`, atMs: null }); n++;
+    // an <option> inside a native <select> is never "visible": wait for it attached with its state
+    const w = a.role === "option" ? `.waitFor({ state: "attached" })` : ".waitFor()";
+    out.push({ kind: "appeared", code: `() => page.getByRole(${JSON.stringify(a.role)}, { name: ${JSON.stringify(a.name.slice(0, 60))}, exact: true${st} }).first()${w}`, atMs: null }); n++;
   }
-  const removed = ui.removed.map(parsed).filter((x): x is NonNullable<typeof x> => !!x && !!x.name && ["dialog", "heading", "button", "alert", "status", "progressbar"].includes(x.role)).sort((a, b) => rank(a.role) - rank(b.role));
+  // "the one that left" is only a postcondition when it was the only one: `.first()` of a repeated button re-resolves to the next one
+  const preCount = (role: string, name: string) => preLines.map(parsed).filter((x) => x && x.role === role && x.name === name).length;
+  const removed = ui.removed.map(parsed).filter((x): x is NonNullable<typeof x> => !!x && !!x.name && ["dialog", "heading", "button", "alert", "status", "progressbar"].includes(x.role) && preCount(x.role, x.name) === 1).sort((a, b) => rank(a.role) - rank(b.role));
   if (removed[0]) out.push({ kind: "gone", code: `() => page.getByRole(${JSON.stringify(removed[0].role)}, { name: ${JSON.stringify(removed[0].name!.slice(0, 60))}, exact: true }).first().waitFor({ state: "hidden" })`, atMs: null });
   for (const line of storage.local.slice(0, 1)) { const k = line.replace(/^\+/, "").split(/[=:]/)[0]; if (k && line.startsWith("+")) out.push({ kind: "storage", code: `() => page.waitForFunction(k => localStorage.getItem(k) !== null, ${JSON.stringify(k)})`, atMs: null }); }
   return out.slice(0, 7);
@@ -498,11 +531,16 @@ function fnSource(f: unknown): string { try { return String(f).slice(0, 4000); }
 /** What an until resolved with, kept when it is JSON and small; otherwise a short description. */
 function plainValue(v: unknown): unknown {
   if (v === null || typeof v !== "object") return v;
+  const cls = (v as any)?.constructor?.name;
+  if (cls === "Response") { try { const r = v as any; return `${r.request().method()} ${pathOf(r.url(), null)} ${r.status()}`; } catch {} }
+  if (cls && /^(Request|Locator|Page|Frame|ElementHandle|JSHandle|WebSocket|Dialog|Download|BrowserContext)$/.test(cls)) return `[${cls}]`;
   try { const s = JSON.stringify(v); if (s !== undefined && s.length <= 2000) return JSON.parse(s); return `${(s ?? String(v)).slice(0, 200)}… (${s?.length ?? 0} chars)`; } catch { return String(v).slice(0, 200); }
 }
 /** The site a host belongs to: its last two labels (an IP or a single label stands alone). Good enough to tell telemetry from the app's API. */
 function siteOf(host: string | null | undefined): string { if (!host) return ""; const h = host.replace(/:\d+$/, ""); if (/^[\d.]+$/.test(h) || h.startsWith("[") || !h.includes(".")) return h; return h.split(".").slice(-2).join("."); }
 function isThirdParty(host: string | null | undefined, pageSite: string): boolean { const s = siteOf(host); return !!s && !!pageSite && s !== pageSite; }
+/** When the page had no host yet (about:blank before open's navigation), the app's site is that of the first document it loaded. */
+function siteOfFirstDocument(store: Store, t0: number, t1: number): string { const r = store.get<{ host: string | null }>("SELECT host FROM requests WHERE run=? AND resource_type='document' AND t_start BETWEEN ? AND ? ORDER BY t_start LIMIT 1", store.run, t0 - 1, t1 + 1); return siteOf(r?.host); }
 function firstLine(e: unknown): string { return String((e as any)?.message ?? e).split("\n")[0].slice(0, 300); }
 function ms(a: number, b: number): number { return Math.round(b - a); }
 function safe<T>(f: () => T, d: T): T { try { return f(); } catch { return d; } }

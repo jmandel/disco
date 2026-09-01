@@ -415,6 +415,46 @@ describe("exam A fold-backs", () => {
   });
 });
 
+describe("exam B fold-backs", () => {
+  it("json throws when nothing matched, naming what did; and when a query fragment spans several endpoints", async () => {
+    await assert.rejects(() => s.json("/api/nothing-like-this"), /no JSON body matched "\/api\/nothing-like-this" — what did answer: /);
+    reached(await s.act("two endpoints, one query", (p) => p.evaluate(() => Promise.all([fetch("/api/search?q=zz").then((r) => r.json()), fetch("/api/meds?q=zz").then((r) => r.json())]))));
+    await assert.rejects(() => s.json("q=zz"), /matches only query strings, on 2 different endpoints/);
+    const one = await s.json<{ q: string }>("/api/search?q=zz");
+    assert.equal(one?.q, "zz");
+  });
+  it("a selected <option> is proposed as attached; a fragment already on screen is never proposed; writes prints none", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<select id=\"sel\"><option>alpha</option><option>beta</option></select><div id=\"t1\">unready</div>')");
+    const r = reached(await s.act("pick beta", (p) => p.selectOption("#sel", "beta")));
+    assert.ok(r.proposed.some((x) => x.code.includes('"option"') && x.code.includes('state: "attached"')), JSON.stringify(r.proposed));
+    const r2 = reached(await s.act("ready", (p) => p.evaluate(() => { document.getElementById("t1")!.textContent = "ready"; })));
+    assert.ok(!r2.proposed.some((x) => x.code.includes('"ready"')), JSON.stringify(r2.proposed));
+    await s.page.evaluate("document.getElementById('sel').remove(); document.getElementById('t1').remove()");
+    const r3 = reached(await s.act("chart", (p) => p.click("#load-chart"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/slow")) }));
+    assert.match(String(r3), /\n  writes: none\n/);
+  });
+  it("a text proposal for text inside a shadow root pierces it and holds", async () => {
+    const r = reached(await s.act("shadow click", (p) => p.click("#shadow-btn")));
+    const p = r.proposed.find((x) => x.code.includes("shadowRoot"));
+    assert.ok(p, JSON.stringify(r.proposed));
+    const fn = new Function("page", `return (${p!.code})`)(s.page) as () => Promise<unknown>;
+    await fn();
+  });
+  it("look marks off-canvas controls; a download shows in the report", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"offc\" style=\"position:absolute;left:-600px;top:100px\">parked</button>')");
+    const l = await s.look();
+    assert.equal(l.controls!.find((c) => c.selector === "#offc")?.offCanvas, true);
+    await s.page.evaluate("document.getElementById('offc').remove()");
+    const r = reached(await s.act("download", (p) => p.evaluate(() => { const a = document.createElement("a"); a.href = "data:text/plain,hi"; a.download = "hello.txt"; document.body.appendChild(a); a.click(); a.remove(); })));
+    assert.ok(r.downloads.includes("hello.txt"), JSON.stringify(r.downloads));
+    assert.match(String(r), /download: hello\.txt/);
+  });
+  it("reached says the action ran when it refuses an already-true until", async () => {
+    const r = await s.act("already", (p) => p.click("#noop"), { until: () => s.page.locator("#load-chart").waitFor() });
+    assert.throws(() => reached(r), /the action itself ran/);
+  });
+});
+
 describe("the log", () => {
   it("one recorder per browser: a second script session is silent, stamps its windows, and does not duplicate rows", async () => {
     const s2 = await open("t", { appsDir });

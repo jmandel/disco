@@ -27,8 +27,8 @@ export interface Recorder {
   on<K extends EventKind>(kind: K, cb: (e: Events[K]) => void): () => void;
   /** The log id of a Playwright Request. */
   idOf(r: Request): string | undefined;
-  /** `store.now()` of the most recent event of any kind. */
-  lastActivity(): number;
+  /** `store.now()` of the most recent event — network events only from hosts `relevant` accepts (so telemetry does not keep an act awake). */
+  lastActivity(relevant?: (host: string | null) => boolean): number;
   /** Have response bytes for `url` arrived within the last `withinMs`? (Distinguishes "still downloading" from "never read".) */
   flowing(url: string, withinMs: number): boolean;
   /** A scratch page of ours (look's overlay): record nothing from it. */
@@ -57,10 +57,12 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   const listeners: { [K in EventKind]: Set<(e: any) => void> } = { request: new Set(), response: new Set(), ws: new Set(), console: new Set(), dialog: new Set(), page: new Set(), nav: new Set() };
   const ignored = new WeakSet<Page>();
   const lastData = new Map<string, number>();
-  let last = store.now();
+  let lastOther = store.now();
+  const lastNet = new Map<string, number>();   // host → t of its last network event
+  const netAt = (url: string) => { let h = ""; try { h = new URL(url).host; } catch {} lastNet.set(h, store.now()); };
 
   const track = (p: Promise<unknown>) => { pending.add(p); p.catch((e) => warn("async write", e)).finally(() => pending.delete(p)); };
-  const emit = <K extends EventKind>(kind: K, e: Events[K]) => { last = store.now(); for (const cb of listeners[kind]) { try { cb(e); } catch (err) { warn(`listener ${kind}`, err); } } };
+  const emit = <K extends EventKind>(kind: K, e: Events[K]) => { if (kind === "request" || kind === "response") netAt((e as any).url); else lastOther = store.now(); for (const cb of listeners[kind]) { try { cb(e); } catch (err) { warn(`listener ${kind}`, err); } } };
   const guard = <A extends unknown[]>(where: string, fn: (...a: A) => unknown) => (...a: A) => { try { const r = fn(...a); if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch((e) => warn(where, e)); } catch (e) { warn(where, e); } };
   const idOf = (r: Request) => { let id = ids.get(r); if (!id) { id = `r${store.run}-${++counter}`; ids.set(r, id); } return id; };
   const cap = (s: string | null | undefined, n: number) => (s == null ? null : s.length > n ? s.slice(0, n) : s);
@@ -104,7 +106,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   });
   const onFinished = guard("requestfinished", (r: Request) => {
     if (scratch(pageOf(r))) return;
-    last = store.now();
+    netAt(r.url());
     if (silent) return;
     const id = idOf(r);
     const tEnd = store.now();
@@ -125,7 +127,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   });
   const onFailed = guard("requestfailed", (r: Request) => {
     if (scratch(pageOf(r))) return;
-    last = store.now();
+    netAt(r.url());
     if (!silent) store.update("requests", { t_end: store.now(), body_state: "error", error: r.failure()?.errorText ?? "failed" }, "id=?", [idOf(r)]);
   });
 
@@ -151,7 +153,10 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     cdp.on("Network.webSocketClosed", guard("ws closed", (e: any) => { if (!silent && !scratch(page)) store.insert("ws_frames", { t: store.now(), url: urlOf(e.requestId), dir: "close", action_id: current() }); urls.delete(e.requestId); }));
     const resUrls = new Map<string, string>();
     cdp.on("Network.responseReceived", (e: any) => { resUrls.set(e.requestId, e.response?.url ?? ""); });
-    cdp.on("Network.dataReceived", (e: any) => { const u = resUrls.get(e.requestId); if (u) { lastData.set(u, store.now()); last = store.now(); } });
+    cdp.on("Network.dataReceived", (e: any) => { const u = resUrls.get(e.requestId); if (u) { lastData.set(u, store.now()); netAt(u); } });
+    // downloads: Playwright's `download` event needs a context it configured; CDP tells us regardless
+    try { await cdp.send("Page.enable"); } catch {}
+    cdp.on("Page.downloadWillBegin", guard("download", (e: any) => { if (scratch(page)) return; const name = e.suggestedFilename || e.url || "download"; if (!silent) store.insert("nav", { t: store.now(), kind: "download", url: name, action_id: current() }); lastOther = store.now(); }));
     cdp.on("Network.loadingFinished", (e: any) => { resUrls.delete(e.requestId); });
     cdp.on("Network.loadingFailed", (e: any) => { resUrls.delete(e.requestId); });
     page.once("close", () => { cdpSessions.delete(cdp); cdp.detach().catch(() => {}); });
@@ -168,7 +173,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
       }),
       framenavigated: guard("framenavigated", (f: any) => { if (f !== page.mainFrame() || scratch(page)) return; const e = { url: f.url(), t: store.now() }; if (!silent) store.insert("nav", { t: e.t, kind: "navigated", url: e.url, action_id: current() }); emit("nav", e); }),
       close: guard("close", () => { if (!silent && !scratch(page)) store.insert("nav", { t: store.now(), kind: "closed", url: safeUrl(page), action_id: current() }); }),
-      download: guard("download", (d: any) => { if (!silent && !scratch(page)) store.insert("nav", { t: store.now(), kind: "download", url: d.suggestedFilename?.() ?? d.url?.(), action_id: current() }); }),
+      download: guard("download", (d: any) => { void d; /* recorded from CDP Page.downloadWillBegin, which fires for attached browsers too */ }),
     };
     for (const [ev, fn] of Object.entries(handlers)) page.on(ev as any, fn as any);
     track(watchSockets(page));
@@ -198,7 +203,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     },
     on: (kind, cb) => { listeners[kind].add(cb as any); return () => { listeners[kind].delete(cb as any); }; },
     idOf: (req) => ids.get(req),
-    lastActivity: () => last,
+    lastActivity: (relevant) => { let t = lastOther; for (const [h, at] of lastNet) if (!relevant || relevant(h || null)) t = Math.max(t, at); return t; },
     flowing,
     ignore: (page) => { ignored.add(page); },
     setSilent: (v) => { if (silent && !v) counter = store.get<{ n: number }>("SELECT COUNT(*) n FROM requests")?.n ?? counter; silent = v; },

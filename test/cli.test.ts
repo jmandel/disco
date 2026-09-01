@@ -48,6 +48,10 @@ describe("cli", () => {
     assert.equal(already.code, 1); assert.match(already.out, /already true/);
     const bad = disco("act", "page.click(");
     assert.equal(bad.code, 2); assert.match(bad.out, /does not parse/);
+    const fnlit = disco("act", '(page) => page.click("#noop")');
+    assert.equal(fnlit.code, 0, fnlit.out); assert.match(fnlit.out, /returned: quiet/); assert.doesNotMatch(fnlit.out, /value:/);
+    const scalar = disco("sql", "SELECT report FROM actions WHERE id='act:3'", "--json");
+    assert.equal(JSON.parse(scalar.stdout).action, "act:3", scalar.out);
     const l = disco("look");
     assert.equal(l.code, 0, l.out); assert.match(l.out, /button "Load Chart"/); assert.match(l.out, /#load-chart/); assert.match(l.out, /shot: .*blobs/);
     const l2 = disco("look", "#load-chart");
@@ -60,6 +64,8 @@ describe("cli", () => {
     assert.equal(e.code, 2); assert.match(e.out, /no such column: nope — actions\(/);
     const x = disco("close", "c");
     assert.match(x.out, /killed/);
+    const after = disco("sql", "SELECT count(*) n FROM actions");
+    assert.equal(after.code, 0, "the log outlives the browser and the app stays the default: " + after.out);
   });
   it("attach: a browser started independently with a debugging port is driven, recorded, and left running", async () => {
     const { launchChromium, killLaunched } = await import("../src/browser.ts");

@@ -24,7 +24,7 @@ anything into the page.
 | The `until` was true before you acted | `until.alreadyTrue`, and `reached()` refuses it | 0 |
 | The element is missing, hidden, disabled, covered, off-screen, re-rendering, or ignores the mouse | `diagnosis.reason` naming the cause, the selector, what covers it, open dialogs, the visible controls, a screenshot | ≤ max |
 | A click landed but its handler blocked the page past `max` | `ok: true` with a `note`; the observation continues | max |
-| The page never read a response body | the row says so; the status is still there; `finished()` in your `until` gets a note | 1.5 s after the headers |
+| The page never read a response body | the row says so; the status is still there; a Playwright `response.finished()` (body downloaded) in your `until` gets a note | 1.5 s after the headers |
 | You want to know what a selector matches before acting | `look(selector)` | ~100 ms |
 
 No wait is longer than the `max` you wrote (default 3 s). Nothing sleeps for you. Nothing decides the page is "done".
@@ -91,9 +91,9 @@ Your code runs in Node: use `page.evaluate(() => …)` for the DOM, and for a `f
 | `ui` | `{ added, removed }` lines of the accessibility tree that changed (main frame; iframes appear as nodes) |
 | `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`; `static` folds scripts, styles, images, fonts into a count, `thirdParty` folds other sites (telemetry) out of the wire, `writes` and `pending`. `(started earlier)` marks a long-poll that answered you |
 | `pending` | requests started in the window and still in flight when it closed |
-| `writes` | `string[]`: the non-GET app requests in the window — under a read-only stance, a non-empty line is the signal to stop |
+| `writes` | `string[]`: the non-GET app requests in the window, printed as `writes: none` when empty — under a read-only stance, anything else is the signal to stop |
 | `storage` | cookie (HttpOnly included), localStorage and sessionStorage changes — the wire of an app that has no wire |
-| `console` · `dialogs` · `pages` · `openPages` | errors and warnings; native dialogs (accepted, recorded); popups opened; pages open afterwards (more than 1 throttles the driven page) |
+| `console` · `dialogs` · `pages` · `downloads` · `openPages` | errors and warnings; native dialogs (accepted, recorded); URLs of popups opened; files the page started downloading; pages open afterwards (more than 1 throttles the driven page) |
 | `proposed` | pasteable `until` code for what this act caused: responses with their `+ms`, roles that appeared (with their new state: `selected`, `expanded`, `checked`), the one that left, the url path, a storage key. **Copy one into the SDK.** |
 | `note` | something true that is not a failure: the click landed but the page blocked; a body the page never read; what an already-true or failed until's target looks like now, and what answered just before the act; lines that only moved |
 | `window`, `timing` | `{ t0, t1 }` in the run's clock; `{ runMs, observeMs, reportMs, totalMs }` |
@@ -131,10 +131,11 @@ even when you were already there.
 
 ### `s.sql(query, …args)` · `s.body(hash)` · `s.json(urlPart, { action?, method? })`
 
-The log. `sql` returns an array of row objects and explains a wrong column with the table's columns. `body` returns a body or screenshot blob by hash or
-16-char prefix. `json` returns the newest JSON body whose URL contains `urlPart`, scoped to an act and/or a method
-(`json("/api/save", { action: r.action, method: "POST" })` reads back a write when the app fired GETs after it); it
-waits up to 1 s for a body still arriving. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
+The log. `sql` returns an array of row objects and explains a wrong column with the table's columns. `body` returns a body (or a
+screenshot's bytes) as a string, by hash or 16-char prefix. `json` returns the newest JSON body whose URL path contains `urlPart`,
+scoped to an act and/or a method (`json("/api/save", { action: r.action, method: "POST" })` reads back a write when the app fired
+GETs after it); it waits up to 1 s for a body still arriving, and it **throws** when nothing matched (naming what did answer) or when
+a query-string fragment matches several endpoints — a fact you could not find is never `null`. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
 report as JSON) · `requests` (`id, t_start, t_response, t_end, method, url, path, resource_type, req_headers, req_body,
 status, mime, resp_headers, body_hash, body_size, body_state, action_id`) · `bodies` (+ `bodies_fts`) · `ws_frames` ·
 `console` · `dialogs` · `nav` · `shots`. `requests` keys on `id`; everything else on `seq` and `t` (ms since the run
@@ -162,7 +163,7 @@ apps/<app>/
 ```
 
 **The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
-report or shot is in `evidence/`. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
+report or shot is in `evidence/`; a number without an act id is a guess. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
 the docblock above the function, once. `./disco sql "SELECT report FROM actions WHERE id='act:7'" --json > apps/shop/evidence/act-7.json`
 copies a report, and the report names its shot's path. `sdk.ts` runs its own check:
 

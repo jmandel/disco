@@ -8,7 +8,7 @@ import type { Recorder } from "./record.ts";
 /** A marks screenshot is the whole page, up to this many pixels tall. */
 const MARKS_MAX_H = 4000;
 export interface Box { x: number; y: number; w: number; h: number }
-export interface Control { n: number; selector: string; role: string; name: string; box: Box; disabled?: boolean }
+export interface Control { n: number; selector: string; role: string; name: string; box: Box; disabled?: boolean; /** parked outside the page's box: visible to Playwright, not to a user */ offCanvas?: boolean }
 export interface Match {
   n: number; selector: string; tag: string; role: string; name: string; text: string; box: Box | null;
   visible: boolean; enabled: boolean; inViewport: boolean;
@@ -34,7 +34,8 @@ const CONTROLS = 'button,a,input,select,textarea,summary,[contenteditable],[tabi
 
 /** Runs in the page: every visible interactive control with what look needs to name it and to build a durable selector. */
 function pageControls(_el: Element, sel: string) {
-  const out: Array<{ tag: string; role: string; name: string; id: string; test: string | null; disabled: boolean; box: { x: number; y: number; w: number; h: number }; css: string }> = [];
+  const out: Array<{ tag: string; role: string; name: string; id: string; test: string | null; disabled: boolean; offCanvas: boolean; box: { x: number; y: number; w: number; h: number }; css: string }> = [];
+  const docW = Math.max(document.documentElement.scrollWidth, document.documentElement.clientWidth), docH = Math.max(document.documentElement.scrollHeight, document.documentElement.clientHeight);
   const nameOf = (h: HTMLElement) => (h.getAttribute("aria-label") || (h.getAttribute("aria-labelledby") ? Array.from(h.getAttribute("aria-labelledby")!.split(/\s+/)).map((i) => document.getElementById(i)?.textContent ?? "").join(" ") : "") || (h.id ? (document.querySelector(`label[for="${CSS.escape(h.id)}"]`) as HTMLElement | null)?.innerText : "") || h.closest("label")?.innerText || h.innerText || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || h.getAttribute("alt") || "").trim().replace(/\s+/g, " ").slice(0, 60);
   const roleOf = (h: HTMLElement) => {
     const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase();
@@ -67,7 +68,8 @@ function pageControls(_el: Element, sel: string) {
     const st = getComputedStyle(h);
     if (st.visibility === "hidden" || st.display === "none") continue;
     const test = h.getAttribute("data-test") ? `[data-test="${h.getAttribute("data-test")}"]` : h.getAttribute("data-testid") ? `[data-testid="${h.getAttribute("data-testid")}"]` : h.getAttribute("data-cy") ? `[data-cy="${h.getAttribute("data-cy")}"]` : h.getAttribute("data-qa") ? `[data-qa="${h.getAttribute("data-qa")}"]` : null;
-    out.push({ tag: h.tagName.toLowerCase(), role: roleOf(h), name: nameOf(h), id: h.id, test, disabled: (h as HTMLButtonElement).disabled === true || h.getAttribute("aria-disabled") === "true", box: { x: Math.round(r.left + scrollX), y: Math.round(r.top + scrollY), w: Math.round(r.width), h: Math.round(r.height) }, css: cssPath(h) });
+    const bx = Math.round(r.left + scrollX), by = Math.round(r.top + scrollY);
+    out.push({ tag: h.tagName.toLowerCase(), role: roleOf(h), name: nameOf(h), id: h.id, test, disabled: (h as HTMLButtonElement).disabled === true || h.getAttribute("aria-disabled") === "true", offCanvas: bx + r.width <= 0 || by + r.height <= 0 || bx >= docW || by >= docH, box: { x: bx, y: by, w: Math.round(r.width), h: Math.round(r.height) }, css: cssPath(h) });
     if (out.length >= 80) break;
   }
   return out;
@@ -142,7 +144,7 @@ function cssEscape(s: string): string { return s.replace(/([^\w-])/g, "\\$1"); }
 export async function controls(page: Page, base: Page | Locator = page): Promise<Control[]> {
   const raw = (await (base === page ? page.locator("body") : (base as Locator)).evaluate(pageControls as any, CONTROLS).catch(() => [])) as ReturnType<typeof pageControls>;
   const sels = await durable(page, raw);
-  return raw.map((c, i) => ({ n: i + 1, selector: sels[i], role: c.role, name: c.name, box: c.box, ...(c.disabled ? { disabled: true } : {}) }));
+  return raw.map((c, i) => ({ n: i + 1, selector: sels[i], role: c.role, name: c.name, box: c.box, ...(c.disabled ? { disabled: true } : {}), ...(c.offCanvas ? { offCanvas: true } : {}) }));
 }
 
 /** One element: visible/enabled per Playwright, and what is really under the pointer. */

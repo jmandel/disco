@@ -37,3 +37,15 @@ One line each. A fold-back that adds an option, predicate, command, file or conc
 - **README sentences:** code runs in Node; event shapes and `sql` returns rows; `writes` is `string[]` and `reached` accepts a bare act; the evidence one-liner; a run is one browser's life. (gauntlet #10, openmrs #4/#6/#8)
 - **Rejected:** server knobs leaking across sessions (the app's; the warm-from-messy rule caught it, gauntlet #2); long-poll attribution by start time (documented, gauntlet #4); folding diff lines that only change a number (a verdict, gauntlet #8); guessed column names that the error already explains (gauntlet #11, openmrs #9); a "wait for all bodies of this act" helper (`json` waits 1 s; `sql` covers the rest, openmrs #2b).
 - **One recorder per browser.** Any recording session claims `recorderPid` in browser.json; a later session is silent and stamps its windows; a silent session takes over when the recorder is gone. Why: two concurrently recording script sessions collided on request ids and the second's acts lost attribution (found while checking the Exam A judge's "pending forever" row). A request still unanswered when its recording session closes is marked `error: recording ended…`, never left `pending`.
+
+## Exam B fold-back (2026-09-01) — 29 items from three fresh strangers on the P4 commit (gauntlet 18 min/26 checks, saucedemo 16/12, openmrs 16/7; expired budget 42 s vs 80 s in A)
+
+- **`json` throws** when nothing matched (naming what did answer) or when a query-string fragment matches several endpoints. Why: a substring picked the sibling endpoint and a step passed vacuously on `null` (openmrs B #1).
+- **The app's site is taken from the page's URL as it is now**, not before the act, so `open`'s own navigation classifies telemetry correctly; telemetry no longer resets the quiet clock. (saucedemo B #9, #11)
+- **`.current` follows any fresh `open`, and `close` keeps it**: the log outlives the browser. (saucedemo B #5, openmrs B #4, gauntlet B #2)
+- **`sql --json` prints a single JSON cell as that JSON** — the evidence recipe yields the report object. (openmrs B #5)
+- **Text proposals pierce open shadow roots and skip fragments already on screen**; an `<option>` is proposed `attached`; a "gone" proposal needs a unique control. (gauntlet B #1, #3; saucedemo B #1, #8)
+- **`look` marks off-canvas controls**; the refusal says the action ran; `writes: none` prints; downloads print; `ui` prints last. (saucedemo B #2, #3, #6, #7; openmrs B #3, #6)
+- **A function-literal expression in `disco act` is called**, not returned. (gauntlet B)
+- **README sentences:** `json` throws; a number without an act id is a guess; `finished()` defined; `body` returns a string; `downloads` field. 
+- **Rejected:** the WS banner in every diff and the user-identity reminder (app-specific); mouse-only targets without a role in `look` (no handler is detectable without instrumentation — `look(selector)` covers them); copying untils across acts (the failed-until note already names it).
