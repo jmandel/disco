@@ -182,7 +182,7 @@ export async function login(s: Session, user: string, pass: string) {
 export async function check(s: Session): Promise<number> {
   let failed = 0;
   for (const [name, fn] of [["login", () => login(s, "me@x.io", "secret")]] as const) {
-    try { await fn(); console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}: ${(e as Error).message}`); }
+    try { await fn(); console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}: ${(e as Error).message}`); break; }   // steps share the browser: stop at the first failure instead of paying every later step's max
   }
   return failed;
 }
@@ -190,7 +190,8 @@ if (import.meta.main) { const s = await open("shop", { url: URL }); let f = 1; t
 ```
 
 A write workflow takes the record's fields as parameters (`addOrder(s, { sku, qty })`) and the check supplies marked values,
-so the first real task can call it. `node apps/shop/sdk.ts` runs it and leaves the browser running. A pack is done when it passes **warm and cold** — once on
+so the first real task can call it. `node apps/shop/sdk.ts` runs it and leaves the browser running; while it runs,
+`./disco sql "SELECT n, label, ok FROM actions ORDER BY n DESC LIMIT 5"` is its progress bar, and its `close` prints the evidence and claim check. A pack is done when it passes **warm and cold** — once on
 the browser you explored with, then once more after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
 had already done.
 
