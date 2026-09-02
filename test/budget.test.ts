@@ -46,13 +46,14 @@ test("README: at most 300 lines; the method is one paragraph", () => {
   assert.ok(!body.some((l) => !l.trim()), "the method must be a single paragraph (no blank line inside it)");
 });
 
-test("a pack is README.md + sdk.ts (+ store/, evidence/) — nothing else", () => {
+test("a pack is README.md + sdk.ts or sdk/ (+ store/, evidence/) — nothing else", () => {
   const apps = join(root, "apps");
   if (!existsSync(apps)) return;
   for (const app of readdirSync(apps)) {
     const d = join(apps, app);
     if (!statSync(d).isDirectory()) continue;
-    const extra = readdirSync(d).filter((f) => !["README.md", "sdk.ts", "store", "evidence"].includes(f));
+    const extra = readdirSync(d).filter((f) => !["README.md", "sdk.ts", "sdk", "store", "evidence"].includes(f));
     assert.deepEqual(extra, [], `apps/${app} has files outside the pack convention: ${extra.join(", ")}`);
+    if (existsSync(join(d, "sdk"))) assert.ok(existsSync(join(d, "sdk", "index.ts")), `apps/${app}/sdk/ has no index.ts entry`);
   }
 });

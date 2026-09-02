@@ -1,7 +1,7 @@
 // The CLI and the pack convention, as a stranger would run them.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -136,5 +136,17 @@ if (import.meta.main) {
     const wire = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", "act-2-wire.json"), "utf8"));
     assert.equal(wire.action, "act:2"); assert.ok(wire.requests.some((r: any) => r.url.includes("/api/slow?ms=<v>")), JSON.stringify(wire.requests.map((r: any) => r.url)));
     assert.equal(wire.requests[0].req_headers, undefined, "headers never leave the store");
+  });
+  it("an sdk/ folder is the same sdk: exports in any file back a sentence, the data scan names the file, index.ts runs the check", async () => {
+    const pack = join(appsDir, "chk");
+    mkdirSync(join(pack, "sdk"), { recursive: true });
+    renameSync(join(pack, "sdk.ts"), join(pack, "sdk", "index.ts"));
+    writeFileSync(join(pack, "sdk", "charts.ts"), `export const chartId = "0f3c2a1b-1234-4c56-8d9e-a0b1c2d3e4f5";\nexport async function openChart() { return chartId; }\n`);
+    writeFileSync(join(pack, "README.md"), "# chk\n\nThe chart loads (act:2). The chart opens through openChart on every visit. The header is blue on every page of this app.\n");
+    const c = disco("close", "chk");
+    assert.match(c.out, /sentences with neither an act id nor an sdk function behind them: 1, e\.g\. "The header is blue/, c.out);
+    assert.match(c.out, /sdk\/charts\.ts: 1 uuid/, c.out);
+    const r = spawnSync("node", [join(pack, "sdk", "index.ts")], { cwd: root, env: { ...process.env, DISCO_APPS_DIR: appsDir }, encoding: "utf8", timeout: 90000 });
+    assert.equal(r.status, 1, r.stdout + r.stderr); assert.match(r.stdout, /PASS chart loads/);
   });
 });

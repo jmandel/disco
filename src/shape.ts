@@ -31,7 +31,7 @@ export interface Shaper {
   size: number;
 }
 
-/** The pack's own vocabulary: string literals inside `export const vocab = [ … ]` in sdk.ts. */
+/** The pack's own vocabulary: string literals inside `export const vocab = [ … ]` anywhere in the sdk (sdk.ts, or any file under sdk/). */
 export function readVocab(sdkSource: string): Set<string> {
   const m = sdkSource.match(/export\s+const\s+vocab\s*(?::[^=]+)?=\s*\[([\s\S]*?)\]/);
   if (!m) return new Set();

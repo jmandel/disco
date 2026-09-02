@@ -310,8 +310,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
   const wide: string[] = [];
   const ids = [...new Set([...text.matchAll(/\bact:(\d+)(?:\s*[-–]\s*(\d+))?\b/g)].flatMap((m) => { const a = Number(m[1]), b = m[2] ? Number(m[2]) : a; if (b > a + 9) { wide.push(`act:${a}-${b} (${b - a + 1} acts; only the first 10 copied — cite the acts that carry the facts)`); } return b >= a ? Array.from({ length: Math.min(b - a + 1, 10) }, (_, i) => `act:${a + i}`) : [`act:${a}`]; }))];
   const st = openStore(storeDir);
-  const sdkSrc = existsSync(join(packDir, "sdk.ts")) ? readFileSync(join(packDir, "sdk.ts"), "utf8") : "";
-  const shaper = makeShaper({ ...collectValues(st), allow: readVocab(sdkSrc) });
+  const sdk = sdkFiles(packDir);
+  const shaper = makeShaper({ ...collectValues(st), allow: readVocab(sdk.map((f) => f.text).join("\n")) });
   const copied: string[] = [], missing: string[] = []; let present = 0;
   const evPath = (n: string, suffix: string) => join(packDir, "evidence", `act-${n}${suffix}`);
   const evidenceText = (id: string): string | null => {
@@ -352,8 +352,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
     }
     // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
     const unbacked: string[] = [], uncited: string[] = [], bare: string[] = [], absolutes: string[] = [];
-    const sdkPath = join(packDir, "sdk.ts");
-    const exportsRe = existsSync(sdkPath) ? new RegExp(`\\b(${[...readFileSync(sdkPath, "utf8").matchAll(/export\s+(?:async\s+)?(?:function|const|let|class)\s+(\w+)/g)].map((m) => m[1]).filter(Boolean).join("|") || "__none__"})\\b`) : null;
+    const exported = sdk.flatMap((f) => [...f.text.matchAll(/export\s+(?:async\s+)?(?:function|const|let|class)\s+(\w+)/g)].map((m) => m[1]));
+    const exportsRe = sdk.length ? new RegExp(`\\b(${exported.filter(Boolean).join("|") || "__none__"})\\b`) : null;
     // inline code: a single token (`whoAmI()`, `anchors.chart`, `act:12`) stays visible to the lint; longer code (`max: 15000`) is not a claim
     const body = text.replace(/```[\s\S]*?```/g, "").replace(/`([^`\n]*)`/g, (_, c) => (/^\S+$/.test(c) && !/^\d+([.,]\d+)?$/.test(c) ? c : "`code`")).replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "").replace(/^\s*\d+\.\s+/gm, "").replace(/[§#]\s?\d+/g, "");
     for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
@@ -372,12 +372,20 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
     }
     // data that leaked into the prose or the code: the same rules that shape the evidence
     const friction = join(packDir, "..", "..", `friction-${app}.md`);   // an exam's friction log sits two levels up; it must be as clean as the pack
-    const files = [["README.md", join(packDir, "README.md")], ["sdk.ts", join(packDir, "sdk.ts")], [`friction-${app}.md`, friction]].filter(([, p]) => existsSync(p)).map(([name, p]) => ({ name, text: readFileSync(p, "utf8") }));
+    const files = [{ name: "README.md", text }, ...sdk, ...(existsSync(friction) ? [{ name: `friction-${app}.md`, text: readFileSync(friction, "utf8") }] : [])];
     const leaks = shaper.leaks(files);
     return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide, leaks, storeBytes: dirBytes(storeDir), storeDir, app };
   } finally { st.close(); }
 }
 
+/** The pack's sdk: `sdk.ts`, or every .ts file under `sdk/` (index.ts is the entry; the split is the product's own). Names are pack-relative. */
+export function sdkFiles(packDir: string): Array<{ name: string; text: string }> {
+  const out: Array<{ name: string; text: string }> = [];
+  if (existsSync(join(packDir, "sdk.ts"))) out.push({ name: "sdk.ts", text: readFileSync(join(packDir, "sdk.ts"), "utf8") });
+  const walk = (rel: string) => { for (const e of readdirSync(join(packDir, rel), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) { const r = `${rel}/${e.name}`; if (e.isDirectory()) walk(r); else if (/\.ts$/.test(e.name)) out.push({ name: r, text: readFileSync(join(packDir, r), "utf8") }); } };
+  if (existsSync(join(packDir, "sdk"))) walk("sdk");
+  return out;
+}
 function rawBody(st: StoreReader, hash: string): string | null { try { return st.body(hash); } catch { return null; } }
 function safeJson(t: string | null): unknown { if (!t) return t; try { return JSON.parse(t); } catch { return t; } }
 

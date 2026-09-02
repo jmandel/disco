@@ -1,7 +1,7 @@
 # disco
 
-Drive a web app you have never seen and leave behind a pack the next agent can trust. disco is three verbs on
-top of Playwright and one SQLite file:
+Drive a web app you are meeting for the first time — your own, a vendor's sandbox, a demo — and leave behind a pack the
+next agent can trust. disco is three verbs on top of Playwright and one SQLite file:
 
 - **`look`** — the screen: the accessibility tree, a screenshot with numbered marks, and a selector that pastes
   for every control. Or one selector: what it matches, where, and what is really under the pointer.
@@ -11,8 +11,8 @@ top of Playwright and one SQLite file:
 - **`sql`** — the log. Every request with its body, every WebSocket frame, console line, dialog, navigation and
   act, in `apps/<app>/store/store.sqlite`. There is no API in front of it.
 
-It works on a browser disco launched or on one that is already running (`connectOverCDP`), and it never injects
-anything into the page.
+It works on a browser disco launched or on one you launched with a debugging port (`connectOverCDP`), and it adds
+nothing to the page: no scripts, no listeners.
 
 ## The promise
 
@@ -35,7 +35,7 @@ Node ≥ 24 and a Chromium/Chrome binary (`/usr/bin/chromium` is found; otherwis
 
 ```sh
 npm install                                        # playwright-core is the only runtime dependency
-./disco open shop https://example.shop/            # launch Chromium, navigate, record everything until close
+./disco open shop https://example.shop/            # launch Chromium, navigate, log the app's traffic until close
 ./disco look                                       # what is on the screen, numbered; a JPEG path to view
 ./disco act 'page.click("text=Sign in")'           # a bare act: read what happened, copy a proposed until
 ./disco act 'page.fill("#email", "me@x.io")' --quiet 50
@@ -44,8 +44,8 @@ npm install                                        # playwright-core is the only
 ./disco close
 ```
 
-Attach to a browser you started yourself (`chrome --remote-debugging-port=9222 --user-data-dir=/tmp/p`; Chrome ≥ 136
-refuses the default profile): `./disco open shop --attach 9222 --url example.shop`.
+To use a Chrome you launched yourself, start it on a debugging port with a scratch profile (`chrome --remote-debugging-port=9222
+--user-data-dir=/tmp/p`; since Chrome 136 the port is served only for a non-default profile): `./disco open shop --attach 9222 --url example.shop`.
 
 ```ts
 import { open, reached } from "./src/index.ts";
@@ -71,7 +71,7 @@ act ids are unique across runs. `s.page` is the Playwright `Page`; `s.context`, 
 ### `s.act(label, run, { until?, quiet?, max? }) → Report`
 
 `run(page)` is your code — any Playwright call, a `page.evaluate`, several steps. `label` is what the log calls it.
-Your code runs in Node: use `page.evaluate(() => …)` for the DOM, and for a `fetch` that should carry the page's cookies — which is
+Your code runs in Node: use `page.evaluate(() => …)` for the DOM, and for a `fetch` made as the signed-in page — which is
 also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u).then((r) => r.json()), url))` puts the answer in `value` and on the wire.
 
 | Option | Default | Meaning |
@@ -93,7 +93,7 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 | `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`; `static` folds scripts, styles, images, fonts into a count, `thirdParty` folds other sites (telemetry) out of the wire, `writes` and `pending`. `(started earlier)` marks a long-poll that answered you |
 | `pending` | requests started in the window and still in flight when it closed |
 | `writes` | `string[]`: the non-GET app requests in the window, printed as `writes: none` when empty — under a read-only stance, anything else is the signal to stop |
-| `storage` | cookie (HttpOnly included), localStorage and sessionStorage changes — the wire of an app that has no wire |
+| `storage` | cookie, localStorage and sessionStorage keys that changed — the wire of an app that has no wire |
 | `console` · `dialogs` · `pages` · `downloads` · `openPages` | errors and warnings; native dialogs (accepted, recorded); URLs of popups opened; files the page started downloading; pages open afterwards (more than 1 throttles the driven page) |
 | `proposed` | pasteable `until` code for what this act caused: responses with their `+ms`, roles that appeared (with their new state: `selected`, `expanded`, `checked`), the one that left, the url path, a storage key. **Copy one into the SDK.** |
 | `note` | something true that is not a failure: the click landed but the page blocked; a body the page never read; what an already-true or failed until's target looks like now, and what answered just before the act; lines that only moved |
@@ -156,7 +156,7 @@ SELECT t_start, method, path, status FROM requests WHERE action_id IS NULL AND r
 ### `reached(report, what?) → report` · `s.close({ browser? })`
 
 `reached` throws with the diagnosis unless `run` ran and its `until` held (a bare act passes on `ok`), and throws when the `until` was already true.
-`close` disconnects; `{ browser: true }` also kills a browser disco launched (an attached one is only forgotten).
+`close` disconnects; `{ browser: true }` also closes a browser disco launched (an attached one is only forgotten).
 
 ## The pack
 
@@ -164,14 +164,15 @@ SELECT t_start, method, path, status FROM requests WHERE action_id IS NULL AND r
 apps/<app>/
   README.md    the narrative an agent judged worth writing: what the app is, anchors, the wire facts that matter, traps, open questions
   sdk.ts       the app's missing API: typed workflows, reached() on every step, facts read from the server; exports check(s)
+  sdk/         or a folder once one file stops being readable: index.ts is the entry (imports ../../../src/index.ts, runs the check) and re-exports files split by the product's own areas
   evidence/    reports, bodies and shots you copied because README.md cites them (optional)
-  store/       the log (gitignored): bodies, shots, rows — the only place values live; local, and yours to destroy when the pack is done
+  store/       the log (gitignored): bodies, shots, rows — the only place values live; local, and yours to delete when the pack is done
 ```
 
-**The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
+**The rule:** every claim in `README.md` is either backed by a function the sdk exports or cites an act (`act:86`) whose
 report or shot is in `evidence/`; a number without an act id is a guess. Write the README from the evidence files, not from
 memory: a number or a quoted string belongs in a sentence only with the act whose evidence contains it. A fact about a screen —
-an anchor, a selector, what a menu contains — is either an exported constant in `sdk.ts` (refer to it by name) or cites the act
+an anchor, a selector, what a menu contains — is either an exported constant in the sdk (refer to it by name) or cites the act
 that put that screen there: its evidence carries the accessibility tree it left behind. Labels the app itself defines and your pack
 relies on (a visit type, a status, an encounter name) go in `export const vocab = ["Vitals", "Facility Visit"]`: the shaper keeps them
 visible in evidence and the data scan stops asking about them — a person's name never belongs there. When a stance requires
@@ -182,11 +183,11 @@ the docblock above the function, once. Every `close` (a script's or `./disco clo
 behind (`act-N-aria.txt`), with URLs as templates (`/patient/<uuid>?q=<v>`), bodies as skeletons in any wire format (JSON keys and types; XML, SOAP and CDA as element
 trees; HL7 v2 as segments; form posts as keys; HTML fragments as outlines; CSV as columns), storage values
 blanked, no headers, no screenshots, and every string that appears as a value in the app's JSON bodies — or looks like an
-identifier, date, email or token — replaced by `<data>`. A pack is therefore safe to commit from an environment whose data is not
-yours to keep; what it proves is structure and behaviour, and the check re-proves the values live. `close` also names data that
-leaked into README.md or sdk.ts, and
+identifier, date, email or token — replaced by `<data>`. A pack is therefore safe to commit from an environment whose records must stay where they are (a
+customer's system, a clinical sandbox); what it proves is structure and behaviour, and the check re-proves the values live. `close` also names data that
+slipped into README.md or the sdk (every file under `sdk/` counts, for vocab and exports too), and
 prints what it could not back: cites with no report, a number beside a cite that its evidence does not contain, numbers with no cite,
-and sentences with neither a cite nor an sdk function. `./disco close` does this with no browser up, so it is the lint to run after every README edit. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). `sdk.ts` runs its own check:
+and sentences with neither a cite nor an sdk function. `./disco close` does this with no browser up, so it is the lint to run after every README edit. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). The sdk runs its own check:
 
 ```ts
 // apps/shop/sdk.ts
@@ -197,13 +198,13 @@ export const anchors = { login: "#email", account: "[data-test='account-header']
 /** Log in. Precondition: any page. Postcondition: /account. Side effects: none. Verified cold 2026-09-01 (act:14). */
 export async function login(s: Session, user: string, pass: string) {
   reached(await s.act("open login", (p) => p.goto(URL + "login"), { until: () => s.waitFor("nav", (e) => e.url.includes("/login")).then(() => s.page.locator("#email").waitFor()) }));
-  reached(await s.act("credentials", async (p) => { await p.fill("#email", user); await p.fill("#password", pass); }, { quiet: 50 }));
+  reached(await s.act("fill the form", async (p) => { await p.fill("#email", user); await p.fill("#password", pass); }, { quiet: 50 }));
   reached(await s.act("submit", (p) => p.click("#login"), { until: () => s.page.waitForURL((u) => u.pathname.includes("/account")).then(() => s.page.locator(anchors.account).waitFor()) }));
   return s.json("/api/me");
 }
 export async function check(s: Session): Promise<number> {
   let failed = 0;
-  for (const [name, fn] of [["login", () => login(s, "me@x.io", "secret")]] as const) {
+  for (const [name, fn] of [["login", () => login(s, "qa@example.shop", "qa-password")]] as const) {   // the pack's own test account
     try { await fn(); console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}: ${(e as Error).message}`); break; }   // steps share the browser: stop at the first failure instead of paying every later step's max
   }
   return failed;
@@ -221,7 +222,7 @@ had already done.
 
 Look before you guess: `look` shows the controls with selectors that paste, and `look(selector)` tells you what one matches
 before you spend an act on it. Act bare first and read the report — the wire, the diff, the storage line — then copy one of
-its proposed untils into `sdk.ts` and keep it; a proposed until was false before the action, so it can never be already
+its proposed untils into the sdk and keep it; a proposed until was false before the action, so it can never be already
 true. Never write an until you have not seen hold: take it from a bare act's proposals or from a report where it held, not
 from what the endpoint or the screen ought to be called. On a failure read the diagnosis before retrying: it names the cause,
 and retrying the same call is the one thing that never helps. Keep `max` small while probing (1000 is plenty); raise it only
@@ -244,12 +245,12 @@ disco sql <query>
 ```
 
 `--app <name>` on any command (default: the last `open`); `--json` prints data. Exit code 1 when the act failed, its
-`until` did not hold, or was already true. `open` starts a detached recorder, so the log also holds what the page did
+`until` did not hold, or was already true. `open` starts a background recorder process, so the log also holds what the page did
 between commands.
 
 ## The gauntlet and the tests
 
-`gauntlet/` is a deterministic hostile app: concurrent fetches with one slow, a conditional modal, optimistic UI with an
+`gauntlet/` is a deterministic obstacle course of an app: concurrent fetches with one slow, a conditional modal, optimistic UI with an
 async failure toast, perpetual spinners, heartbeats and long-polls, WebSocket/SSE push, a debounced search, virtualised
 rows, a re-render race, iframes, native dialogs, session timeout, a child window, canvas, a keyboard-only combobox, shadow
 DOM, GraphQL, auth, a skeleton table, a cached revisit, stacked panels, styled radios, a submit that blocks the main
@@ -260,6 +261,6 @@ ceilings; `test/budget.test.ts` pins the size of this surface (exports, methods,
 ## What disco is not
 
 No daemon: the browser is the only long-lived process, every client reconnects over CDP. No page instrumentation, which
-is what lets it attach to a browser it did not start. No settlement verdicts: `quiet` is a number you name, and the report
+is what lets it join a browser you launched with a debugging port. No settlement verdicts: `quiet` is a number you name, and the report
 says whether it was reached. No selector language of its own, no predicate language, no action kinds: you write
 Playwright, disco observes. v2 (`git log v2`) had all of those; `DECISIONS.md` says why v4 does not.
