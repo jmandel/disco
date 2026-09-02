@@ -89,7 +89,7 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 | `returned` | `until` · `quiet` · `max` · `error` — why the observation ended |
 | `until` | `{ ok, elapsedMs, alreadyTrue?, error?, value? }` |
 | `diagnosis` | when `run` threw: `reason`, `message`, `selector` (as Playwright named it), `over`, `candidates`, `dialogs`, `shot` |
-| `ui` | `{ added, removed }` lines of the accessibility tree that changed (main frame; iframes appear as nodes) |
+| `ui` | `{ added, removed }` lines of the accessibility tree that changed between the start and the end of the window (main frame; iframes appear as nodes) — a toast that came and went inside the window is not in it; the wire or a shot is |
 | `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`; `static` folds scripts, styles, images, fonts into a count, `thirdParty` folds other sites (telemetry) out of the wire, `writes` and `pending`. `(started earlier)` marks a long-poll that answered you |
 | `pending` | requests started in the window and still in flight when it closed |
 | `writes` | `string[]`: the non-GET app requests in the window, printed as `writes: none` when empty — under a read-only stance, anything else is the signal to stop |
@@ -130,15 +130,16 @@ The next event on the recorder's stream that satisfies `pred`: `"request"` / `"r
 `s.waitFor("nav", e => e.url.includes("/home")).then(() => page.locator("#shell").waitFor())` — false before the goto
 even when you were already there.
 
-### `s.sql(query, …args)` · `s.body(hash)` · `s.json(urlPart, { action?, method? })`
+### `s.sql(query, …args)` · `s.body(hash)` · `await s.json(urlPart, { action?, method? })`
 
 The log. `sql` returns an array of row objects and explains a wrong column with the table's columns. `body` returns a body (or a
 screenshot's bytes) as a string, by hash or 16-char prefix. `json` returns the newest JSON body whose URL path contains `urlPart`,
 scoped to an act and/or a method (`json("/api/save", { action: r.action, method: "POST" })` reads back a write when the app fired
-GETs after it); it waits up to 1 s for a body still arriving, and it **throws** when nothing matched (naming what did answer) or when
-a query-string fragment matches several endpoints — a fact you could not find is never `null`. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
+GETs after it); it waits up to 1 s for a body still arriving, and it **throws** when nothing matched (naming what did answer), when
+a query-string fragment matches several endpoints, or when the newest match answered 4xx/5xx — a fact you could not find is never `null`
+(for the error body itself, `sql` and `body`). Scope `sql` the same way: `WHERE action_id = ?` for one act, `WHERE run = ?` for one browser's life. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
 report as JSON) · `requests` (`id, t_start, t_response, t_end, method, url, path, resource_type, req_headers, req_body,
-status, mime, resp_headers, body_hash, body_size, body_state, action_id`) · `bodies` (+ `bodies_fts`) · `ws_frames` ·
+status, mime, resp_headers, body_hash, body_size, body_state, action_id, run`) · `bodies` (+ `bodies_fts`) · `ws_frames` ·
 `console` · `dialogs` · `nav` · `shots`. `requests` keys on `id`; everything else on `seq` and `t` (ms since the run
 started — restart at every run, so order by `run, t`). `body_state`: `ok | truncated | missing | streaming | error | pending`.
 
@@ -211,7 +212,8 @@ guesses. When a fact travels on the wire, read it from the log (`json`, `sql`) r
 re-reading the server, not the toast. Start every workflow by asserting its anchor and skipping the navigation when already
 there (`if (!(await s.look(anchor)).count) reached(await s.act("go", …))`), end it where you found the app, and run the check
 cold before you write a sentence about it. Before you write the pack, run `npm run stats -- <app>`: an expired budget above
-10 s means your untils were guesses — fix the method, not the numbers.
+10 s in its *failed untils* share means your untils were guesses — fix the method, not the numbers (deliberate probes that fail
+are counted separately, as failed acts).
 
 ## CLI
 
@@ -233,7 +235,7 @@ between commands.
 async failure toast, perpetual spinners, heartbeats and long-polls, WebSocket/SSE push, a debounced search, virtualised
 rows, a re-render race, iframes, native dialogs, session timeout, a child window, canvas, a keyboard-only combobox, shadow
 DOM, GraphQL, auth, a skeleton table, a cached revisit, stacked panels, styled radios, a submit that blocks the main
-thread, and a 10,000-row page. `bun gauntlet` serves it on :4800. `gauntlet/scenarios.md` is the answer key — an agent
+thread, and a 10,000-row page. `bun gauntlet` serves it on :4800 and a second origin on :4801 (`--port N` takes N and N+1). `gauntlet/scenarios.md` is the answer key — an agent
 characterising it from this README alone leaves it closed. `npm test` starts it and pins the promise table with timing
 ceilings; `test/budget.test.ts` pins the size of this surface (exports, methods, options, commands, this file's length).
 

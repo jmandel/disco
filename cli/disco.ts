@@ -134,6 +134,7 @@ async function main() { switch (cmd) {
     const call = async (page: unknown, s: Session) => { const v = await run(page, s); return typeof v === "function" ? await (v as (...a: unknown[]) => unknown)(page, s) : v; };
     const r = await withSession((s) => s.act((args.label as string) ?? src.slice(0, 70), (page) => call(page, s), { until: until ? () => Promise.resolve(until!(s.page, s)) : undefined, quiet: num(args.quiet), max: num(args.max) }));
     console.log(json ? JSON.stringify(r, null, 2) : String(r));
+    if (!json && r.ok && r.value === undefined && /;|\n/.test(src) && !/\breturn\b/.test(src)) console.log("  (no value: statements need an explicit return; a single expression is returned by itself)");
     if (!r.ok || (r.until && (!r.until.ok || r.until.alreadyTrue))) process.exit(1);
     break;
   }

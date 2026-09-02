@@ -315,7 +315,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
     }
     // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
     const unbacked: string[] = [], uncited: string[] = [];
-    const body = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "`code`").replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "");
+    const body = text.replace(/```[\s\S]*?```/g, "").replace(/`([^`\n]*)`/g, (_, c) => (/^act:\d+$/.test(c) ? c : "`code`")).replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "").replace(/^\s*\d+\.\s+/gm, "").replace(/[§#]\s?\d+/g, "");
     for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
       const sentence = raw.replace(/\s+/g, " ").trim(); if (!sentence) continue;
       const cites = [...new Set([...sentence.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];

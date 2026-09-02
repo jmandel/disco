@@ -171,6 +171,8 @@ export class Session {
   /** Disconnect. `{ browser: true }` also kills a browser disco launched (an attached one is only forgotten). A script that never closes never exits.
    *  Also copies the report of every act the pack's README cites into evidence/ (once). */
   async close(o: { browser?: boolean } = {}): Promise<void> {
+    // a response still on its way (the act's until held before its bodies landed) gets up to a second before the rows are called stranded
+    if (this.#recording) { const t0 = Date.now(); while (Date.now() - t0 < 1000 && (this.#store.get<{ n: number }>("SELECT count(*) n FROM requests WHERE run=? AND status IS NULL AND t_end IS NULL AND t_start > ?", this.#store.run, this.#store.now() - 5000)?.n ?? 0) > 0) await sleep(100); }
     await this.#recorder.flush(500);
     this.#recorder.detach();
     try { syncEvidence(this.dir, this.#store.dir); } catch {}

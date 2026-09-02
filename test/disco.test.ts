@@ -442,6 +442,24 @@ describe("exam B fold-backs", () => {
     const fn = new Function("page", `return (${p!.code})`)(s.page) as () => Promise<unknown>;
     await fn();
   });
+  it("look lists test-id elements as values; close waits for a response still in flight", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<span id=\"tl\" data-test=\"total-label\">Total: $32.39</span>')");
+    const l = await s.look();
+    const v = l.controls!.find((c) => c.selector === '[data-test="total-label"]');
+    assert.equal(v?.role, "value"); assert.match(v?.name ?? "", /32\.39/);
+    await s.page.evaluate("document.getElementById('tl').remove()");
+    await g.ctl.set({ slowMs: 700 });
+    const { openStore, appStoreDir } = await import("../src/store.ts");
+    try {
+      const s3 = await open("t3", { url: g.origin, appsDir });
+      const r = await s3.act("slow", (p) => p.click("#load-chart"), { max: 300 });
+      await s3.close({ browser: true });
+      const st = openStore(appStoreDir("t3", appsDir));
+      const row = st.sql<{ status: number | null; body_state: string }>("SELECT status, body_state FROM requests WHERE action_id=? AND url LIKE '%/api/slow%'", r.action)[0];
+      st.close();
+      assert.equal(row?.status, 200, `close waited for the response: ${JSON.stringify(row)}`);
+    } finally { await g.ctl.reset(); }
+  });
   it("look marks off-canvas controls; a download shows in the report", async () => {
     await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"offc\" style=\"position:absolute;left:-600px;top:100px\">parked</button>')");
     const l = await s.look();

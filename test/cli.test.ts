@@ -113,11 +113,11 @@ if (import.meta.main) {
     assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose: nope \(act:\d+\): not-found/);
     // the pack rule is mechanical: close copies cited reports into evidence/ and names cites with nothing behind them
     const failedId = out.match(/nope \((act:\d+)\)/)![1];
-    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (act:2). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step.\n`);
+    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (\`act:2\`). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step. See §17 for more.\n\n1. A numbered list item is not a claim by its marker.\n`);
     const c = disco("close", "chk");
     assert.match(c.out, /evidence: README cites 3 acts; copied 2 new/); assert.match(c.out, /NO REPORT for act:999/);
     assert.match(c.out, /claim check: act:2 is cited for 4242 but its evidence does not contain it/);
-    assert.match(c.out, /uncited numbers .*: 1 sentence, e\.g\. "Six products cost 9999 in total\."/);
+    assert.match(c.out, /uncited numbers .*: 1 sentence, e\.g\. "Six products cost 9999 in total\."/);   // §17, the list marker and the backticked act:2 are not uncited claims
     const ev = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.json`), "utf8"));
     assert.equal(ev.action, failedId); assert.equal(ev.diagnosis.reason, "not-found");
     assert.ok(existsSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.jpg`)), "the diagnosis shot is copied too");

@@ -30,7 +30,7 @@ export interface Look {
 }
 export interface LookCtx { page: Page; context: BrowserContext; store: Store; recorder: Recorder; current: () => string | null }
 
-const CONTROLS = 'button,a,input,select,textarea,summary,[contenteditable],[tabindex],[onclick],[draggable="true"],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[role="textbox"],[role="searchbox"],[role="slider"],[role="spinbutton"],[role="treeitem"]';
+const CONTROLS = 'button,a,input,select,textarea,summary,[contenteditable],[tabindex],[onclick],[draggable="true"],[data-test],[data-testid],[data-cy],[data-qa],[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"],[role="textbox"],[role="searchbox"],[role="slider"],[role="spinbutton"],[role="treeitem"]';
 
 /** Runs in the page: every visible interactive control with what look needs to name it and to build a durable selector. */
 function pageControls(_el: Element, sel: string) {
@@ -56,7 +56,7 @@ function pageControls(_el: Element, sel: string) {
   };
   const roleOf = (h: HTMLElement) => {
     const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase();
-    return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" || type === "reset" ? "button" : type === "range" ? "slider" : type === "number" ? "spinbutton" : type === "search" ? "searchbox" : "textbox") : h.isContentEditable ? "textbox" : h.getAttribute("draggable") === "true" ? "draggable" : "clickable");
+    return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" || type === "reset" ? "button" : type === "range" ? "slider" : type === "number" ? "spinbutton" : type === "search" ? "searchbox" : "textbox") : h.isContentEditable ? "textbox" : h.getAttribute("draggable") === "true" ? "draggable" : h.hasAttribute("onclick") || h.hasAttribute("tabindex") ? "clickable" : "value");   // "value": a test-id element that shows text, not a control
   };
   // walk open shadow roots too: a button inside a web component is a control like any other
   const collect = (root: Document | ShadowRoot | Element, out: Element[]) => {
