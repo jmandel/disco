@@ -25,8 +25,8 @@ describe("cli", () => {
     assert.match(o.out, /run 1/); assert.match(o.out, /navigated to|joined at/); assert.match(o.out, /recording: pid \d+/);
     const flag = disco("sql", "--json", "SELECT 1 n");
     assert.equal(flag.code, 0, flag.out); assert.equal(JSON.parse(flag.stdout)[0].n, 1);
-    const long = disco("act", 'page.evaluate(() => "x".repeat(1000))');
-    assert.match(long.out, /clipped, 1000 chars/);
+    const long = disco("act", 'page.evaluate(() => "x".repeat(2000))');
+    assert.match(long.out, /clipped, 2000 chars/);
     // the detached recorder captures what the page does BETWEEN commands
     const armed = disco("act", 'page.evaluate(() => { setTimeout(() => fetch("/api/chart/b"), 700); return "armed"; })', "--quiet", "50");
     assert.equal(armed.code, 0, armed.out); assert.match(armed.out, /value: armed/);
@@ -111,12 +111,16 @@ if (import.meta.main) {
     const r = spawnSync("node", [join(appsDir, "chk", "sdk.ts")], { cwd: root, env: { ...process.env, DISCO_APPS_DIR: appsDir }, encoding: "utf8", timeout: 90000 });
     const out = r.stdout + r.stderr;
     assert.equal(r.status, 1, out);
+    // a second run, now with a README present: the script's own close prints the evidence summary
+    writeFileSync(join(appsDir, "chk", "README.md"), "# chk\n\nThe chart loads (act:2). A wide range (act:1-40) is a check run, not a cite.\n");
+    const r2 = spawnSync("node", [join(appsDir, "chk", "sdk.ts")], { cwd: root, env: { ...process.env, DISCO_APPS_DIR: appsDir }, encoding: "utf8", timeout: 90000 });
+    assert.match(r2.stderr, /evidence: README cites 10 acts/); assert.match(r2.stderr, /wide range: act:1-40 \(40 acts; only the first 10 copied/);
     assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose: nope \(act:\d+\): not-found/);
     // the pack rule is mechanical: close copies cited reports into evidence/ and names cites with nothing behind them
     const failedId = out.match(/nope \((act:\d+)\)/)![1];
     writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (\`act:2\`). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step. See §17 for more. The first two acts are the whole warm-up (act:1-2). The application is a single page whose header never changes between screens. The shell anchor is \`anchors.chart\` and it is visible on every screen of this app.\n\n1. A numbered list item is not a claim by its marker.\n`);
     const c = disco("close", "chk");
-    assert.match(c.out, /evidence: README cites 4 acts; copied 3 new/); assert.match(c.out, /NO REPORT for act:999/);
+    assert.match(c.out, /evidence: README cites 4 acts; .*3 already there/); assert.match(c.out, /NO REPORT for act:999/);   // the script's second run already copied them
     assert.match(c.out, /sentences with neither an act id nor an sdk function behind them: 2, e\.g\. "The application is a single page/);   // the list item is the second
     const wire2 = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", "act-2-wire.json"), "utf8"));
     assert.ok(wire2.requests.some((r: any) => r.url.includes("/api/slow") && r.response_body && typeof r.response_body.ms === "number"), "read bodies travel with the evidence");

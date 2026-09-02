@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { open, type Session } from "../src/session.ts";
 import { formatLook } from "../src/format.ts";
-import { appsRoot, appStoreDir, appDir, openStore, syncEvidence } from "../src/store.ts";
+import { appsRoot, appStoreDir, appDir, openStore, syncEvidence, formatEvidence } from "../src/store.ts";
 import { readBrowserInfo, killLaunched, writeBrowserInfo, isAlive, pidAlive } from "../src/browser.ts";
 
 const HELP = `disco — drive a web app you have never seen; everything it does lands in a SQLite log.
@@ -110,13 +110,7 @@ async function main() { switch (cmd) {
       try { const st = openStore(dir, { readonly: false }); st.db.prepare("UPDATE runs SET ended_wall=? WHERE ended_wall IS NULL").run(new Date().toISOString()); st.close(); } catch {}
     }
     console.log(`${app}: ${!info ? "no browser" : info.mode === "launch" ? "browser killed" : "detached"} (the log stays; ${app} remains the default app)`);
-    try {
-      const ev = syncEvidence(appDir(app), dir);
-      if (ev.cited) console.log(`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} new to apps/${app}/evidence/` : "nothing new to copy"}${ev.present ? `, ${ev.present} already there` : ""}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`);
-      for (const u of ev.unbacked) console.log(`  claim check: ${u}`);
-      if (ev.uncited.length) console.log(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
-      if (ev.bare.length) console.log(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
-    } catch {}
+    try { for (const line of formatEvidence(syncEvidence(appDir(app), dir), app)) console.log(line); } catch {}
     break;
   }
   case "look": {

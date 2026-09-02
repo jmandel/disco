@@ -278,12 +278,25 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[] } {
+export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; wide: string[] };
+/** The summary as `close` prints it (the CLI's and a script's alike). */
+export function formatEvidence(ev: EvidenceSummary, app: string): string[] {
+  if (!ev.cited) return [];
+  const L = [`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} new to apps/${app}/evidence/` : "nothing new to copy"}${ev.present ? `, ${ev.present} already there` : ""}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`];
+  for (const w of ev.wide) L.push(`  wide range: ${w}`);
+  for (const u of ev.unbacked) L.push(`  claim check: ${u}`);
+  if (ev.uncited.length) L.push(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
+  if (ev.bare.length) L.push(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
+  return L;
+}
+export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary {
   const readme = join(packDir, "README.md");
-  const none = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [] };
+  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], wide: [] };
   if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
   const text = readFileSync(readme, "utf8");
-  const ids = [...new Set([...text.matchAll(/\bact:(\d+)(?:\s*[-–]\s*(\d+))?\b/g)].flatMap((m) => { const a = Number(m[1]), b = m[2] ? Number(m[2]) : a; return b >= a && b - a <= 50 ? Array.from({ length: b - a + 1 }, (_, i) => `act:${a + i}`) : [`act:${a}`]; }))];
+  // a range copies each act; a long one is a check run, not a citation — cap it and say so
+  const wide: string[] = [];
+  const ids = [...new Set([...text.matchAll(/\bact:(\d+)(?:\s*[-–]\s*(\d+))?\b/g)].flatMap((m) => { const a = Number(m[1]), b = m[2] ? Number(m[2]) : a; if (b > a + 9) { wide.push(`act:${a}-${b} (${b - a + 1} acts; only the first 10 copied — cite the acts that carry the facts)`); } return b >= a ? Array.from({ length: Math.min(b - a + 1, 10) }, (_, i) => `act:${a + i}`) : [`act:${a}`]; }))];
   const st = openStore(storeDir);
   const copied: string[] = [], missing: string[] = []; let present = 0;
   const evidenceText = (id: string): string | null => {
@@ -334,7 +347,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       if (!texts.length) continue;
       for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
     }
-    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare };
+    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, wide };
   } finally { st.close(); }
 }
 

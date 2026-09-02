@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
-import { Store, appStoreDir, appDir, appsRoot, openStore, syncEvidence, type StoreReader } from "./store.ts";
+import { Store, appStoreDir, appDir, appsRoot, openStore, syncEvidence, formatEvidence, type StoreReader } from "./store.ts";
 import { attachRecorder, type Recorder, type EventKind, type Events } from "./record.ts";
 import { readBrowserInfo, writeBrowserInfo, isAlive, launchChromium, attachEndpoint, connect, killLaunched, pidAlive, type BrowserInfo } from "./browser.ts";
 import { lookAt, controls, inspect, dialogCensus, locatorFromDescription, type Look, type LookCtx } from "./look.ts";
@@ -177,7 +177,8 @@ export class Session {
     if (this.#recording) { const t0 = Date.now(); while (Date.now() - t0 < 1000 && (this.#store.get<{ n: number }>("SELECT count(*) n FROM requests WHERE run=? AND status IS NULL AND t_end IS NULL AND t_start > ?", this.#store.run, this.#store.now() - 5000)?.n ?? 0) > 0) await sleep(100); }
     await this.#recorder.flush(500);
     this.#recorder.detach();
-    try { syncEvidence(this.dir, this.#store.dir); } catch {}
+    // a script's close prints the same evidence and claim check as `disco close` (to stderr, so a script's own output stays clean)
+    try { for (const line of formatEvidence(syncEvidence(this.dir, this.#store.dir), this.app)) process.stderr.write(line + "\n"); } catch {}
     if (this.#recording) {
       this.#store.update("requests", { body_state: "missing", error: "body not read by the page (session closed)" }, "run=? AND body_state='pending' AND status IS NOT NULL", [this.#store.run]);
       // a request still unanswered when the recording session ends can never be completed by anyone: say so instead of "pending"

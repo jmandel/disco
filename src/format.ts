@@ -36,7 +36,7 @@ export function formatReport(r: Report): string {
     const hidden = Math.max(0, r.ui.added.length - 25) + Math.max(0, r.ui.removed.length - 10) + (r.ui.more ?? 0);
     if (hidden) L.push(`    … ${hidden} more (report.ui has them all)`);
   }
-  if ("value" in r && r.value !== undefined) { const v = typeof r.value === "string" ? r.value : JSON.stringify(r.value) ?? ""; L.push("  value: " + (v.length > 400 ? v.slice(0, 400) + `… (clipped, ${v.length} chars — --json or report.value for all of it)` : v)); }
+  if ("value" in r && r.value !== undefined) { const v = typeof r.value === "string" ? r.value : JSON.stringify(r.value) ?? ""; L.push("  value: " + (v.length > 1200 ? v.slice(0, 1200) + `… (clipped, ${v.length} chars — --json or report.value for all of it)` : v)); }
   return L.join("\n");
 }
 
