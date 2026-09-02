@@ -172,7 +172,9 @@ apps/<app>/
 report or shot is in `evidence/`; a number without an act id is a guess. Write the README from the evidence files, not from
 memory: a number or a quoted string belongs in a sentence only with the act whose evidence contains it. A fact about a screen —
 an anchor, a selector, what a menu contains — is either an exported constant in `sdk.ts` (refer to it by name) or cites the act
-that put that screen there: its evidence carries the accessibility tree it left behind. When a stance requires
+that put that screen there: its evidence carries the accessibility tree it left behind. Labels the app itself defines and your pack
+relies on (a visit type, a status, an encounter name) go in `export const vocab = ["Vitals", "Facility Visit"]`: the shaper keeps them
+visible in evidence and the data scan stops asking about them — a person's name never belongs there. When a stance requires
 a marker and a record has no free-text field for it, the marker goes in the parent record or an attached note — the workflow is
 not skipped. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
 the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites (`act:12`, or a range `act:12-15`) into

@@ -11,6 +11,15 @@ test("a value under a name-like key is data even when a bundle contains the word
   assert.equal(sh2.isData("nini"), true); assert.equal(sh2.isData("Female"), false);
   assert.equal(sh2.aria('- link "nini":\n- radio "Female"'), '- link "<data>":\n- radio "Female"');
 });
+test("the pack's own vocab allowlist keeps labels visible; truncated uuids and long ids are still blanked", async () => {
+  const { readVocab } = await import("../src/shape.ts");
+  const allow = readVocab('export const anchors = {};\nexport const vocab = ["Vitals", "Facility Visit", `Active Visit`];\nexport function x() {}');
+  assert.deepEqual([...allow].sort(), ["active visit", "facility visit", "vitals"]);
+  const sh4 = makeShaper({ values: new Set(["vitals", "facility visit", "barbara miller"]), vocab: new Set(), strong: new Set(["vitals", "facility visit", "barbara miller"]), allow });
+  assert.equal(sh4.aria('- heading "Vitals"\n- radio "Facility Visit"\n- heading "Barbara Miller"'), '- heading "Vitals"\n- radio "Facility Visit"\n- heading "<data>"');
+  assert.equal(sh4.leaks([{ name: "README.md", text: "Start a Facility Visit; Vitals need it. Barbara Miller is the demo patient." }])[0].includes("Facility Visit"), false);
+  assert.equal(sh4.text("patient 755ef0bd… and concept 121375AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA and hash 311c996db00785ef"), "patient <hex>… and concept <id> and hash <hex>");
+});
 test("prose scan: reference data that recurs across bodies is not reported; a record's value is", () => {
   const sh3 = makeShaper({ values: new Set(["facility visit", "barbara miller"]), vocab: new Set(), strong: new Set(["facility visit", "barbara miller"]), counts: new Map([["facility visit", 12], ["barbara miller", 2]]) });
   const out = sh3.leaks([{ name: "README.md", text: "Start a Facility Visit for Barbara Miller." }]);

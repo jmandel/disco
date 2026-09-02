@@ -4,7 +4,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { makeShaper, collectValues } from "./shape.ts";
+import { makeShaper, collectValues, readVocab } from "./shape.ts";
 import { join } from "node:path";
 
 export const STORE_VERSION = 5;
@@ -310,7 +310,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
   const wide: string[] = [];
   const ids = [...new Set([...text.matchAll(/\bact:(\d+)(?:\s*[-–]\s*(\d+))?\b/g)].flatMap((m) => { const a = Number(m[1]), b = m[2] ? Number(m[2]) : a; if (b > a + 9) { wide.push(`act:${a}-${b} (${b - a + 1} acts; only the first 10 copied — cite the acts that carry the facts)`); } return b >= a ? Array.from({ length: Math.min(b - a + 1, 10) }, (_, i) => `act:${a + i}`) : [`act:${a}`]; }))];
   const st = openStore(storeDir);
-  const shaper = makeShaper(collectValues(st));
+  const sdkSrc = existsSync(join(packDir, "sdk.ts")) ? readFileSync(join(packDir, "sdk.ts"), "utf8") : "";
+  const shaper = makeShaper({ ...collectValues(st), allow: readVocab(sdkSrc) });
   const copied: string[] = [], missing: string[] = []; let present = 0;
   const evPath = (n: string, suffix: string) => join(packDir, "evidence", `act-${n}${suffix}`);
   const evidenceText = (id: string): string | null => {

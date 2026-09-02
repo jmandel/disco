@@ -7,10 +7,12 @@ const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g
 const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
 const DATE = /\b(?:\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4})\b/g;
 const LONGNUM = /(?<![\w.])\d{5,}(?![\w.])/g;                        // identifiers, phone numbers, epoch stamps; status codes and small counts survive
-const TOKEN = /\b(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{24,}\b/g;   // mixed-case ≥ 24: session ids, JWTs (our lowercase hex hashes are not tokens)
+const TOKEN = /\b(?=[A-Za-z0-9_-]*[A-Z])(?=[A-Za-z0-9_-]*[a-z])[A-Za-z0-9_-]{24,}\b/g;   // mixed-case ≥ 24: session ids, JWTs
+const HEX = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{8,}\b/gi;                  // needs a letter, so a plain number stays a <number>                                     // a truncated uuid ("755ef0bd…"), a hash prefix — still an identifier
+const LONGID = /\b[A-Za-z0-9]{32,}\b/g;                               // concept ids and other long opaque keys
 
 function patterns(s: string): string {
-  return s.replace(UUID, "<uuid>").replace(EMAIL, "<email>").replace(DATE, "<date>").replace(TOKEN, "<token>").replace(LONGNUM, "<number>");
+  return s.replace(UUID, "<uuid>").replace(EMAIL, "<email>").replace(DATE, "<date>").replace(TOKEN, "<token>").replace(LONGID, "<id>").replace(HEX, "<hex>").replace(LONGNUM, "<number>");
 }
 const strip = (w: string) => w.replace(/^[("'\[{<]+|[)"',.;:!?\]}>]+$/g, "");
 
@@ -26,6 +28,13 @@ export interface Shaper {
   leaks(files: Array<{ name: string; text: string }>): string[];
   /** how many values the data set holds (0 means the app showed no JSON — shaping then rests on the patterns alone) */
   size: number;
+}
+
+/** The pack's own vocabulary: string literals inside `export const vocab = [ … ]` in sdk.ts. */
+export function readVocab(sdkSource: string): Set<string> {
+  const m = sdkSource.match(/export\s+const\s+vocab\s*(?::[^=]+)?=\s*\[([\s\S]*?)\]/);
+  if (!m) return new Set();
+  return new Set([...m[1].matchAll(/["'`]((?:[^"'`\\]|\\.)*)["'`]/g)].map((x) => x[1].trim().toLowerCase()).filter(Boolean));
 }
 
 /** What the run says is data: string leaves of its JSON API bodies. And what is vocabulary: every word that occurs in the app's
@@ -51,16 +60,18 @@ export function collectValues(st: StoreReader, limit = 2000): { values: Set<stri
   return { values, vocab, strong, counts };
 }
 
-export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; strong?: Set<string>; counts?: Map<string, number> } | Set<string>): Shaper {
+export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; strong?: Set<string>; counts?: Map<string, number>; allow?: Set<string> } | Set<string>): Shaper {
   const values = sets instanceof Set ? sets : sets.values;
   const vocab = sets instanceof Set ? new Set<string>() : sets.vocab;
   const strong = sets instanceof Set ? new Set<string>() : (sets.strong ?? new Set<string>());
   const counts = sets instanceof Set ? new Map<string, number>() : (sets.counts ?? new Map<string, number>());
+  // the pack's own allowlist: `export const vocab = ["Vitals", "Facility Visit", …]` in sdk.ts — labels the author vouches for, kept visible everywhere
+  const allow = sets instanceof Set ? new Set<string>() : (sets.allow ?? new Set<string>());
   // reference data — a visit type, an encounter type, a concept — recurs across many bodies; a record's own values do not. Evidence still blanks it; prose is not nagged about it.
   const isReference = (p: string) => (counts.get(strip(p).trim().toLowerCase()) ?? 0) >= 5;
   // a value whose every word the app ships itself is a label, not a record ("outpatient clinic", "patient"); a name is not in any bundle
   const isLabel = (p: string) => { const words = p.toLowerCase().match(/[a-z][a-z'-]*/g) ?? []; return words.length > 0 && words.every((w) => vocab.has(w)); };
-  const isData = (p: string) => { const q = strip(p).trim().toLowerCase(); return strong.has(q) || (values.has(q) && !isLabel(q)); };
+  const isData = (p: string) => { const q = strip(p).trim().toLowerCase(); if (allow.has(q)) return false; return strong.has(q) || (values.has(q) && !isLabel(q)); };
   const text = (s: string): string => {
     if (!s) return s;
     const words = patterns(s).split(/(\s+)/);   // keep the whitespace tokens
@@ -111,6 +122,8 @@ export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; stro
     return String(typeof v);
   };
   const aria = (t: string): string => t.split("\n").map((line) => {
+    // an allowlisted label may be part of a name ("Active Visit"): keep such a name whole
+    
     const m = line.match(/^(\s*-\s+)([a-z]+)(\s+"(?:[^"\\]|\\.)*")?((?:\s*\[[^\]]*\])*)\s*(:\s*(.*))?$/);
     if (!m) return text(line);
     const [, lead, role, quoted, attrs, colon, rest] = m;
