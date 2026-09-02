@@ -278,7 +278,7 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; wide: string[] };
+export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; absolutes: string[]; wide: string[] };
 /** The summary as `close` prints it (the CLI's and a script's alike). */
 export function formatEvidence(ev: EvidenceSummary, app: string): string[] {
   if (!ev.cited) return [];
@@ -286,12 +286,13 @@ export function formatEvidence(ev: EvidenceSummary, app: string): string[] {
   for (const w of ev.wide) L.push(`  wide range: ${w}`);
   for (const u of ev.unbacked) L.push(`  claim check: ${u}`);
   if (ev.uncited.length) L.push(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
+  if (ev.absolutes.length) L.push(`  absolutes with nothing behind them (only / never / always / identical / exactly — the claims most often wrong): ${ev.absolutes.length}${ev.absolutes.length >= 8 ? "+" : ""}, e.g. "${ev.absolutes[0]}"`);
   if (ev.bare.length) L.push(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
   return L;
 }
 export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary {
   const readme = join(packDir, "README.md");
-  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], wide: [] };
+  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], absolutes: [], wide: [] };
   if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
   const text = readFileSync(readme, "utf8");
   // a range copies each act; a long one is a check run, not a citation — cap it and say so
@@ -331,7 +332,7 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
       copied.push(id);
     }
     // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
-    const unbacked: string[] = [], uncited: string[] = [], bare: string[] = [];
+    const unbacked: string[] = [], uncited: string[] = [], bare: string[] = [], absolutes: string[] = [];
     const sdkPath = join(packDir, "sdk.ts");
     const exportsRe = existsSync(sdkPath) ? new RegExp(`\\b(${[...readFileSync(sdkPath, "utf8").matchAll(/export\s+(?:async\s+)?(?:function|const|let|class)\s+(\w+)/g)].map((m) => m[1]).filter(Boolean).join("|") || "__none__"})\\b`) : null;
     // inline code: a single token (`whoAmI()`, `anchors.chart`, `act:12`) stays visible to the lint; longer code (`max: 15000`) is not a claim
@@ -339,7 +340,10 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
     for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
       const sentence = raw.replace(/\s+/g, " ").trim(); if (!sentence) continue;
       const cites = [...new Set([...sentence.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
-      if (!cites.length && !(exportsRe && exportsRe.test(sentence)) && sentence.length > 40 && !/^(open question|todo|not (yet )?(verified|tested|driven))/i.test(sentence) && bare.length < 8) bare.push(sentence.slice(0, 90));
+      const backed = cites.length > 0 || (exportsRe && exportsRe.test(sentence));
+      if (!backed && sentence.length > 40 && !/^(open question|todo|not (yet )?(verified|tested|driven))/i.test(sentence) && bare.length < 8) bare.push(sentence.slice(0, 90));
+      // an absolute is the claim most often wrong in a pack ("only", "never", "identical"): it needs an act or a function behind it
+      if (!backed && /\b(only|never|always|every|exactly|identical|none of|no other|nothing else|the only)\b/i.test(sentence) && absolutes.length < 8) absolutes.push(sentence.slice(0, 90));
       const numbers = [...sentence.replace(/\bact:\d+\b/g, "").matchAll(/(?<![\w.\/#-])\d{2,}(?:[.,]\d+)?(?![\w\/-])/g)].map((m) => m[0]);
       if (!numbers.length) continue;
       if (!cites.length) { if (uncited.length < 8) uncited.push(sentence.slice(0, 90)); continue; }
@@ -347,7 +351,7 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
       if (!texts.length) continue;
       for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
     }
-    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, wide };
+    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide };
   } finally { st.close(); }
 }
 
