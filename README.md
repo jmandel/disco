@@ -164,7 +164,10 @@ apps/<app>/
 ```
 
 **The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
-report or shot is in `evidence/`; a number without an act id is a guess. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
+report or shot is in `evidence/`; a number without an act id is a guess. Write the README from the evidence files, not from
+memory: a number or a quoted string belongs in a sentence only with the act whose evidence contains it. When a stance requires
+a marker and a record has no free-text field for it, the marker goes in the parent record or an attached note — the workflow is
+not skipped. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
 the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites into `evidence/`: the report
 (`act-N.json`), its shot, and its wire (`act-N-wire.json`: requests with write bodies, navigations) — and names the cites that have no report behind them. `sdk.ts` runs its own check:
 
@@ -200,11 +203,15 @@ had already done.
 Look before you guess: `look` shows the controls with selectors that paste, and `look(selector)` tells you what one matches
 before you spend an act on it. Act bare first and read the report — the wire, the diff, the storage line — then copy one of
 its proposed untils into `sdk.ts` and keep it; a proposed until was false before the action, so it can never be already
-true. On a failure read the diagnosis before retrying: it names the cause, and retrying the same call is the one thing that
-never helps. Keep `max` small while probing (1000 is plenty) and never raise it to hide a wrong until. When a fact travels
-on the wire, read it from the log (`json`, `sql`) rather than off the screen; verify a write by re-reading the server, not
-the toast. Start every workflow from an anchor, end it where you found the app, and run the check cold before you write a
-sentence about it.
+true. Never write an until you have not seen hold: take it from a bare act's proposals or from a report where it held, not
+from what the endpoint or the screen ought to be called. On a failure read the diagnosis before retrying: it names the cause,
+and retrying the same call is the one thing that never helps. Keep `max` small while probing (1000 is plenty); raise it only
+on the one act you watched exceed it, inline, with the measurement in a comment — a pack-wide `max` is compensation for
+guesses. When a fact travels on the wire, read it from the log (`json`, `sql`) rather than off the screen; verify a write by
+re-reading the server, not the toast. Start every workflow by asserting its anchor and skipping the navigation when already
+there (`if (!(await s.look(anchor)).count) reached(await s.act("go", …))`), end it where you found the app, and run the check
+cold before you write a sentence about it. Before you write the pack, run `npm run stats -- <app>`: an expired budget above
+10 s means your untils were guesses — fix the method, not the numbers.
 
 ## CLI
 
