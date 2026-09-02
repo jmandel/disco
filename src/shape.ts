@@ -155,7 +155,6 @@ export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; stro
     if (r.ui) out.ui = { ...r.ui, added: (r.ui.added ?? []).map((l: string) => aria(l)), removed: (r.ui.removed ?? []).map((l: string) => aria(l)) };
     if (Array.isArray(r.requests)) out.requests = r.requests.map((w: any) => ({ ...w, path: url("http://x" + (w.path?.startsWith("/") ? w.path : "/" + w.path)).replace(/^http:\/\/x/, "") }));
     if (Array.isArray(r.pending)) out.pending = r.pending.map((p: string) => text(p.replace(/(\S+)\s+(\S+)/, (_, m1, p1) => `${m1} ${url("http://x" + p1).replace(/^http:\/\/x/, "")}`)));
-    if (Array.isArray(r.writes)) out.writes = r.writes.map((w: string) => w.replace(/^(\S+)\s+(\S+)/, (_, m1, p1) => `${m1} ${url("http://x" + p1).replace(/^http:\/\/x/, "")}`));
     if (r.storage) out.storage = Object.fromEntries(Object.entries(r.storage).map(([k, v]) => [k, (v as string[]).map((line) => line.replace(/^([+-]?[^=:]+)(=|: ).*$/, "$1$2<value>"))]));
     if (Array.isArray(r.console)) out.console = r.console.map((c: any) => ({ ...c, text: text(c.text ?? "") }));
     if (Array.isArray(r.dialogs)) out.dialogs = r.dialogs.map((d: any) => ({ ...d, message: d.message == null ? d.message : text(d.message) }));

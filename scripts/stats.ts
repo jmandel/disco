@@ -22,13 +22,13 @@ interface RunStats {
   /** seconds spent in quiet observation of bare acts */
   quietS: number;
   reportMsAvg: number; reportMsMax: number;
-  writes: number; clean: boolean;
+  clean: boolean;
 }
 const out: RunStats[] = [];
 for (const r of runs) {
   if (onlyRun && r.run !== Number(onlyRun)) continue;
   const mine = acts.filter((a) => a.run === r.run);
-  const s: RunStats = { run: r.run, started: r.started_wall, ended: r.ended_wall, wallMin: 0, acts: mine.length, failed: 0, withUntil: 0, bare: 0, untilFailed: 0, alreadyTrue: 0, returned: {}, diagnoses: {}, expiredS: 0, untilFailedS: 0, actFailedS: 0, bareMaxS: 0, quietS: 0, reportMsAvg: 0, reportMsMax: 0, writes: 0, clean: true };
+  const s: RunStats = { run: r.run, started: r.started_wall, ended: r.ended_wall, wallMin: 0, acts: mine.length, failed: 0, withUntil: 0, bare: 0, untilFailed: 0, alreadyTrue: 0, returned: {}, diagnoses: {}, expiredS: 0, untilFailedS: 0, actFailedS: 0, bareMaxS: 0, quietS: 0, reportMsAvg: 0, reportMsMax: 0, clean: true };
   let reportSum = 0, reportN = 0;
   for (const a of mine) {
     let rep: any = null; try { rep = a.report ? JSON.parse(a.report) : null; } catch {}
@@ -39,7 +39,6 @@ for (const r of runs) {
     else { s.bare++; if (rep.returned === "quiet") s.quietS += (rep.timing?.observeMs ?? 0) / 1000; if (rep.returned === "max") s.bareMaxS += (rep.timing?.observeMs ?? 0) / 1000; }
     if (!a.ok) { s.actFailedS += (rep.timing?.runMs ?? 0) / 1000; const reason = rep.diagnosis?.reason ?? "error"; s.diagnoses[reason] = (s.diagnoses[reason] ?? 0) + 1; }
     if (rep.timing?.reportMs != null) { reportSum += rep.timing.reportMs; reportN++; s.reportMsMax = Math.max(s.reportMsMax, rep.timing.reportMs); }
-    s.writes += (rep.writes ?? []).length;
   }
   s.expiredS = round1(s.untilFailedS + s.actFailedS + s.bareMaxS); s.untilFailedS = round1(s.untilFailedS); s.actFailedS = round1(s.actFailedS); s.bareMaxS = round1(s.bareMaxS); s.quietS = round1(s.quietS);
   s.reportMsAvg = reportN ? Math.round(reportSum / reportN) : 0;
@@ -52,8 +51,8 @@ st.close();
 if (json) { console.log(JSON.stringify(out, null, 2)); process.exit(0); }
 if (!out.length) { console.log(`${app}: no runs`); process.exit(0); }
 console.log(`${app}: ${out.length} run(s)\n`);
-console.log(["run", "started", "acts", "fail", "until", "bare", "untilX", "already", "expired_s", "quiet_s", "report_ms", "writes", "min", "clean"].join("\t"));
-for (const s of out) console.log([s.run, s.started.slice(0, 16), s.acts, s.failed, s.withUntil, s.bare, s.untilFailed, s.alreadyTrue, s.expiredS, s.quietS, `${s.reportMsAvg}/${s.reportMsMax}`, s.writes, s.wallMin, s.clean ? "yes" : "no"].join("\t"));
+console.log(["run", "started", "acts", "fail", "until", "bare", "untilX", "already", "expired_s", "quiet_s", "report_ms", "min", "clean"].join("\t"));
+for (const s of out) console.log([s.run, s.started.slice(0, 16), s.acts, s.failed, s.withUntil, s.bare, s.untilFailed, s.alreadyTrue, s.expiredS, s.quietS, `${s.reportMsAvg}/${s.reportMsMax}`, s.wallMin, s.clean ? "yes" : "no"].join("\t"));
 const diag: Record<string, number> = {}; const ret: Record<string, number> = {};
 for (const s of out) { for (const [k, v] of Object.entries(s.diagnoses)) diag[k] = (diag[k] ?? 0) + v; for (const [k, v] of Object.entries(s.returned)) ret[k] = (ret[k] ?? 0) + v; }
 console.log(`\nreturned: ${Object.entries(ret).map(([k, v]) => `${k} ${v}`).join(" · ") || "—"}`);

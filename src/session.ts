@@ -56,12 +56,10 @@ export interface Report<T = unknown> {
   ui: { added: string[]; removed: string[]; more?: number };
   requests: WireLine[];
   static: { count: number; types: Record<string, number> };
-  /** requests to other sites (telemetry, fonts CDNs) — folded out of `requests`, `writes` and `pending`; the log has them */
+  /** requests to other sites (telemetry, fonts CDNs) — folded out of `requests` and `pending`; the log has them */
   thirdParty: { count: number; hosts: Record<string, number> };
   /** requests started in the window and still in flight when it closed */
   pending: string[];
-  /** the non-GET app requests in the window — what this act may have persisted */
-  writes: string[];
   storage: { cookies: string[]; local: string[]; session: string[] };
   console: Array<{ level: string; text: string }>;
   dialogs: Array<{ type: string; message: string | null; handled: string | null }>;
@@ -274,7 +272,6 @@ export class Session {
     const report: Report<T> = {
       action: id, label, ok, ...(value !== undefined ? { value } : {}), diagnosis, returned, until, url,
       ui, requests, static: st, thirdParty, pending,
-      writes: requests.filter((w) => !["GET", "HEAD", "OPTIONS"].includes(w.method) && !w.earlier).map((w) => `${w.method} ${w.path}${w.status != null ? " " + w.status : ""}`),
       storage,
       console: store.all("SELECT level, text FROM console WHERE run=? AND t BETWEEN ? AND ? AND level IN ('error','exception','warning') ORDER BY seq", store.run, t0, t1 + 1),
       dialogs: store.all("SELECT type, message, handled FROM dialogs WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1),

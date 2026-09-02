@@ -91,7 +91,7 @@ describe("act + report: the promise table", () => {
       assert.equal(r.until?.value, "fail"); assert.match(String(r), /until: ✓ \d+ms → "fail"/);
       const posted = await s.json<{ pending?: boolean; ok?: boolean }>("/api/save", { action: r.action });
       assert.equal(posted?.pending, true, `the collection beats its sub-path: ${JSON.stringify(posted)}`);
-      assert.ok(r.writes.some((w) => w.startsWith("POST /api/save 202")), JSON.stringify(r.writes));
+      assert.ok(r.requests.some((w) => w.method === "POST" && w.path === "/api/save" && w.status === 202), JSON.stringify(r.requests));
       await sleep(200);
       const status = s.sql<{ status: number }>("SELECT status FROM requests WHERE url LIKE '%/api/save/status%' AND action_id=? ORDER BY t_start DESC LIMIT 1", r.action)[0];
       assert.equal(status?.status, 500);
@@ -271,7 +271,7 @@ describe("diagnoses the wrapper used to make itself", () => {
   it("a probe is an act: page.evaluate(fetch) is attributed, the value comes back, json reads the write by method", async () => {
     const r = reached(await s.act("probe", (p) => p.evaluate("fetch('/api/save', { method: 'POST', body: '{}' }).then(r => r.json()).then(j => j.id)")));
     assert.equal(typeof r.value, "number");
-    assert.ok(r.writes.some((w) => w.startsWith("POST /api/save")), JSON.stringify(r.writes));
+    assert.ok(r.requests.some((w) => w.method === "POST" && w.path === "/api/save"), JSON.stringify(r.requests));
     const posted = await s.json<{ id: number }>("/api/save", { action: r.action, method: "POST" });
     assert.ok(posted && typeof posted.id === "number", JSON.stringify(posted));
   });
@@ -394,11 +394,11 @@ describe("exam A fold-backs", () => {
     const swap = reached(await s.act("swap items", (p) => p.evaluate(() => { const l = document.getElementById("sort-list")!; l.appendChild(l.firstElementChild!); })));
     assert.match(swap.note ?? "", /lines moved/);
   });
-  it("third-party requests are folded out of writes and do not block quiet", async () => {
+  it("third-party requests are folded out of the wire and do not block quiet", async () => {
     const port = new URL(g.origin).port;
     const r = reached(await s.act("telemetry", (p) => p.evaluate((u) => fetch(u, { method: "POST", mode: "no-cors", body: "{}" }).then(() => 1), `http://127.0.0.1:${port}/api/save`)));
     assert.ok(r.thirdParty.count >= 1, JSON.stringify(r.thirdParty));
-    assert.deepEqual(r.writes, []);
+    assert.ok(!r.requests.some((w) => w.path.includes("/api/save")), JSON.stringify(r.requests));
     assert.match(String(r), /third-party \(127\.0\.0\.1/);
   });
   it("look lists anchors without href, tabindex targets and shadow-DOM buttons; an unnamed dialog is marked", async () => {
@@ -435,7 +435,7 @@ describe("exam B fold-backs", () => {
     const one = await s.json<{ q: string }>("/api/search?q=zz");
     assert.equal(one?.q, "zz");
   });
-  it("a selected <option> is proposed as attached; a fragment already on screen is never proposed; writes prints none", async () => {
+  it("a selected <option> is proposed as attached; a fragment already on screen is never proposed", async () => {
     await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<select id=\"sel\"><option>alpha</option><option>beta</option></select><div id=\"t1\">unready</div>')");
     const r = reached(await s.act("pick beta", (p) => p.selectOption("#sel", "beta")));
     assert.ok(r.proposed.some((x) => x.code.includes('"option"') && x.code.includes('state: "attached"')), JSON.stringify(r.proposed));
@@ -443,7 +443,7 @@ describe("exam B fold-backs", () => {
     assert.ok(!r2.proposed.some((x) => x.code.includes('"ready"')), JSON.stringify(r2.proposed));
     await s.page.evaluate("document.getElementById('sel').remove(); document.getElementById('t1').remove()");
     const r3 = reached(await s.act("chart", (p) => p.click("#load-chart"), { until: () => s.page.waitForResponse((x) => x.url().includes("/api/slow")) }));
-    assert.match(String(r3), /\n  writes: none\n/);
+    assert.doesNotMatch(String(r3), /writes/);
   });
   it("a text proposal for text inside a shadow root pierces it and holds", async () => {
     const r = reached(await s.act("shadow click", (p) => p.click("#shadow-btn")));

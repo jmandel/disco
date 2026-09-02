@@ -329,7 +329,7 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
       const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;
       let budget = 512 * 1024;
       const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_headers, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", id)
-        .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (r.method !== "GET" || (budget -= size) >= 0); return shaper.wireRow({ ...r, ...(take ? { response_body: rawBody(st, r.body_hash) } : {}) }); });
+        .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (budget -= size) >= 0; return shaper.wireRow({ ...r, ...(take ? { response_body: rawBody(st, r.body_hash) } : {}) }); });
       const nav = st.sql<any>("SELECT t, kind, url FROM nav WHERE run=(SELECT run FROM actions WHERE id=?) AND t BETWEEN ? AND ? ORDER BY seq", id, t0 - 1, t1 + 1).map((x) => ({ ...x, url: x.url ? shaper.url(x.url) : x.url }));
       if (requests.length || nav.length) writeFileSync(evPath(n, "-wire.json"), JSON.stringify({ action: id, requests, nav }, null, 2) + "\n");
     } catch {}

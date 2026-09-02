@@ -22,7 +22,6 @@ export function formatReport(r: Report): string {
     if (lines.length > 25) L.push(`    … ${lines.length - 25} more (sql: SELECT * FROM requests WHERE action_id='${r.action}')`);
   }
   if (r.pending.length) L.push("  pending: " + r.pending.join(" · "));
-  L.push("  writes: " + (r.writes?.length ? r.writes.join(" · ") : "none"));
   const st = [...r.storage.cookies.map((x) => "cookie " + x), ...r.storage.local.map((x) => "local " + x), ...r.storage.session.map((x) => "session " + x)];
   if (st.length) L.push("  storage: " + st.join(" · ").slice(0, 400));
   for (const c of r.console.slice(0, 5)) L.push(`  console ${c.level}: ${c.text.slice(0, 160)}`);
