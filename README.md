@@ -179,7 +179,8 @@ a marker and a record has no free-text field for it, the marker goes in the pare
 not skipped. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
 the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites (`act:12`, or a range `act:12-15`) into
 `evidence/` **as shapes, never values**: the report (`act-N.json`), its wire (`act-N-wire.json`) and the accessibility tree it left
-behind (`act-N-aria.txt`), with URLs as templates (`/patient/<uuid>?q=<v>`), bodies as skeletons (keys, types, lengths), storage values
+behind (`act-N-aria.txt`), with URLs as templates (`/patient/<uuid>?q=<v>`), bodies as skeletons in any wire format (JSON keys and types; XML, SOAP and CDA as element
+trees; HL7 v2 as segments; form posts as keys; HTML fragments as outlines; CSV as columns), storage values
 blanked, no headers, no screenshots, and every string that appears as a value in the app's JSON bodies — or looks like an
 identifier, date, email or token — replaced by `<data>`. A pack is therefore safe to commit from an environment whose data is not
 yours to keep; what it proves is structure and behaviour, and the check re-proves the values live. `close` also names data that

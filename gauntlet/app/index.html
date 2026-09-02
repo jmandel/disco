@@ -188,6 +188,13 @@
 <section id="s-33"><h2>33. Blocking submit (the handler holds the main thread)</h2>
   <button id="slow-submit">Submit (blocks 3.5 s)</button> <span id="slow-result">-</span>
 </section>
+
+<section id="s-34"><h2>34. Other wire formats (XML, form POST, HTML fragment)</h2>
+  <button id="load-xml">Load patient (XML)</button> <span id="xml-out">-</span><br>
+  <form id="form-demo"><label>Full name <input name="fullName" id="form-name" value="Grace Hopper"></label> <button id="form-submit" type="submit">Send (form POST)</button></form> <span id="form-out">-</span><br>
+  <button id="load-fragment">Load people (HTML fragment)</button>
+  <div id="fragment-out"></div>
+</section>
 </main>
 
 <script type="module" src="/app.js"></script>

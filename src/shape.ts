@@ -2,6 +2,7 @@
 // safe to publish: endpoints as templates, bodies as skeletons, the accessibility tree with its data blanked,
 // no headers, no screenshots. The same rules find data that leaked into the prose.
 import type { StoreReader } from "./store.ts";
+import { shapeBody, harvestBody, sniff } from "./shape-bodies.ts";
 
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
@@ -45,7 +46,9 @@ export function collectValues(st: StoreReader, limit = 2000): { values: Set<stri
   const values = new Set<string>(), vocab = new Set<string>(), strong = new Set<string>(), counts = new Map<string, number>();
   let bodies = 0; const seenIn = new Map<string, number>();   // in how many bodies a value occurs: reference data (types, concepts) is everywhere, a record's values are not
   // newest first across runs (t restarts per run), one body per hash: a chart open alone is a hundred JSON answers
-  const rows = st.sql<{ text: string | null }>("SELECT b.text FROM bodies b WHERE b.hash IN (SELECT r.body_hash FROM requests r WHERE r.resource_type IN ('xhr','fetch') AND r.mime LIKE '%json%' AND r.body_hash IS NOT NULL ORDER BY r.run DESC, r.t_start DESC LIMIT ?) AND b.text IS NOT NULL AND b.size <= 262144", limit);
+  // every textual body the app exchanged (any format), newest first across runs, one per hash — plus the request bodies it sent
+  const rows = st.sql<{ text: string | null; mime: string | null }>("SELECT b.text, b.mime FROM bodies b WHERE b.hash IN (SELECT r.body_hash FROM requests r WHERE r.resource_type IN ('xhr','fetch','document','other') AND r.body_hash IS NOT NULL ORDER BY r.run DESC, r.t_start DESC LIMIT ?) AND b.text IS NOT NULL AND b.size <= 262144", limit);
+  const sent = st.sql<{ req_body: string | null; req_headers: string | null }>("SELECT req_body, req_headers FROM requests WHERE req_body IS NOT NULL AND resource_type IN ('xhr','fetch','document') ORDER BY run DESC, t_start DESC LIMIT 500");
   // a string under a name-like key (name, display, given, text, identifier, comment…) is data even if some bundle happens to contain the word
   const add = (v: unknown, depth: number, key = "") => {
     if (values.size > 50000 || depth > 12) return;
@@ -53,9 +56,21 @@ export function collectValues(st: StoreReader, limit = 2000): { values: Set<stri
     else if (Array.isArray(v)) v.forEach((x) => add(x, depth + 1, key));
     else if (v && typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) { vocab.add(k.toLowerCase()); add(x, depth + 1, k); }
   };
-  for (const r of rows) { bodies++; try { add(JSON.parse(r.text!), 0); } catch {} }
-  // the app's own words: its scripts and documents (deduplicated by hash; the text column is capped at 512 KB each)
-  const assets = st.sql<{ text: string | null }>("SELECT DISTINCT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('script','document') AND b.text IS NOT NULL LIMIT 400");
+  const harvestInto = (text: string, mime: string | null) => {
+    const h = harvestBody(text, mime);
+    for (const v of h.values) { const q = v.toLowerCase(); values.add(q); if (seenIn.get(q) !== bodies) { seenIn.set(q, bodies); counts.set(q, (counts.get(q) ?? 0) + 1); } }
+    for (const v of h.strong) strong.add(v.toLowerCase());
+    for (const w of h.vocab) vocab.add(w);
+  };
+  for (const r of rows) {
+    bodies++;
+    const kind = sniff(r.mime, r.text);
+    if (kind === "json") { try { add(JSON.parse(r.text!), 0); } catch {} }
+    else if (kind !== "text" && kind !== "binary") harvestInto(r.text!, r.mime);   // XML, SOAP, HL7, HTML documents and fragments, CSV: by structure, not all words
+  }
+  for (const r of sent) { bodies++; let ct: string | null = null; try { ct = JSON.parse(r.req_headers ?? "{}")?.["content-type"] ?? null; } catch {} const kind = sniff(ct, r.req_body); if (kind === "json") { try { add(JSON.parse(r.req_body!), 0); } catch {} } else if (kind !== "text" && kind !== "binary") harvestInto(r.req_body!, ct); }
+  // the app's own words: its scripts (deduplicated by hash; the text column is capped at 512 KB each) — documents went through the harvest above, where cells are data and labels are vocabulary
+  const assets = st.sql<{ text: string | null }>("SELECT DISTINCT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('script') AND b.text IS NOT NULL LIMIT 400");
   for (const a of assets) { for (const w of a.text!.toLowerCase().match(/[a-z][a-z'-]{2,}/g) ?? []) { vocab.add(w); if (vocab.size > 400000) break; } }
   return { values, vocab, strong, counts };
 }
@@ -156,9 +171,11 @@ export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; stro
     return out;
   };
   const wireRow = (r: any): any => {
-    const ct = (() => { try { const h = typeof r.resp_headers === "string" ? JSON.parse(r.resp_headers) : r.resp_headers; return h?.["content-type"] ?? null; } catch { return null; } })();
-    const body = (b: unknown) => { if (b == null) return b; if (typeof b === "string") { try { return json(JSON.parse(b)); } catch { return `<${b.length} chars>`; } } return json(b); };
-    return { id: r.id, method: r.method, url: url(r.url), status: r.status, mime: r.mime ?? ct, resource_type: r.resource_type, body_size: r.body_size, body_state: r.body_state, t_start: r.t_start, t_response: r.t_response, t_end: r.t_end, ...(r.req_body != null ? { req_body: body(r.req_body) } : {}), ...("response_body" in r ? { response_body: body(r.response_body) } : {}) };
+    const hdr = (h: unknown, k: string): string | null => { try { const o = typeof h === "string" ? JSON.parse(h) : h; return o?.[k] ?? null; } catch { return null; } };
+    const respCt = hdr(r.resp_headers, "content-type"), reqCt = hdr(r.req_headers, "content-type");
+    // a body of any format: JSON as a skeleton, XML/SOAP as an element tree, HL7 as segments, a form as keys, HTML as an outline, CSV as columns
+    const body = (b: unknown, ct: string | null) => { if (b == null) return b; if (typeof b !== "string") return json(b); return shapeBody(b, ct, json, url); };
+    return { id: r.id, method: r.method, url: url(r.url), status: r.status, mime: r.mime ?? respCt, resource_type: r.resource_type, body_size: r.body_size, body_state: r.body_state, t_start: r.t_start, t_response: r.t_response, t_end: r.t_end, ...(r.req_body != null ? { req_body: body(r.req_body, reqCt) } : {}), ...("response_body" in r ? { response_body: body(r.response_body, r.mime ?? respCt) } : {}) };
   };
   const leaks = (files: Array<{ name: string; text: string }>): string[] => {
     const out: string[] = [];

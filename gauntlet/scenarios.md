@@ -422,3 +422,12 @@ click landed**; the result still arrives.
 
 A separate document with 10,000 real `<tr>` rows (not virtualised), `#big-btn` and `#big-out`. Exists for the
 report-overhead ceiling: the aria snapshot and diff must stay bounded on a large DOM.
+
+### 34. Other wire formats (`#s-34`)
+
+`#load-xml` fetches `GET /api/patient.xml` (`application/fhir+xml`: a Patient with id, identifier `MRN-0042`, name text
+"Ada Lovelace", birthDate, address) and writes `Ada Lovelace (MRN-0042)` into `#xml-out`. `form#form-demo` posts
+`application/x-www-form-urlencoded` (`fullName`, `consent=yes`) to `POST /api/form` → `{ok, received, consent}`, shown in
+`#form-out`. `#load-fragment` fetches `GET /api/fragment` (`text/html`: a `<table id="fragment-people">` of the six people
+with `/people/<n>` links) and swaps it into `#fragment-out`. For disco: bodies in three non-JSON formats, and names that reach
+the screen only through them.

@@ -612,6 +612,27 @@ $("slow-submit").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
+// #34 Other wire formats: a FHIR-style XML read, an x-www-form-urlencoded write, an HTML fragment swapped into the page
+// ---------------------------------------------------------------------------
+$("load-xml").addEventListener("click", async () => {
+  const xml = await (await fetch("/api/patient.xml")).text();
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  const text = doc.querySelector("name > text")?.getAttribute("value") ?? "?";
+  const id = doc.querySelector("identifier > value")?.getAttribute("value") ?? "?";
+  setText("xml-out", `${text} (${id})`);
+});
+$("form-demo").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = new URLSearchParams({ fullName: $<HTMLInputElement>("form-name").value, consent: "yes" });
+  const r = await fetch("/api/form", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+  const j = await r.json();
+  setText("form-out", `received ${j.received}`);
+});
+$("load-fragment").addEventListener("click", async () => {
+  $("fragment-out").innerHTML = await (await fetch("/api/fragment")).text();
+});
+
+// ---------------------------------------------------------------------------
 // boot
 // ---------------------------------------------------------------------------
 async function boot(): Promise<void> {

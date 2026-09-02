@@ -218,6 +218,15 @@ const PEOPLE = [
   { name: "Edsger Dijkstra", role: "Professor", dept: "Algorithms", since: "1962" },
   { name: "Barbara Liskov", role: "Professor", dept: "Types", since: "1972" },
 ];
+/** #34 a FHIR-style Patient in XML. */
+const PATIENT_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<Patient xmlns="http://hl7.org/fhir">
+  <id value="0f3c2a1b-1234-4c56-8d9e-a0b1c2d3e4f5"/>
+  <identifier><system value="http://gauntlet.local/mrn"/><value value="MRN-0042"/></identifier>
+  <name><text value="Ada Lovelace"/><family value="Lovelace"/><given value="Ada"/></name>
+  <gender value="female"/><birthDate value="1815-12-10"/>
+  <address><line value="12 St James's Square"/><city value="London"/></address>
+</Patient>`;
 /** /big.html — 10,000 real rows in the DOM (not virtualised): the report-overhead ceiling target. */
 const BIG_HTML = `<!doctype html><meta charset="utf-8"><title>big</title><link rel="stylesheet" href="/style.css">
 <h1>10,000 rows</h1><button id="big-btn">Count</button> <span id="big-out">-</span>
@@ -394,6 +403,9 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
       const hits = needle ? MEDS.filter((n) => n.toLowerCase().includes(needle)) : MEDS;
       return json({ q: q.get("q") ?? "", hits });
     }
+    if (path === "/api/patient.xml") return text(PATIENT_XML, "application/fhir+xml; charset=utf-8");
+    if (path === "/api/form" && m === "POST") { const form = new URLSearchParams(await req.text()); return json({ ok: true, received: form.get("fullName") ?? "", consent: form.get("consent") }); }
+    if (path === "/api/fragment") return text(`<table id="fragment-people"><thead><tr><th>Name</th><th>Role</th></tr></thead><tbody>${PEOPLE.map((p, i) => `<tr><td><a href="/people/${i + 1}">${p.name}</a></td><td>${p.role}</td></tr>`).join("")}</tbody></table>`, "text/html; charset=utf-8");
     if (path === "/api/people") { await holds.sleep(Math.max(0, Number(q.get("hold") ?? 0) || 0)); return json({ people: PEOPLE }); }
     const tab = path.match(/^\/api\/tab\/([ab])$/);
     if (tab) return json({ tab: tab[1], items: tab[1] === "a" ? ["alpha", "apple", "anchor"] : ["bravo", "banana", "beacon"] });

@@ -328,8 +328,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
     try {
       const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;
       let budget = 512 * 1024;
-      const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", id)
-        .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (r.method !== "GET" || (budget -= size) >= 0); return shaper.wireRow({ ...r, ...(take ? { response_body: safeBody(st, r.body_hash) } : {}) }); });
+      const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_headers, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", id)
+        .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (r.method !== "GET" || (budget -= size) >= 0); return shaper.wireRow({ ...r, ...(take ? { response_body: rawBody(st, r.body_hash) } : {}) }); });
       const nav = st.sql<any>("SELECT t, kind, url FROM nav WHERE run=(SELECT run FROM actions WHERE id=?) AND t BETWEEN ? AND ? ORDER BY seq", id, t0 - 1, t1 + 1).map((x) => ({ ...x, url: x.url ? shaper.url(x.url) : x.url }));
       if (requests.length || nav.length) writeFileSync(evPath(n, "-wire.json"), JSON.stringify({ action: id, requests, nav }, null, 2) + "\n");
     } catch {}
@@ -378,8 +378,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
   } finally { st.close(); }
 }
 
+function rawBody(st: StoreReader, hash: string): string | null { try { return st.body(hash); } catch { return null; } }
 function safeJson(t: string | null): unknown { if (!t) return t; try { return JSON.parse(t); } catch { return t; } }
-function safeBody(st: StoreReader, hash: string): unknown { try { const t = st.body(hash); try { return JSON.parse(t); } catch { return t.slice(0, 65536); } } catch { return null; } }
 
 /** apps/ next to this checkout (not the process cwd), unless DISCO_APPS_DIR or an explicit root says otherwise. */
 export function appsRoot(root?: string): string { return root ?? process.env.DISCO_APPS_DIR ?? join(import.meta.dirname, "..", "apps"); }

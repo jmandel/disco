@@ -623,6 +623,36 @@ describe("the log", () => {
       assert.ok(!JSON.stringify(wire).includes("Alan Turing"));
     } finally { rmSync(join(pack, "README.md")); rmSync(join(pack, "evidence"), { recursive: true, force: true }); }
   });
+  it("non-JSON bodies are shaped and harvested: XML, a form post and an HTML fragment", async () => {
+    const { syncEvidence, appStoreDir, appDir } = await import("../src/store.ts");
+    const { writeFileSync, rmSync, readFileSync: rf } = await import("node:fs");
+    const x = reached(await s.act("xml", (p) => p.click("#load-xml"), { until: () => s.page.locator("#xml-out:has-text('MRN')").waitFor() }));
+    const f = reached(await s.act("form", (p) => p.click("#form-submit"), { until: () => s.page.locator("#form-out:has-text('received')").waitFor() }));
+    const h = reached(await s.act("fragment", (p) => p.click("#load-fragment"), { until: () => s.page.locator("#fragment-people").waitFor() }));
+    assert.ok(x.ui.added.some((l) => /Ada Lovelace/.test(l)) && h.ui.added.some((l) => /Grace Hopper|Ada Lovelace/.test(l)), "the names reached the screen through XML and HTML");
+    const pack = appDir("t", appsDir);
+    writeFileSync(join(pack, "README.md"), `# t\n\nXML (${x.action}), form (${f.action}), fragment (${h.action}).\n`);
+    try {
+      syncEvidence(pack, appStoreDir("t", appsDir));
+      const wx = JSON.parse(rf(join(pack, "evidence", `act-${x.action.slice(4)}-wire.json`), "utf8"));
+      const xmlRow = wx.requests.find((r: any) => r.url.includes("patient.xml"));
+      assert.equal(xmlRow.response_body.Patient.name.text["@value"], "string", JSON.stringify(xmlRow.response_body));
+      assert.equal(xmlRow.response_body.Patient.birthDate["@value"], "<date>");
+      const wf = JSON.parse(rf(join(pack, "evidence", `act-${f.action.slice(4)}-wire.json`), "utf8"));
+      const formRow = wf.requests.find((r: any) => r.method === "POST" && r.url.includes("/api/form"));
+      assert.deepEqual(formRow.req_body, { fullName: "<v>", consent: "<v>" });
+      const wh = JSON.parse(rf(join(pack, "evidence", `act-${h.action.slice(4)}-wire.json`), "utf8"));
+      const fragRow = wh.requests.find((r: any) => r.url.includes("/api/fragment"));
+      assert.equal(fragRow.response_body.table["@id"], "fragment-people");
+      assert.ok(!JSON.stringify(wh).includes("Lovelace") && !JSON.stringify(wx).includes("Lovelace") && !JSON.stringify(wf).includes("Hopper"));
+      // names that arrived only through XML / a form / HTML are data in the aria evidence too
+      const ariaX = rf(join(pack, "evidence", `act-${x.action.slice(4)}-aria.txt`), "utf8");
+      const ariaH = rf(join(pack, "evidence", `act-${h.action.slice(4)}-aria.txt`), "utf8");
+      const ariaF = rf(join(pack, "evidence", `act-${f.action.slice(4)}-aria.txt`), "utf8");
+      assert.doesNotMatch(ariaX + ariaH + ariaF, /Lovelace|Grace Hopper|MRN-0042/);
+      assert.match(ariaH, /button "Load people \(HTML fragment\)"/, "chrome survives");
+    } finally { rmSync(join(pack, "README.md")); rmSync(join(pack, "evidence"), { recursive: true, force: true }); }
+  });
   it("every act keeps the accessibility tree it left behind, as a blob the report names", async () => {
     const r = reached(await s.act("noop", (p) => p.click("#noop")));
     assert.match(r.aria ?? "", /^[0-9a-f]{64}$/);
