@@ -490,6 +490,8 @@ function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLi
   if (preUrl && postUrl && preUrl !== postUrl) {
     let p: string; try { p = new URL(postUrl).pathname; } catch { p = postUrl; }
     if (p && p !== "/") out.push({ kind: "url", code: `() => page.waitForURL(u => u.pathname.includes(${JSON.stringify(p)}))`, atMs: null });
+    // for a step that navigates from a page already at (or redirecting to) the destination, the nav EVENT is the until that is false beforehand
+    if (p) out.push({ kind: "url", code: `() => s.waitFor("nav", e => e.url.includes(${JSON.stringify(p === "/" ? new URL(postUrl).host : p)}))`, atMs: null });
   }
   const STATES = ["selected", "expanded", "checked", "pressed", "disabled"];
   const rank = (role: string) => ({ dialog: 0, alertdialog: 0, heading: 1, alert: 2, status: 2, tab: 3, button: 4, link: 5, textbox: 5, cell: 9, text: 8 } as Record<string, number>)[role] ?? 7;
@@ -530,11 +532,18 @@ function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLi
 /** A proposal must hold right after the act — otherwise it is a guess. DOM/url/storage proposals are run with a short budget; response proposals already happened. */
 async function selfTest(page: Page, proposals: Proposal[]): Promise<Proposal[]> {
   const keep = await Promise.all(proposals.map(async (p) => {
-    if (p.kind === "response") return true;
+    if (p.kind === "response" || p.code.includes("s.waitFor(")) return true;   // already happened / needs the session; cannot be re-run here
     try {
       const fn = new Function("page", `return (${p.code})`)(page) as () => Promise<unknown>;
       const run = Promise.resolve(fn()); run.catch(() => {});
-      return await Promise.race([run.then(() => true, () => false), new Promise<boolean>((r) => setTimeout(() => r(false), 400))]);
+      const held = await Promise.race([run.then(() => true, () => false), new Promise<boolean>((r) => setTimeout(() => r(false), 400))]);
+      if (!held) return false;
+      // an element that "appeared" must be on the page's canvas, not parked off-canvas (Playwright calls a translated drawer visible)
+      if (p.kind === "appeared") {
+        const m = p.code.match(/^\(\) => page\.(.*)\.waitFor\(\)$/);
+        if (m) { const loc = new Function("page", `return page.${m[1]};`)(page) as Locator; const box = await loc.boundingBox().catch(() => null); if (box && (box.x + box.width <= 0 || box.y + box.height <= 0)) return false; }
+      }
+      return true;
     } catch { return false; }
   }));
   return proposals.filter((_, i) => keep[i]);

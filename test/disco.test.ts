@@ -468,6 +468,14 @@ describe("exam B fold-backs", () => {
     }
     assert.ok(checked >= 3, `only ${checked} proposals checked`);
   });
+  it("a navigating act proposes the nav-event until; a control parked off-canvas is never proposed", async () => {
+    const r = reached(await s.act("to login", (p) => p.goto(g.origin + "/login.html")));
+    assert.ok(r.proposed.some((x) => x.code.includes('s.waitFor("nav"') && x.code.includes("/login.html")), JSON.stringify(r.proposed));
+    await home();
+    const r2 = reached(await s.act("mount a drawer", (p) => p.evaluate(() => { document.body.insertAdjacentHTML("beforeend", '<nav id="drawer" style="position:fixed;left:-300px;top:0;width:280px;height:200px;background:#eee"><a href="#" role="link">Drawer link</a><button>Drawer button</button></nav>'); })));
+    assert.ok(!r2.proposed.some((x) => x.code.includes("Drawer")), JSON.stringify(r2.proposed));
+    await s.page.evaluate("document.getElementById('drawer').remove()");
+  });
   it("not-found on a text selector names the control whose accessible name carries that text", async () => {
     await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"icon\" aria-label=\"Search patient\"><svg width=\"12\" height=\"12\"></svg></button>')");
     const r = await s.act("icon by text", (p) => p.click('button:has-text("Search patient")'), { max: 500 });
