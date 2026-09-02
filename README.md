@@ -77,7 +77,7 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 | Option | Default | Meaning |
 |---|---|---|
 | `until` | — | `() => Promise`. Armed **before** `run`, so a response that lands mid-click counts. The act returns the moment it resolves. A Playwright wait (`locator.waitFor()`, `page.waitForResponse(…)`, `page.waitForURL(…)`), `s.waitFor(…)`, or a `Promise.race` of several — label the arms with `.then(() => "ok")` and `until.value` says which |
-| `quiet` | 500 | without `until`: return once nothing has happened for this long — no request, response, frame, console line, dialog, navigation or DOM change, and no request this act started is still unanswered |
+| `quiet` | 500 | without `until`: return once nothing has happened for this long — no request, response, frame (a frame identical to the previous one on its socket is a heartbeat and does not count), console line, dialog, navigation or DOM change, and no request this act started is still unanswered |
 | `max` | 3000 | the one budget: the default timeout of every Playwright call inside `run` and `until`, and the longest the act observes |
 
 **The report** (`String(report)` is what the CLI prints; `report.value` is what `run` returned):
@@ -95,9 +95,9 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 | `storage` | cookie, localStorage and sessionStorage keys that changed — the wire of an app that has no wire |
 | `console` · `dialogs` · `pages` · `downloads` · `openPages` | errors and warnings; native dialogs (accepted, recorded); URLs of popups opened; files the page started downloading; pages open afterwards (more than 1 throttles the driven page) |
 | `proposed` | pasteable `until` code for what this act caused: responses with their `+ms`, roles that appeared (with their new state: `selected`, `expanded`, `checked`), the one that left, the url path, a storage key. **Copy one into the SDK.** |
-| `note` | something true that is not a failure: the click landed but the page blocked; a body the page never read; what an already-true or failed until's target looks like now, and what answered just before the act; lines that only moved |
+| `note` | something true that is not a failure: why a bare act never went quiet (the input that kept resetting the clock, and its rhythm); the click landed but the page blocked; a body the page never read; what an already-true or failed until's target looks like now, and what answered just before the act; lines that only moved |
 | `aria` | hash of the accessibility tree after the act (`s.body(hash)` prints it) — what a `look` right after would show; it travels with the act's evidence, so a screen fact cites the act that produced the screen |
-| `window`, `timing` | `{ t0, t1 }` in the run's clock; `{ runMs, observeMs, reportMs, totalMs }` |
+| `window`, `timing` | `{ t0, t1 }` in the run's clock; `{ runMs, observeMs, reportMs, totalMs, quiet, max }` — the settings the act ran under travel with it |
 
 **Diagnoses** (`diagnosis.reason`):
 

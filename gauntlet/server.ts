@@ -518,6 +518,7 @@ export async function startGauntlet(opts: { port?: number; verbose?: boolean } =
         ws.send(JSON.stringify({ type: "hello", id: ws.data.id, state: view() }));
       },
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
+        if (String(raw) === "ping") { ws.send("pong"); return; }   // keepalive: byte-identical both ways, no counter
         counters.echo++;
         let parsed: unknown = null;
         try { parsed = JSON.parse(String(raw)); } catch { /* non-JSON */ }

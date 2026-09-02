@@ -73,11 +73,11 @@ export interface Report<T = unknown> {
   aria?: string;
   note?: string;
   window: { t0: number; t1: number };
-  timing: { runMs: number; observeMs: number; reportMs: number; totalMs: number };
+  timing: { runMs: number; observeMs: number; reportMs: number; totalMs: number; /** the settings this act ran under */ quiet: number; max: number };
 }
 
-const DEFAULT_MAX = 3000;
-const DEFAULT_QUIET = 500;
+export const DEFAULT_MAX = 3000;
+export const DEFAULT_QUIET = 500;
 const STATIC_TYPES = new Set(["script", "stylesheet", "image", "font", "media", "texttrack", "manifest"]);
 
 function originOf(u: string): string { try { return new URL(u).origin; } catch { return ""; } }
@@ -229,7 +229,7 @@ export class Session {
     const tRun1 = performance.now();
     let returned: Report["returned"];
     let until: Report["until"];
-    let lastDom = tRun1;
+    let lastDom = tRun1, domChanges = 0;
     if (!ok) {
       returned = "error";
       if (untilP) { until = { ok: false, elapsedMs: 0, error: "the code threw before the until could be judged" }; untilP.catch(() => {}); }
@@ -249,7 +249,7 @@ export class Session {
         const cur = await this.#fingerprint();
         const idle = store.now() - rec.lastActivity((h) => !isThirdParty(h, site));
         const awaiting = store.all<{ host: string | null }>("SELECT host FROM requests WHERE run=? AND t_start >= ? AND t_response IS NULL AND t_end IS NULL", store.run, t0 - 1).filter((r) => !isThirdParty(r.host, site)).length;
-        if (cur !== prev) lastDom = performance.now();
+        if (cur !== prev) { lastDom = performance.now(); domChanges++; }
         if (cur === prev && idle >= quiet && awaiting === 0) { returned = "quiet"; break; }
         prev = cur;
         if (performance.now() >= deadline) { returned = "max"; break; }
@@ -281,10 +281,11 @@ export class Session {
       proposed: await selfTest(page, propose(matchedRows, t0, ms(tStart, tDispatch), ui, preAria.split("\n").map((l) => l.trim()), preUrl, url, storage)),
       ...(ariaHash ? { aria: ariaHash } : {}),
       window: { t0: Math.round(t0), t1: Math.round(t1) },
-      timing: { runMs: ms(tDispatch, tRun1), observeMs: ms(tRun1, tObs1), reportMs: 0, totalMs: 0 },
+      timing: { runMs: ms(tDispatch, tRun1), observeMs: ms(tRun1, tObs1), reportMs: 0, totalMs: 0, quiet, max },
     };
     const notes: string[] = [];
     if (landedNote) notes.push(landedNote);
+    if (returned === "max" && !opts.until && ok) notes.push(this.#busy(t0, t1, quiet, pending, domChanges, t0 + ms(tStart, lastDom), pageSite));
     // what the app did on its own since the previous act (a debounced save that landed after that window closed, a poll): unattributed rows are easy to miss
     { const prev = store.get<{ t1: number | null }>("SELECT t1 FROM actions WHERE run=? AND n<? ORDER BY n DESC LIMIT 1", store.run, n);
       if (prev?.t1 != null) { const between = store.all<any>("SELECT method, url, host, status FROM requests WHERE run=? AND action_id IS NULL AND t_start > ? AND t_start < ? AND resource_type IN ('xhr','fetch','document') ORDER BY t_start LIMIT 6", store.run, prev.t1 + 1, t0 - 1).filter((r) => !isThirdParty(r.host, pageSite)); if (between.length) notes.push(`between the previous act and this one the app requested on its own: ${between.map((r) => `${r.method} ${pathOf(r.url, null).slice(0, 60)} ${r.status ?? "…"}`).join(", ")}${between.some((r) => r.method !== "GET") ? " — a write outside any act" : ""}`); } }
@@ -363,6 +364,30 @@ export class Session {
   #read(): StoreReader { return (this.#reader ??= openStore(this.#store.dir)); }
   async #aria(): Promise<string> { try { return await this.page.locator("body").ariaSnapshot({ timeout: 1500 }); } catch { return ""; } }
   /** A cheap change detector for the quiet loop: element count, text length, focus, url. */
+  /** Why a bare act never went quiet: the input that kept resetting the clock, with its rhythm — so the fix (a smaller quiet, an until) is on the screen. */
+  #busy(t0: number, t1: number, quiet: number, pending: string[], domChanges: number, lastDomAt: number, site: string): string {
+    const store = this.#store;
+    type Ev = { t: number; key: string };
+    const evs: Ev[] = [];
+    for (const r of store.all<{ t_start: number; method: string; path: string; host: string | null }>("SELECT t_start, method, path, host FROM requests WHERE run=? AND t_start BETWEEN ? AND ? AND resource_type NOT IN ('script','stylesheet','image','font','media') ORDER BY t_start", store.run, t0, t1 + 1)) if (!isThirdParty(r.host, site)) evs.push({ t: r.t_start, key: `${r.method} ${r.path}` });
+    const seen = new Map<string, string>();
+    for (const f of store.all<{ t: number; dir: string; url: string; payload: string | null }>("SELECT t, dir, url, payload FROM ws_frames WHERE run=? AND t BETWEEN ? AND ? AND dir IN ('in','out') ORDER BY seq", store.run, t0, t1 + 1)) { const k = `${f.url} ${f.dir}`; const p = f.payload ?? ""; if (seen.get(k) === p) { seen.set(k, p); continue; } seen.set(k, p); evs.push({ t: f.t, key: `WS ${f.dir} ${JSON.stringify(p.slice(0, 24))}${p.length > 24 ? "…" : ""} on ${f.url.replace(/^wss?:\/\//, "").split("?")[0]}` }); }
+    for (const c of store.all<{ t: number; level: string; text: string | null }>("SELECT t, level, text FROM console WHERE run=? AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1)) evs.push({ t: c.t, key: `console ${c.level} ${JSON.stringify((c.text ?? "").slice(0, 30))}` });
+    const head = pending.length ? `${pending.length} still unanswered (${pending.slice(0, 2).join(", ")}${pending.length > 2 ? ", …" : ""})` : "nothing pending";
+    const rhythm = (ts: number[]) => { if (ts.length < 3) return null; const gaps = ts.slice(1).map((t, i) => t - ts[i]).sort((a, b) => a - b); return Math.round(gaps[Math.floor(gaps.length / 2)]); };
+    // the tail: what still happened after the last DOM change, or the whole window when the DOM never settled
+    const domBusy = domChanges > 0 && t1 - lastDomAt < quiet * 2;
+    const tail = evs.filter((e) => e.t > (domBusy ? t0 : lastDomAt));
+    const groups = new Map<string, number[]>(); for (const e of tail) (groups.get(e.key) ?? groups.set(e.key, []).get(e.key)!).push(e.t);
+    const top = [...groups.entries()].sort((a, b) => b[1].length - a[1].length).slice(0, 2).map(([key, ts]) => { const p = rhythm(ts); return `${key} ×${ts.length}${p ? ` every ~${p} ms` : ""}`; });
+    const period = [...groups.values()].map(rhythm).filter((p): p is number => p != null).sort((a, b) => a - b)[0];
+    let what: string;
+    if (domBusy) what = `the DOM changed ${domChanges} times, last ${Math.round(t1 - lastDomAt)} ms before the end${top.length ? `; with ${top.join(", ")}` : ""}`;
+    else if (top.length) what = `after the DOM settled, only ${top.join(" and ")}`;
+    else what = pending.length ? "nothing else happened; the wait was for those responses" : "nothing recorded kept it busy (a request the recorder did not see?)";
+    const fix = period != null && period < quiet ? ` — a ${period} ms rhythm never leaves a ${quiet} ms gap: a smaller quiet, or an until` : pending.length ? "" : " — an until returns the moment your own effect lands";
+    return `never quiet for ${quiet} ms: ${head}; ${what}${fix}`;
+  }
   #fingerprint(): Promise<string> {
     return this.page.evaluate(() => `${document.getElementsByTagName("*").length}:${document.body?.textContent?.length ?? 0}:${document.activeElement?.tagName ?? ""}#${(document.activeElement as HTMLElement | null)?.id ?? ""}:${location.href}`).catch(() => "?");
   }

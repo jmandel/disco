@@ -157,15 +157,36 @@ describe("act + report: the promise table", () => {
     const r = await s.act("wait", async () => {}, { until: () => s.page.locator("#never").waitFor(), max: 400 });
     assert.ok(r.console.some((c) => c.text.includes("gauntlet-boom")), JSON.stringify(r.console));
   });
-  it("a page that never goes quiet returns at max and says so, with what is in flight", async () => {
+  it("a bare act that reaches max says what it was waiting for; the header names non-default settings", async () => {
     await g.ctl.set({ slowMs: 2500 });
     try {
       const r = reached(await s.act("slow chart", (p) => p.click("#load-chart"), { max: 900 }));
       assert.equal(r.returned, "max");
       assert.ok(r.pending.some((p) => p.includes("/api/slow")), JSON.stringify(r.pending));
-      assert.match(String(r), /still changing/);
+      assert.match(r.note ?? "", /never quiet for 500 ms: 1 still unanswered \(GET \/api\/slow/, r.note);
+      assert.match(String(r), /returned: max \(quiet 500 · max 900\)/); assert.doesNotMatch(String(r), /still changing/);
+      assert.equal(r.timing.quiet, 500); assert.equal(r.timing.max, 900);
       await s.act("drain", async () => {}, { until: () => s.page.locator("#chart:has-text('Chart loaded')").waitFor(), max: 4000 });
     } finally { await g.ctl.reset(); }
+  });
+  it("a bare act on a page that polls names the rhythm that kept it awake", async () => {
+    await s.page.evaluate(() => { (window as any).__poll = setInterval(() => fetch("/api/people").catch(() => {}), 200); });
+    try {
+      const r = reached(await s.act("probe", (p) => p.evaluate(() => 1)));
+      assert.equal(r.returned, "max");
+      assert.match(r.note ?? "", /never quiet for 500 ms: .*GET \/api\/people ×\d+ every ~\d+ ms — a \d+ ms rhythm never leaves a 500 ms gap: a smaller quiet, or an until/, r.note);
+      assert.doesNotMatch(String(r), /\(quiet 500 · max 3000\)/, "defaults are not repeated in the header");
+    } finally { await s.page.evaluate(() => clearInterval((window as any).__poll)); }
+  });
+  it("a WebSocket keepalive (identical frames) does not keep an act from going quiet; the frames are still logged", async () => {
+    await s.page.evaluate(() => new Promise<void>((res) => { const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`); (window as any).__ka = ws; ws.onopen = () => { (window as any).__kaTimer = setInterval(() => ws.send("ping"), 200); res(); }; }));
+    await sleep(700);   // the first ping and the first pong have a predecessor from here on
+    try {
+      const r = reached(await s.act("probe", (p) => p.evaluate(() => 2)));
+      assert.equal(r.returned, "quiet", r.note); assert.ok(r.timing.observeMs < 1500, `observe ${r.timing.observeMs}`);
+      const frames = s.sql<{ n: number }>("SELECT count(*) n FROM ws_frames WHERE action_id=? AND dir IN ('in','out')", r.action)[0].n;
+      assert.ok(frames >= 2, `keepalive frames are logged: ${frames}`);
+    } finally { await s.page.evaluate(() => { clearInterval((window as any).__kaTimer); (window as any).__ka.close(); }); await sleep(300); }
   });
 });
 

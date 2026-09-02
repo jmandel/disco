@@ -1,12 +1,12 @@
 // Reports and looks as text — what the CLI prints and what `String(report)` returns.
-import type { Report, Diagnosis } from "./session.ts";
+import { DEFAULT_MAX, DEFAULT_QUIET, type Report, type Diagnosis } from "./session.ts";
 import type { Look } from "./look.ts";
 
 export function formatReport(r: Report): string {
   const L: string[] = [];
   const tm = r.timing;
   const secs = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${n}ms`);
-  L.push(`${r.action} "${r.label}"  ${r.ok ? "ok" : "FAILED"}  ${secs(tm.totalMs)} (run ${tm.runMs} · observe ${tm.observeMs} · report ${tm.reportMs})  returned: ${r.returned}${r.returned === "max" && !r.until ? ` (still changing${r.pending.length ? `; ${r.pending.length} in flight` : ""})` : ""}  ${r.url}${r.openPages > 1 ? `  (+${r.openPages - 1} other page${r.openPages > 2 ? "s" : ""} open)` : ""}`);
+  L.push(`${r.action} "${r.label}"  ${r.ok ? "ok" : "FAILED"}  ${secs(tm.totalMs)} (run ${tm.runMs} · observe ${tm.observeMs} · report ${tm.reportMs})  returned: ${r.returned}${tm.quiet !== DEFAULT_QUIET || tm.max !== DEFAULT_MAX ? ` (quiet ${tm.quiet} · max ${tm.max})` : ""}  ${r.url}${r.openPages > 1 ? `  (+${r.openPages - 1} other page${r.openPages > 2 ? "s" : ""} open)` : ""}`);
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
   if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.elapsedMs}ms${r.until.ok && r.until.value !== undefined ? ` → ${JSON.stringify(r.until.value).slice(0, 80)}` : ""}${r.until.alreadyTrue ? "  ⚠ already true before the action (which still ran) — it proves nothing; wait for something that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}`);
   if (r.note) L.push("  note: " + r.note);

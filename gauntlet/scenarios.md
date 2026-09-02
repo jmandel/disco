@@ -423,6 +423,12 @@ click landed**; the result still arrives.
 A separate document with 10,000 real `<tr>` rows (not virtualised), `#big-btn` and `#big-out`. Exists for the
 report-overhead ceiling: the aria snapshot and diff must stay bounded on a large DOM.
 
+### WebSocket keepalive
+
+A bare `ping` text frame on `/ws` is answered with a bare `pong`, with no counter — the shape of a real keepalive. Every
+other message is echoed back with a rising `seq`. For disco: a frame identical to the previous one in its direction on
+its socket is a heartbeat and must not keep an act from going quiet; an echo with a new `seq` is activity and must.
+
 ### 34. Other wire formats (`#s-34`)
 
 `#load-xml` fetches `GET /api/patient.xml` (`application/fhir+xml`: a Patient with id, identifier `MRN-0042`, name text

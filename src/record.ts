@@ -62,7 +62,7 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
   const netAt = (url: string) => { let h = ""; try { h = new URL(url).host; } catch {} lastNet.set(h, store.now()); };
 
   const track = (p: Promise<unknown>) => { pending.add(p); p.catch((e) => warn("async write", e)).finally(() => pending.delete(p)); };
-  const emit = <K extends EventKind>(kind: K, e: Events[K]) => { if (kind === "request" || kind === "response") netAt((e as any).url); else lastOther = store.now(); for (const cb of listeners[kind]) { try { cb(e); } catch (err) { warn(`listener ${kind}`, err); } } };
+  const emit = <K extends EventKind>(kind: K, e: Events[K]) => { if (kind === "request" || kind === "response") netAt((e as any).url); else if (!(kind === "ws" && (e as any).heartbeat)) lastOther = store.now(); for (const cb of listeners[kind]) { try { cb(e); } catch (err) { warn(`listener ${kind}`, err); } } };
   const guard = <A extends unknown[]>(where: string, fn: (...a: A) => unknown) => (...a: A) => { try { const r = fn(...a); if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch((e) => warn(where, e)); } catch (e) { warn(where, e); } };
   const idOf = (r: Request) => { let id = ids.get(r); if (!id) { id = `r${store.run}-${++counter}`; ids.set(r, id); } return id; };
   const cap = (s: string | null | undefined, n: number) => (s == null ? null : s.length > n ? s.slice(0, n) : s);
@@ -141,9 +141,12 @@ export function attachRecorder(context: BrowserContext, store: Store, current: (
     cdpSessions.add(cdp);
     const urls = new Map<string, string>();
     const urlOf = (id: string) => urls.get(id) ?? "(opened before recording)";
+    const lastPayload = new Map<string, string>();   // socket+direction → its previous frame: a repeat is a heartbeat, not the app working
     const frame = (dir: "in" | "out", id: string, payload: string) => {
       if (scratch(page)) return;
-      const f = { dir, payload: String(payload), url: urlOf(id), t: store.now() };
+      const key = `${id} ${dir}`, text = String(payload);
+      const heartbeat = lastPayload.get(key) === text; lastPayload.set(key, text);
+      const f = { dir, payload: text, url: urlOf(id), t: store.now(), ...(heartbeat ? { heartbeat: true } : {}) };
       if (!silent) store.insert("ws_frames", { t: f.t, url: f.url, dir, payload: cap(f.payload, WS_PAYLOAD_CAP), action_id: current() });
       emit("ws", f);
     };
