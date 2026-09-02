@@ -42,7 +42,7 @@ export interface Diagnosis {
   shot?: string;
 }
 export interface WireLine { id: string; method: string; path: string; status?: number | null; ms?: number | null; mime?: string | null; body?: string | null; size?: number | null; state?: string | null; type?: string | null; earlier?: boolean }
-export interface Proposal { kind: "response" | "appeared" | "gone" | "url" | "storage"; code: string; atMs: number | null }
+export interface Proposal { kind: "response" | "appeared" | "text" | "gone" | "url" | "storage"; code: string; atMs: number | null }
 export interface Report<T = unknown> {
   action: string;              // act:<n> — the id every log row inside the window carries
   label: string;
@@ -330,7 +330,10 @@ export class Session {
       const pool = byPath.length ? byPath : every;
       const paths = new Set(pool.map((r) => pathOnly(r.url)));
       if (!byPath.length && paths.size > 1) throw new Error(`json: ${scopeText} matches only query strings, on ${paths.size} different endpoints (${[...paths].map((p) => p.slice(-60)).join(", ")}) — name the path`);
-      const rows = pool.some((r) => boundary(r.url)) ? pool.filter((r) => boundary(r.url)) : pool;
+      const bounded = pool.some((r) => boundary(r.url)) ? pool.filter((r) => boundary(r.url)) : pool;
+      // "/visit" names the collection: prefer "/visit?…" over "/visit/<uuid>" when both answered (a sub-path is a different resource)
+      const exactEnd = (u: string) => { const i = u.indexOf(urlPart); const c = u[i + urlPart.length]; return c === undefined || "?#&".includes(c); };
+      const rows = !urlPart.endsWith("/") && bounded.some((r) => exactEnd(r.url)) ? bounded.filter((r) => exactEnd(r.url)) : bounded;
       if (!rows.length) return null;
       if (rows[0].body_state === "pending" && Date.now() - t0 < 1000) { await sleep(50); continue; }
       const row = rows.find((r) => r.body_hash);
@@ -437,7 +440,16 @@ export class Session {
       }
       d.reason = reason; d.over = over;
     }
-    if (reason === "not-found") { d.candidates = (await controls(page).catch(() => [])).slice(0, 25).map((c) => `${c.selector}${c.role && c.name && !c.selector.startsWith("role=") ? `  (${c.role} "${c.name}")` : ""}`); hint = " — nothing matches; the visible controls are listed below, and look(selector) tries a selector without acting"; }
+    if (reason === "not-found") {
+      const cs = await controls(page).catch(() => []);
+      // `:has-text("Search patient")` on an icon button whose name is an aria-label: the text is not in its content, but a control carries that name
+      const wanted = (desc ?? full).match(/:has-text\(["']([^"']+)["']\)|text=["']?([^"'\]]+)|getByText\(["']([^"']+)["']/);
+      const t = (wanted?.[1] ?? wanted?.[2] ?? wanted?.[3] ?? "").trim().toLowerCase();
+      const named = t ? cs.filter((c) => c.name.toLowerCase().includes(t)) : [];
+      const meant = named.length ? ` — did you mean ${named.slice(0, 3).map((c) => c.selector.startsWith("role=") ? c.selector : `role=${c.role}[name="${c.name}"]`).join(" or ")}? "${named[0].name}" is that control's accessible name (an aria-label or a label), which :has-text() and text= cannot see` : "";
+      d.candidates = [...named, ...cs.filter((c) => !named.includes(c))].slice(0, 25).map((c) => `${c.selector}${c.role && c.name && !c.selector.startsWith("role=") ? `  (${c.role} "${c.name}")` : ""}`);
+      hint = `${meant} — nothing matches${meant ? "" : "; the visible controls are listed below, and look(selector) tries a selector without acting"}`;
+    }
     else if (reason === "occluded" && !styled) hint = ` — covered by ${over ?? "another element"}: dismiss the dialog or toast that is over it, or wait for it to be gone`;
     else if (reason === "detached") hint = " — the app replaces this element faster than a mouse click; locator.dispatchEvent(\"click\") lands where a real click cannot";
     else if (reason === "timeout" && /page\.goto/.test(full)) hint = ` — the navigation did not finish within max; raise max for this act, or goto(url, { waitUntil: "commit" }) and wait for the element you need`;
@@ -499,7 +511,7 @@ function propose(rows: any[], t0: number, preMs: number, ui: Report["ui"], preLi
       const t = a.rest; if (!t || t.length < 3 || t.length > 60) continue;
       const frag = t.replace(/\s+/g, "");
       if (preText.includes(frag)) continue;
-      out.push({ kind: "appeared", code: `() => page.waitForFunction(t => { const txt = (n) => n.nodeType === 3 ? n.textContent : [...(n.shadowRoot ? [n.shadowRoot] : []), ...n.childNodes].map(txt).join(""); return txt(document.body).replace(/\\s+/g, "").includes(t); }, ${JSON.stringify(frag)})`, atMs: null }); n++; continue;
+      out.push({ kind: "text", code: `() => page.waitForFunction(t => { const txt = (n) => n.nodeType === 3 ? n.textContent : [...(n.shadowRoot ? [n.shadowRoot] : []), ...n.childNodes].map(txt).join(""); return txt(document.body).replace(/\\s+/g, "").includes(t); }, ${JSON.stringify(frag)})`, atMs: null }); n++; continue;
     }
     if (!a.name) continue;
     const st = a.states.map((x) => `, ${x}: true`).join("");

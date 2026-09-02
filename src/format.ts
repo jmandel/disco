@@ -8,11 +8,11 @@ export function formatReport(r: Report): string {
   const secs = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${n}ms`);
   L.push(`${r.action} "${r.label}"  ${r.ok ? "ok" : "FAILED"}  ${secs(tm.totalMs)} (run ${tm.runMs} · observe ${tm.observeMs} · report ${tm.reportMs})  returned: ${r.returned}${r.returned === "max" && !r.until ? ` (still changing${r.pending.length ? `; ${r.pending.length} in flight` : ""})` : ""}  ${r.url}${r.openPages > 1 ? `  (+${r.openPages - 1} other page${r.openPages > 2 ? "s" : ""} open)` : ""}`);
   if (r.diagnosis) L.push("  diagnosis: " + fmtDiag(r.diagnosis));
-  if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.elapsedMs}ms${r.until.alreadyTrue ? "  ⚠ already true before the action (which still ran) — it proves nothing; wait for something that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}`);
+  if (r.until) L.push(`  until: ${r.until.ok ? "✓" : "✗"} ${r.until.elapsedMs}ms${r.until.ok && r.until.value !== undefined ? ` → ${JSON.stringify(r.until.value).slice(0, 80)}` : ""}${r.until.alreadyTrue ? "  ⚠ already true before the action (which still ran) — it proves nothing; wait for something that is false beforehand" : ""}${r.until.ok ? "" : " — " + (r.until.error ?? "")}`);
   if (r.note) L.push("  note: " + r.note);
   if (r.proposed.length) {
     L.push("  proposed until (each was false before the action):");
-    for (const p of r.proposed) L.push(`    ${p.atMs != null ? `+${p.atMs}ms`.padEnd(8) : "end     "} ${p.code}`);
+    for (const p of r.proposed) L.push(`    ${p.atMs != null ? `+${p.atMs}ms`.padEnd(8) : "end     "} ${p.code}${p.kind === "text" ? "   (page text: holds until it changes again — for a step that runs twice, prefer a response or a role with state)" : ""}`);
   }
   if (r.requests.length || r.static?.count || r.thirdParty?.count) {
     const lines = r.requests.map((w) => `${w.earlier ? "(started earlier) " : ""}${w.method} ${w.path.length > 80 ? w.path.slice(0, 77) + "…" : w.path} ${w.status ?? (w.state === "error" ? "ERR" : "…")}${w.ms != null ? ` ${w.ms}ms` : ""}${w.mime ? " " + w.mime : ""}${w.body ? " " + w.body : ""}${w.size != null ? ` ${fmtBytes(w.size)}` : ""}${w.state && w.state !== "ok" ? ` [${w.state === "missing" ? "body not read by the page" : w.state === "pending" && w.status != null ? "body pending" : w.state}]` : ""}`);

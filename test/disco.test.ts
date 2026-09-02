@@ -87,7 +87,9 @@ describe("act + report: the promise table", () => {
     await g.ctl.set({ saveFails: true });
     try {
       const r = reached(await s.act("save", (p) => p.click("#save"), { until: () => Promise.race([s.page.locator("#toast[data-kind=ok]").waitFor().then(() => "ok"), s.page.locator("#toast[data-kind=fail]").waitFor().then(() => "fail")]) }));
-      assert.equal(r.until?.value, "fail");
+      assert.equal(r.until?.value, "fail"); assert.match(String(r), /until: ✓ \d+ms → "fail"/);
+      const posted = await s.json<{ pending?: boolean; ok?: boolean }>("/api/save", { action: r.action });
+      assert.equal(posted?.pending, true, `the collection beats its sub-path: ${JSON.stringify(posted)}`);
       assert.ok(r.writes.some((w) => w.startsWith("POST /api/save 202")), JSON.stringify(r.writes));
       await sleep(200);
       const status = s.sql<{ status: number }>("SELECT status FROM requests WHERE url LIKE '%/api/save/status%' AND action_id=? ORDER BY t_start DESC LIMIT 1", r.action)[0];
@@ -375,7 +377,7 @@ describe("exam A fold-backs", () => {
   it("a text-only change proposes a page-text until that holds; a reorder without additions is noted", async () => {
     const r = reached(await s.act("dblclick", (p) => p.dblclick("#dbl-target")));
     const p = r.proposed.find((x) => x.code.includes("waitForFunction") && x.code.includes("editing"));
-    assert.ok(p, JSON.stringify(r.proposed));
+    assert.ok(p, JSON.stringify(r.proposed)); assert.equal(p!.kind, "text"); assert.match(String(r), /holds until it changes again/);
     const fn = new Function("page", `return (${p!.code})`)(s.page) as () => Promise<unknown>;
     await fn();
     reached(await s.act("commit", (p) => p.press("#dbl-input", "Enter"), { until: () => s.page.locator("#dbl-state:has-text('committed')").waitFor() }));
@@ -465,6 +467,14 @@ describe("exam B fold-backs", () => {
       }
     }
     assert.ok(checked >= 3, `only ${checked} proposals checked`);
+  });
+  it("not-found on a text selector names the control whose accessible name carries that text", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button id=\"icon\" aria-label=\"Search patient\"><svg width=\"12\" height=\"12\"></svg></button>')");
+    const r = await s.act("icon by text", (p) => p.click('button:has-text("Search patient")'), { max: 500 });
+    assert.equal(r.diagnosis?.reason, "not-found");
+    assert.match(r.diagnosis!.message, /did you mean (#icon|role=button\[name="Search patient"\])/);
+    assert.match(r.diagnosis!.candidates![0], /icon|Search patient/);
+    await s.page.evaluate("document.getElementById('icon').remove()");
   });
   it("reached says the action ran when it refuses an already-true until", async () => {
     const r = await s.act("already", (p) => p.click("#noop"), { until: () => s.page.locator("#load-chart").waitFor() });
