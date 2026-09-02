@@ -164,7 +164,7 @@ apps/<app>/
   README.md    the narrative an agent judged worth writing: what the app is, anchors, the wire facts that matter, traps, open questions
   sdk.ts       the app's missing API: typed workflows, reached() on every step, facts read from the server; exports check(s)
   evidence/    reports, bodies and shots you copied because README.md cites them (optional)
-  store/       the log (gitignored)
+  store/       the log (gitignored): bodies, shots, rows — the only place values live; local, and yours to destroy when the pack is done
 ```
 
 **The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
@@ -175,8 +175,12 @@ that put that screen there: its evidence carries the accessibility tree it left 
 a marker and a record has no free-text field for it, the marker goes in the parent record or an attached note — the workflow is
 not skipped. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
 the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites (`act:12`, or a range `act:12-15`) into
-`evidence/`: the report (`act-N.json`), its shot, its wire (`act-N-wire.json`: requests with headers and bodies, navigations) and the
-accessibility tree it left behind (`act-N-aria.txt`) — and
+`evidence/` **as shapes, never values**: the report (`act-N.json`), its wire (`act-N-wire.json`) and the accessibility tree it left
+behind (`act-N-aria.txt`), with URLs as templates (`/patient/<uuid>?q=<v>`), bodies as skeletons (keys, types, lengths), storage values
+blanked, no headers, no screenshots, and every string that appears as a value in the app's JSON bodies — or looks like an
+identifier, date, email or token — replaced by `<data>`. A pack is therefore safe to commit from an environment whose data is not
+yours to keep; what it proves is structure and behaviour, and the check re-proves the values live. `close` also names data that
+leaked into README.md or sdk.ts, and
 prints what it could not back: cites with no report, a number beside a cite that its evidence does not contain, numbers with no cite,
 and sentences with neither a cite nor an sdk function. `./disco close` does this with no browser up, so it is the lint to run after every README edit. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). `sdk.ts` runs its own check:
 
@@ -204,7 +208,7 @@ if (import.meta.main) { const s = await open("shop", { url: URL }); let f = 1; t
 ```
 
 A write workflow takes the record's fields as parameters (`addOrder(s, { sku, qty })`) and the check supplies marked values,
-so the first real task can call it. `node apps/shop/sdk.ts` runs it and leaves the browser running; while it runs,
+so the first real task can call it; reads in the check target records the check created, never someone's real ones. `node apps/shop/sdk.ts` runs it and leaves the browser running; while it runs,
 `./disco sql "SELECT n, label, ok FROM actions ORDER BY n DESC LIMIT 5"` is its progress bar, and its `close` prints the evidence and claim check. A pack is done when it passes **warm and cold** — once on
 the browser you explored with, then once more after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
 had already done.

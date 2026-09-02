@@ -3,7 +3,8 @@
 // There is no API layer in front of the tables: `disco sql` and `s.sql()` are the API.
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { makeShaper, collectValues } from "./shape.ts";
 import { join } from "node:path";
 
 export const STORE_VERSION = 5;
@@ -278,57 +279,74 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; absolutes: string[]; wide: string[] };
+export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; absolutes: string[]; wide: string[]; leaks: string[]; storeBytes: number; storeDir: string; app: string };
 /** The summary as `close` prints it (the CLI's and a script's alike). */
 export function formatEvidence(ev: EvidenceSummary, app: string): string[] {
-  if (!ev.cited) return [];
-  const L = [`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} new to apps/${app}/evidence/` : "nothing new to copy"}${ev.present ? `, ${ev.present} already there` : ""}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`];
-  for (const w of ev.wide) L.push(`  wide range: ${w}`);
-  for (const u of ev.unbacked) L.push(`  claim check: ${u}`);
-  if (ev.uncited.length) L.push(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
-  if (ev.absolutes.length) L.push(`  absolutes with nothing behind them (only / never / always / identical / exactly — the claims most often wrong): ${ev.absolutes.length}${ev.absolutes.length >= 8 ? "+" : ""}, e.g. "${ev.absolutes[0]}"`);
-  if (ev.bare.length) L.push(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
+  const L: string[] = [];
+  if (ev.cited) {
+    L.push(`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} new (shaped: templates, skeletons, no values) to apps/${app}/evidence/` : "nothing new to copy"}${ev.present ? `, ${ev.present} already there` : ""}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`);
+    for (const w of ev.wide) L.push(`  wide range: ${w}`);
+    for (const u of ev.unbacked) L.push(`  claim check: ${u}`);
+    if (ev.uncited.length) L.push(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
+    if (ev.absolutes.length) L.push(`  absolutes with nothing behind them (only / never / always / identical / exactly — the claims most often wrong): ${ev.absolutes.length}${ev.absolutes.length >= 8 ? "+" : ""}, e.g. "${ev.absolutes[0]}"`);
+    if (ev.bare.length) L.push(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
+  }
+  for (const l of ev.leaks) L.push(`  data in the pack: ${l} — the pack is documentation; values belong in the store`);
+  if (ev.storeBytes) L.push(`store: ${(ev.storeBytes / 1048576).toFixed(1)} MB of bodies, shots and rows at ${ev.storeDir} — local only, never committed; rm -rf it when the pack is done`);
   return L;
 }
+function dirBytes(dir: string): number { let n = 0; try { for (const e of readdirSync(dir, { withFileTypes: true })) { const p = join(dir, e.name); if (e.isDirectory()) n += dirBytes(p); else { try { n += statSync(p).size; } catch {} } } } catch {} return n; }
+
+/** The pack rule, made mechanical: every `act:N` the README cites gets its report, its wire and the accessibility tree it left behind
+ *  copied to evidence/ — SHAPED (urls as templates, bodies as skeletons, data blanked, no headers, no shots) — once; cites with no report,
+ *  numbers the cited evidence does not contain, uncited numbers and absolutes are named; so is data that leaked into the pack's prose. */
 export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary {
   const readme = join(packDir, "README.md");
-  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], absolutes: [], wide: [] };
+  const app = packDir.split("/").filter(Boolean).at(-1) ?? "";
+  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], absolutes: [], wide: [], leaks: [], storeBytes: 0, storeDir, app };
   if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
   const text = readFileSync(readme, "utf8");
   // a range copies each act; a long one is a check run, not a citation — cap it and say so
   const wide: string[] = [];
   const ids = [...new Set([...text.matchAll(/\bact:(\d+)(?:\s*[-–]\s*(\d+))?\b/g)].flatMap((m) => { const a = Number(m[1]), b = m[2] ? Number(m[2]) : a; if (b > a + 9) { wide.push(`act:${a}-${b} (${b - a + 1} acts; only the first 10 copied — cite the acts that carry the facts)`); } return b >= a ? Array.from({ length: Math.min(b - a + 1, 10) }, (_, i) => `act:${a + i}`) : [`act:${a}`]; }))];
   const st = openStore(storeDir);
+  const shaper = makeShaper(collectValues(st));
   const copied: string[] = [], missing: string[] = []; let present = 0;
+  const evPath = (n: string, suffix: string) => join(packDir, "evidence", `act-${n}${suffix}`);
   const evidenceText = (id: string): string | null => {
     const n = id.slice(4); const parts: string[] = [];
-    for (const f of [`act-${n}.json`, `act-${n}-wire.json`, `act-${n}-aria.txt`]) { const p = join(packDir, "evidence", f); if (existsSync(p)) parts.push(readFileSync(p, "utf8")); }
-    if (!parts.length) { const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id); if (row?.report) parts.push(row.report); }
+    for (const suf of [".json", "-wire.json", "-aria.txt"]) { const p = evPath(n, suf); if (existsSync(p)) parts.push(readFileSync(p, "utf8")); }
+    if (!parts.length) { const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id); if (row?.report) parts.push(JSON.stringify(shaper.report(JSON.parse(row.report)))); }
     return parts.length ? parts.join("\n") : null;
+  };
+  const writeEvidence = (id: string, rep: any) => {
+    const n = id.slice(4);
+    mkdirSync(join(packDir, "evidence"), { recursive: true });
+    writeFileSync(evPath(n, ".json"), JSON.stringify(shaper.report(rep), null, 2) + "\n");
+    try { if (rep?.aria) writeFileSync(evPath(n, "-aria.txt"), shaper.aria(st.body(rep.aria))); } catch {}
+    try {
+      const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;
+      let budget = 512 * 1024;
+      const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", id)
+        .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (r.method !== "GET" || (budget -= size) >= 0); return shaper.wireRow({ ...r, ...(take ? { response_body: safeBody(st, r.body_hash) } : {}) }); });
+      const nav = st.sql<any>("SELECT t, kind, url FROM nav WHERE run=(SELECT run FROM actions WHERE id=?) AND t BETWEEN ? AND ? ORDER BY seq", id, t0 - 1, t1 + 1).map((x) => ({ ...x, url: x.url ? shaper.url(x.url) : x.url }));
+      if (requests.length || nav.length) writeFileSync(evPath(n, "-wire.json"), JSON.stringify({ action: id, requests, nav }, null, 2) + "\n");
+    } catch {}
+    try { for (const suf of [".jpg"]) if (existsSync(evPath(n, suf))) unlinkSync(evPath(n, suf)); } catch {}   // screenshots are pixels of data; an older copy goes
   };
   try {
     for (const id of ids) {
       const n = id.slice(4);
-      const target = join(packDir, "evidence", `act-${n}.json`);
-      if (existsSync(target)) { present++; continue; }
       const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id);
+      if (existsSync(evPath(n, ".json"))) {
+        present++;
+        // evidence copied by an earlier disco may hold values: re-shape it in place (shaping is idempotent)
+        if (row?.report) writeEvidence(id, JSON.parse(row.report));
+        else { try { const old = JSON.parse(readFileSync(evPath(n, ".json"), "utf8")); writeFileSync(evPath(n, ".json"), JSON.stringify(shaper.report(old), null, 2) + "\n"); } catch {} }
+        continue;
+      }
       if (!row?.report) { missing.push(id); continue; }
-      mkdirSync(join(packDir, "evidence"), { recursive: true });
-      const rep = JSON.parse(row.report);
-      writeFileSync(target, JSON.stringify(rep, null, 2) + "\n");
-      try { const shot: string | undefined = rep?.diagnosis?.shot; if (shot && existsSync(shot)) writeFileSync(join(packDir, "evidence", `act-${n}.jpg`), readFileSync(shot)); } catch {}
-      // the accessibility tree the act left behind: what a look right after it showed, so a screen fact can cite the act
-      try { if (rep?.aria) writeFileSync(join(packDir, "evidence", `act-${n}-aria.txt`), st.body(rep.aria)); } catch {}
-      // the wire behind the report: the act's requests (request bodies, and response bodies of writes when small) and the navigations in its window
-      try {
-        const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;
-        // bodies travel with the evidence — writes always, reads while the act's total stays under 512 KB — so "the body says X" is checkable from evidence/ alone
-        let budget = 512 * 1024;
-        const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_headers, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", id)
-          .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (r.method !== "GET" || (budget -= size) >= 0); return { ...r, req_headers: safeJson(r.req_headers), resp_headers: safeJson(r.resp_headers), ...(take ? { response_body: safeBody(st, r.body_hash) } : {}) }; });
-        const nav = st.sql<any>("SELECT t, kind, url FROM nav WHERE run=(SELECT run FROM actions WHERE id=?) AND t BETWEEN ? AND ? ORDER BY seq", id, t0 - 1, t1 + 1);
-        if (requests.length || nav.length) writeFileSync(join(packDir, "evidence", `act-${n}-wire.json`), JSON.stringify({ action: id, requests, nav }, null, 2) + "\n");
-      } catch {}
+      writeEvidence(id, JSON.parse(row.report));
       copied.push(id);
     }
     // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
@@ -351,7 +369,10 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
       if (!texts.length) continue;
       for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
     }
-    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide };
+    // data that leaked into the prose or the code: the same rules that shape the evidence
+    const files = ["README.md", "sdk.ts"].filter((f) => existsSync(join(packDir, f))).map((f) => ({ name: f, text: readFileSync(join(packDir, f), "utf8") }));
+    const leaks = shaper.leaks(files);
+    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide, leaks, storeBytes: dirBytes(storeDir), storeDir, app };
   } finally { st.close(); }
 }
 

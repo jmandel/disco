@@ -124,15 +124,17 @@ if (import.meta.main) {
     assert.match(c.out, /absolutes with nothing behind them .*: 2, e\.g\. "The application is a single page whose header never changes/);   // "never changes" and "the only call"
     assert.match(c.out, /sentences with neither an act id nor an sdk function behind them: 3, e\.g\. "The application is a single page/);
     const wire2 = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", "act-2-wire.json"), "utf8"));
-    assert.ok(wire2.requests.some((r: any) => r.url.includes("/api/slow") && r.response_body && typeof r.response_body.ms === "number"), "read bodies travel with the evidence");
-    assert.match(readFileSync(join(appsDir, "chk", "evidence", "act-2-aria.txt"), "utf8"), /button "Load Chart"/, "the act's accessibility tree travels with the evidence");
+    assert.ok(wire2.requests.some((r: any) => r.url.includes("/api/slow") && r.response_body && r.response_body.ms === "number"), "read bodies travel as skeletons: " + JSON.stringify(wire2.requests.map((r: any) => r.response_body)));
+    const aria = readFileSync(join(appsDir, "chk", "evidence", "act-2-aria.txt"), "utf8");
+    assert.match(aria, /button "Load Chart"/, "control names travel"); assert.doesNotMatch(aria, /- text: "[^<]/, "text lines are blanked");
+    assert.match(c.out, /store: [\d.]+ MB .* local only, never committed/);
     assert.match(c.out, /claim check: act:2 is cited for 4242 but its evidence does not contain it/);
     assert.match(c.out, /uncited numbers .*: 1 sentence, e\.g\. "Six products cost 9999 in total\."/);   // §17, the list marker and the backticked act:2 are not uncited claims
     const ev = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.json`), "utf8"));
     assert.equal(ev.action, failedId); assert.equal(ev.diagnosis.reason, "not-found");
-    assert.ok(existsSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.jpg`)), "the diagnosis shot is copied too");
+    assert.equal(ev.diagnosis.shot, undefined, "no screenshot path in the evidence"); assert.ok(!existsSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.jpg`)), "screenshots never leave the store");
     const wire = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", "act-2-wire.json"), "utf8"));
-    assert.equal(wire.action, "act:2"); assert.ok(wire.requests.some((r: any) => r.url.includes("/api/slow")), JSON.stringify(wire.requests.map((r: any) => r.url)));
-    assert.equal(typeof wire.requests[0].req_headers, "object", "request headers travel with the evidence");
+    assert.equal(wire.action, "act:2"); assert.ok(wire.requests.some((r: any) => r.url.includes("/api/slow?ms=<v>")), JSON.stringify(wire.requests.map((r: any) => r.url)));
+    assert.equal(wire.requests[0].req_headers, undefined, "headers never leave the store");
   });
 });

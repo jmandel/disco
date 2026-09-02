@@ -594,6 +594,26 @@ describe("the log", () => {
       assert.equal(row?.body_state, "error", JSON.stringify(row)); assert.match(row?.error ?? "", /recording ended/);
     } finally { await g.ctl.reset(); }
   });
+  it("evidence is shaped: a record's name is blanked in the aria and the body, and named as a leak when it appears in the README", async () => {
+    const { syncEvidence, appStoreDir, appDir } = await import("../src/store.ts");
+    const { writeFileSync, rmSync, readFileSync: rf } = await import("node:fs");
+    const actId = s.sql<{ action_id: string }>("SELECT action_id FROM requests WHERE url LIKE '%/api/record/2%' AND action_id IS NOT NULL LIMIT 1")[0]?.action_id;
+    assert.ok(actId, "an act fetched record 2 earlier in the suite");
+    const pack = appDir("t", appsDir);
+    writeFileSync(join(pack, "README.md"), `# t\n\nRecord 2 is Alan Turing (${actId}).\n`);
+    try {
+      const ev = syncEvidence(pack, appStoreDir("t", appsDir));
+      assert.ok(ev.leaks.some((l) => /README\.md: .*"Alan Turing"/.test(l)), JSON.stringify(ev.leaks));
+      const n = actId!.slice(4);
+      const aria = rf(join(pack, "evidence", `act-${n}-aria.txt`), "utf8");
+      assert.doesNotMatch(aria, /Alan Turing/); assert.match(aria, /<data>|<text>/);
+      const wire = JSON.parse(rf(join(pack, "evidence", `act-${n}-wire.json`), "utf8"));
+      const rec = wire.requests.find((r: any) => r.url.includes("/api/record/"));
+      assert.ok(rec, JSON.stringify(wire.requests.map((r: any) => r.url))); assert.equal(rec.url.endsWith("/api/record/<id>"), true, rec.url);
+      if (rec.response_body) assert.equal(rec.response_body.name, "string");
+      assert.ok(!JSON.stringify(wire).includes("Alan Turing"));
+    } finally { rmSync(join(pack, "README.md")); rmSync(join(pack, "evidence"), { recursive: true, force: true }); }
+  });
   it("every act keeps the accessibility tree it left behind, as a blob the report names", async () => {
     const r = reached(await s.act("noop", (p) => p.click("#noop")));
     assert.match(r.aria ?? "", /^[0-9a-f]{64}$/);
