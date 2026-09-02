@@ -189,7 +189,8 @@ export async function check(s: Session): Promise<number> {
 if (import.meta.main) { const s = await open("shop", { url: URL }); let f = 1; try { f = await check(s); } finally { await s.close(); } process.exit(f ? 1 : 0); }
 ```
 
-`node apps/shop/sdk.ts` runs it and leaves the browser running. A pack is done when it passes **warm and cold** — once on
+A write workflow takes the record's fields as parameters (`addOrder(s, { sku, qty })`) and the check supplies marked values,
+so the first real task can call it. `node apps/shop/sdk.ts` runs it and leaves the browser running. A pack is done when it passes **warm and cold** — once on
 the browser you explored with, then once more after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
 had already done.
 
