@@ -115,6 +115,7 @@ async function main() { switch (cmd) {
       if (ev.cited) console.log(`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} new to apps/${app}/evidence/` : "nothing new to copy"}${ev.present ? `, ${ev.present} already there` : ""}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`);
       for (const u of ev.unbacked) console.log(`  claim check: ${u}`);
       if (ev.uncited.length) console.log(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
+      if (ev.bare.length) console.log(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
     } catch {}
     break;
   }

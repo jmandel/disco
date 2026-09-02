@@ -169,8 +169,10 @@ report or shot is in `evidence/`; a number without an act id is a guess. Write t
 memory: a number or a quoted string belongs in a sentence only with the act whose evidence contains it. When a stance requires
 a marker and a record has no free-text field for it, the marker goes in the parent record or an attached note — the workflow is
 not skipped. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
-the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites into `evidence/`: the report
-(`act-N.json`), its shot, and its wire (`act-N-wire.json`: requests with write bodies, navigations) — and names the cites that have no report behind them. `sdk.ts` runs its own check:
+the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites (`act:12`, or a range `act:12-15`) into
+`evidence/`: the report (`act-N.json`), its shot, and its wire (`act-N-wire.json`: requests with headers and bodies, navigations) — and
+prints what it could not back: cites with no report, a number beside a cite that its evidence does not contain, numbers with no cite,
+and sentences with neither a cite nor an sdk function. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). `sdk.ts` runs its own check:
 
 ```ts
 // apps/shop/sdk.ts

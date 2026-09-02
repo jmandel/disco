@@ -278,12 +278,12 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[] } {
+export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[] } {
   const readme = join(packDir, "README.md");
-  const none = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [] };
+  const none = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [] };
   if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
   const text = readFileSync(readme, "utf8");
-  const ids = [...new Set([...text.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
+  const ids = [...new Set([...text.matchAll(/\bact:(\d+)(?:\s*[-–]\s*(\d+))?\b/g)].flatMap((m) => { const a = Number(m[1]), b = m[2] ? Number(m[2]) : a; return b >= a && b - a <= 50 ? Array.from({ length: b - a + 1 }, (_, i) => `act:${a + i}`) : [`act:${a}`]; }))];
   const st = openStore(storeDir);
   const copied: string[] = [], missing: string[] = []; let present = 0;
   const evidenceText = (id: string): string | null => {
@@ -306,19 +306,24 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       // the wire behind the report: the act's requests (request bodies, and response bodies of writes when small) and the navigations in its window
       try {
         const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;
-        const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_headers, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? ORDER BY t_start", id)
-          .map((r) => ({ ...r, req_headers: safeJson(r.req_headers), resp_headers: safeJson(r.resp_headers), ...(r.method !== "GET" && r.body_hash && (r.body_size ?? 0) <= 65536 ? { response_body: safeBody(st, r.body_hash) } : {}) }));
+        // bodies travel with the evidence — writes always, reads while the act's total stays under 512 KB — so "the body says X" is checkable from evidence/ alone
+        let budget = 512 * 1024;
+        const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_headers, req_body, resp_headers, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? AND resource_type NOT IN ('script','stylesheet','image','font','media','texttrack','manifest') ORDER BY t_start", id)
+          .map((r) => { const size = r.body_size ?? 0; const take = r.body_hash && size <= 65536 && (r.method !== "GET" || (budget -= size) >= 0); return { ...r, req_headers: safeJson(r.req_headers), resp_headers: safeJson(r.resp_headers), ...(take ? { response_body: safeBody(st, r.body_hash) } : {}) }; });
         const nav = st.sql<any>("SELECT t, kind, url FROM nav WHERE run=(SELECT run FROM actions WHERE id=?) AND t BETWEEN ? AND ? ORDER BY seq", id, t0 - 1, t1 + 1);
         if (requests.length || nav.length) writeFileSync(join(packDir, "evidence", `act-${n}-wire.json`), JSON.stringify({ action: id, requests, nav }, null, 2) + "\n");
       } catch {}
       copied.push(id);
     }
     // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
-    const unbacked: string[] = [], uncited: string[] = [];
+    const unbacked: string[] = [], uncited: string[] = [], bare: string[] = [];
+    const sdkPath = join(packDir, "sdk.ts");
+    const exportsRe = existsSync(sdkPath) ? new RegExp(`\\b(${[...readFileSync(sdkPath, "utf8").matchAll(/export\s+(?:async\s+)?(?:function|const|let|class)\s+(\w+)/g)].map((m) => m[1]).filter(Boolean).join("|") || "__none__"})\\b`) : null;
     const body = text.replace(/```[\s\S]*?```/g, "").replace(/`([^`\n]*)`/g, (_, c) => (/^act:\d+$/.test(c) ? c : "`code`")).replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "").replace(/^\s*\d+\.\s+/gm, "").replace(/[§#]\s?\d+/g, "");
     for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
       const sentence = raw.replace(/\s+/g, " ").trim(); if (!sentence) continue;
       const cites = [...new Set([...sentence.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
+      if (!cites.length && !(exportsRe && exportsRe.test(sentence)) && sentence.length > 40 && !/^(open question|todo|not (yet )?(verified|tested|driven))/i.test(sentence) && bare.length < 8) bare.push(sentence.slice(0, 90));
       const numbers = [...sentence.replace(/\bact:\d+\b/g, "").matchAll(/(?<![\w.\/#-])\d{2,}(?:[.,]\d+)?(?![\w\/-])/g)].map((m) => m[0]);
       if (!numbers.length) continue;
       if (!cites.length) { if (uncited.length < 8) uncited.push(sentence.slice(0, 90)); continue; }
@@ -326,7 +331,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       if (!texts.length) continue;
       for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
     }
-    return { cited: ids.length, copied, present, missing, unbacked, uncited };
+    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare };
   } finally { st.close(); }
 }
 
