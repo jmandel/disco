@@ -119,5 +119,7 @@ if (import.meta.main) {
     const ev = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.json`), "utf8"));
     assert.equal(ev.action, failedId); assert.equal(ev.diagnosis.reason, "not-found");
     assert.ok(existsSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.jpg`)), "the diagnosis shot is copied too");
+    const wire = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", "act-2-wire.json"), "utf8"));
+    assert.equal(wire.action, "act:2"); assert.ok(wire.requests.some((r: any) => r.url.includes("/api/slow")), JSON.stringify(wire.requests.map((r: any) => r.url)));
   });
 });

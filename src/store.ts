@@ -293,13 +293,24 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id);
       if (!row?.report) { missing.push(id); continue; }
       mkdirSync(join(packDir, "evidence"), { recursive: true });
-      writeFileSync(target, JSON.stringify(JSON.parse(row.report), null, 2) + "\n");
-      try { const rep = JSON.parse(row.report); const shot: string | undefined = rep?.diagnosis?.shot; if (shot && existsSync(shot)) writeFileSync(join(packDir, "evidence", `act-${n}.jpg`), readFileSync(shot)); } catch {}
+      const rep = JSON.parse(row.report);
+      writeFileSync(target, JSON.stringify(rep, null, 2) + "\n");
+      try { const shot: string | undefined = rep?.diagnosis?.shot; if (shot && existsSync(shot)) writeFileSync(join(packDir, "evidence", `act-${n}.jpg`), readFileSync(shot)); } catch {}
+      // the wire behind the report: the act's requests (request bodies, and response bodies of writes when small) and the navigations in its window
+      try {
+        const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;
+        const requests = st.sql<any>("SELECT id, method, url, status, mime, resource_type, req_body, body_hash, body_size, body_state, t_start, t_response, t_end FROM requests WHERE action_id=? ORDER BY t_start", id)
+          .map((r) => ({ ...r, ...(r.method !== "GET" && r.body_hash && (r.body_size ?? 0) <= 65536 ? { response_body: safeBody(st, r.body_hash) } : {}) }));
+        const nav = st.sql<any>("SELECT t, kind, url FROM nav WHERE run=(SELECT run FROM actions WHERE id=?) AND t BETWEEN ? AND ? ORDER BY seq", id, t0 - 1, t1 + 1);
+        if (requests.length || nav.length) writeFileSync(join(packDir, "evidence", `act-${n}-wire.json`), JSON.stringify({ action: id, requests, nav }, null, 2) + "\n");
+      } catch {}
       copied.push(id);
     }
   } finally { st.close(); }
   return { cited: ids.length, copied, missing };
 }
+
+function safeBody(st: StoreReader, hash: string): unknown { try { const t = st.body(hash); try { return JSON.parse(t); } catch { return t.slice(0, 65536); } } catch { return null; } }
 
 /** apps/ next to this checkout (not the process cwd), unless DISCO_APPS_DIR or an explicit root says otherwise. */
 export function appsRoot(root?: string): string { return root ?? process.env.DISCO_APPS_DIR ?? join(import.meta.dirname, "..", "apps"); }
