@@ -6,6 +6,11 @@ import { makeShaper } from "../src/shape.ts";
 const sh = makeShaper(new Set(["barbara miller", "alan turing", "penicillin", "outpatient clinic"]));
 const shv = makeShaper({ values: new Set(["barbara miller", "outpatient clinic", "patient", "female"]), vocab: new Set(["outpatient", "clinic", "patient", "female", "search"]) });
 
+test("a value under a name-like key is data even when a bundle contains the word", () => {
+  const sh2 = makeShaper({ values: new Set(["nini", "female"]), vocab: new Set(["nini", "female"]), strong: new Set(["nini"]) });
+  assert.equal(sh2.isData("nini"), true); assert.equal(sh2.isData("Female"), false);
+  assert.equal(sh2.aria('- link "nini":\n- radio "Female"'), '- link "<data>":\n- radio "Female"');
+});
 test("vocabulary: a value made of the app's own words is a label, not data", () => {
   assert.equal(shv.isData("Outpatient Clinic"), false);
   assert.equal(shv.isData("patient"), false);
@@ -60,6 +65,6 @@ test("wireRow: no headers, bodies as skeletons", () => {
 test("leaks: prose that carries body values or identifiers is named", () => {
   const out = sh.leaks([{ name: "README.md", text: "The first hit is Barbara Miller (uuid 0f3c2a1b-1234-4c56-8d9e-a0b1c2d3e4f5), allergic to penicillin." }, { name: "sdk.ts", text: 'export const CARE = "6f0c9a92-6f24-11e3-af88-005056821db0";' }, { name: "clean.md", text: "Click Save and wait for the table." }]);
   assert.equal(out.length, 2);
-  assert.match(out[0], /README\.md: 2 values seen in the app's bodies — "Barbara Miller", "penicillin"; 1 uuid/);
+  assert.match(out[0], /README\.md: 2 values seen in the app's bodies — "Barbara Miller", "penicillin"; 1 uuid/);   // "penicillin" is 10 chars
   assert.match(out[1], /sdk\.ts: 1 uuid \(configuration constants, or records\?\)/);
 });

@@ -31,43 +31,46 @@ export interface Shaper {
 /** What the run says is data: string leaves of its JSON API bodies. And what is vocabulary: every word that occurs in the app's
  *  own bundles and documents, plus every JSON key — a value made only of such words ("Outpatient Clinic", "patient") is a label
  *  the app ships, not a record. */
-export function collectValues(st: StoreReader, limit = 2000): { values: Set<string>; vocab: Set<string> } {
-  const values = new Set<string>(), vocab = new Set<string>();
+const NAME_KEYS = /^(name|display|given|family|prefix|suffix|text|identifier|valueString|valueText|comment|description|note|notes|address\w*|city|country|phone|telecom|email|username|subject)$/i;
+export function collectValues(st: StoreReader, limit = 2000): { values: Set<string>; vocab: Set<string>; strong: Set<string> } {
+  const values = new Set<string>(), vocab = new Set<string>(), strong = new Set<string>();
   // newest first across runs (t restarts per run), one body per hash: a chart open alone is a hundred JSON answers
   const rows = st.sql<{ text: string | null }>("SELECT b.text FROM bodies b WHERE b.hash IN (SELECT r.body_hash FROM requests r WHERE r.resource_type IN ('xhr','fetch') AND r.mime LIKE '%json%' AND r.body_hash IS NOT NULL ORDER BY r.run DESC, r.t_start DESC LIMIT ?) AND b.text IS NOT NULL AND b.size <= 262144", limit);
-  const add = (v: unknown, depth: number) => {
+  // a string under a name-like key (name, display, given, text, identifier, comment…) is data even if some bundle happens to contain the word
+  const add = (v: unknown, depth: number, key = "") => {
     if (values.size > 50000 || depth > 12) return;
-    if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) values.add(t.toLowerCase()); }
-    else if (Array.isArray(v)) v.forEach((x) => add(x, depth + 1));
-    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) { vocab.add(k.toLowerCase()); add(x, depth + 1); }
+    if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) { values.add(t.toLowerCase()); if (NAME_KEYS.test(key)) strong.add(t.toLowerCase()); } }
+    else if (Array.isArray(v)) v.forEach((x) => add(x, depth + 1, key));
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) { vocab.add(k.toLowerCase()); add(x, depth + 1, k); }
   };
   for (const r of rows) { try { add(JSON.parse(r.text!), 0); } catch {} }
   // the app's own words: its scripts and documents (deduplicated by hash; the text column is capped at 512 KB each)
   const assets = st.sql<{ text: string | null }>("SELECT DISTINCT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('script','document') AND b.text IS NOT NULL LIMIT 400");
   for (const a of assets) { for (const w of a.text!.toLowerCase().match(/[a-z][a-z'-]{2,}/g) ?? []) { vocab.add(w); if (vocab.size > 400000) break; } }
-  return { values, vocab };
+  return { values, vocab, strong };
 }
 
-export function makeShaper(sets: { values: Set<string>; vocab: Set<string> } | Set<string>): Shaper {
+export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; strong?: Set<string> } | Set<string>): Shaper {
   const values = sets instanceof Set ? sets : sets.values;
   const vocab = sets instanceof Set ? new Set<string>() : sets.vocab;
+  const strong = sets instanceof Set ? new Set<string>() : (sets.strong ?? new Set<string>());
   // a value whose every word the app ships itself is a label, not a record ("outpatient clinic", "patient"); a name is not in any bundle
   const isLabel = (p: string) => { const words = p.toLowerCase().match(/[a-z][a-z'-]*/g) ?? []; return words.length > 0 && words.every((w) => vocab.has(w)); };
-  const isData = (p: string) => { const q = strip(p).trim().toLowerCase(); return values.has(q) && !isLabel(q); };
+  const isData = (p: string) => { const q = strip(p).trim().toLowerCase(); return strong.has(q) || (values.has(q) && !isLabel(q)); };
   const text = (s: string): string => {
     if (!s) return s;
     const words = patterns(s).split(/(\s+)/);   // keep the whitespace tokens
     const out: string[] = [];
     for (let i = 0; i < words.length; i++) {
       if (/^\s+$/.test(words[i]) || !words[i]) { out.push(words[i]); continue; }
-      let hit = 0;
+      let hit = -1;
       for (let n = 4; n >= 1; n--) {                       // the longest phrase first
         const idx: number[] = []; for (let j = i; j < words.length && idx.length < n; j++) if (!/^\s+$/.test(words[j]) && words[j]) idx.push(j);
         if (idx.length < n) continue;
         const phrase = idx.map((j) => words[j]).join(" ");
         if (isData(phrase)) { hit = idx[idx.length - 1]; break; }
       }
-      if (hit) { const lead = words[i].match(/^[("'\[{<]+/)?.[0] ?? ""; const tail = words[hit].match(/[)"',.;:!?\]}>]+$/)?.[0] ?? ""; out.push(`${lead}<data>${tail}`); i = hit; } else out.push(words[i]);
+      if (hit >= 0) { const lead = words[i].match(/^[("'\[{<]+/)?.[0] ?? ""; const tail = words[hit].match(/[)"',.;:!?\]}>]+$/)?.[0] ?? ""; out.push(`${lead}<data>${tail}`); i = hit; } else out.push(words[i]);
     }
     return out.join("");
   };
@@ -147,7 +150,8 @@ export function makeShaper(sets: { values: Set<string>; vocab: Set<string> } | S
       for (const [k, re] of Object.entries({ uuid: UUID, email: EMAIL, date: DATE, token: TOKEN })) { const n = (f.text.match(re) ?? []).length; if (n) kinds[k] = n; }
       const phrases = new Set<string>();
       const words = f.text.split(/\s+/);
-      for (let i = 0; i < words.length && phrases.size < 8; i++) for (let n = 4; n >= 1; n--) { if (i + n > words.length) continue; const p = words.slice(i, i + n).join(" "); if (strip(p).length >= 4 && isData(p)) { phrases.add(strip(p)); break; } }
+      // prose is scanned for values that read as records: two words or more, or a long one — not "admin", "true" or a status word
+      for (let i = 0; i < words.length && phrases.size < 8; i++) for (let n = 4; n >= 1; n--) { if (i + n > words.length) continue; const p = words.slice(i, i + n).join(" "); const q = strip(p); if ((n >= 2 || q.length >= 8) && isData(p)) { phrases.add(q); break; } }
       const parts: string[] = [];
       if (phrases.size) parts.push(`${phrases.size}${phrases.size >= 8 ? "+" : ""} value${phrases.size === 1 ? "" : "s"} seen in the app's bodies — ${[...phrases].slice(0, 4).map((p) => `"${p}"`).join(", ")}`);
       if (Object.keys(kinds).length) parts.push(Object.entries(kinds).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`).join(", ") + (f.name.endsWith(".ts") ? " (configuration constants, or records?)" : ""));
