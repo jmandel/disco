@@ -138,7 +138,8 @@ screenshot's bytes) as a string, by hash or 16-char prefix. `json` returns the n
 scoped to an act and/or a method (`json("/api/save", { action: r.action, method: "POST" })` reads back a write when the app fired
 GETs after it); it waits up to 1 s for a body still arriving, and it **throws** when nothing matched (naming what did answer), when
 a query-string fragment matches several endpoints, or when the newest match answered 4xx/5xx — a fact you could not find is never `null`
-(for the error body itself, `sql` and `body`). Scope `sql` the same way: `WHERE action_id = ?` for one act, `WHERE run = ?` for one browser's life. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
+(for the error body itself, `sql` and `body`). Scope `sql` the same way: `WHERE action_id = ?` for one act, `WHERE run = ?` for one browser's life. From the CLI a body is
+`./disco sql "SELECT text FROM bodies WHERE hash LIKE 'ab12%'" --json`. Tables: `runs` · `actions` (`id, n, t0, t1, label, code, ok, report` — the
 report as JSON) · `requests` (`id, t_start, t_response, t_end, method, url, path, resource_type, req_headers, req_body,
 status, mime, resp_headers, body_hash, body_size, body_state, action_id, run`) · `bodies` (+ `bodies_fts`) · `ws_frames` ·
 `console` · `dialogs` · `nav` · `shots`. `requests` keys on `id`; everything else on `seq` and `t` (ms since the run

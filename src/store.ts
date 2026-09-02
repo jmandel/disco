@@ -321,7 +321,8 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
     const unbacked: string[] = [], uncited: string[] = [], bare: string[] = [];
     const sdkPath = join(packDir, "sdk.ts");
     const exportsRe = existsSync(sdkPath) ? new RegExp(`\\b(${[...readFileSync(sdkPath, "utf8").matchAll(/export\s+(?:async\s+)?(?:function|const|let|class)\s+(\w+)/g)].map((m) => m[1]).filter(Boolean).join("|") || "__none__"})\\b`) : null;
-    const body = text.replace(/```[\s\S]*?```/g, "").replace(/`([^`\n]*)`/g, (_, c) => (/^act:\d+$/.test(c) ? c : "`code`")).replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "").replace(/^\s*\d+\.\s+/gm, "").replace(/[§#]\s?\d+/g, "");
+    // inline code: a single token (`whoAmI()`, `anchors.chart`, `act:12`) stays visible to the lint; longer code (`max: 15000`) is not a claim
+    const body = text.replace(/```[\s\S]*?```/g, "").replace(/`([^`\n]*)`/g, (_, c) => (/^\S+$/.test(c) && !/^\d+([.,]\d+)?$/.test(c) ? c : "`code`")).replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "").replace(/^\s*\d+\.\s+/gm, "").replace(/[§#]\s?\d+/g, "");
     for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
       const sentence = raw.replace(/\s+/g, " ").trim(); if (!sentence) continue;
       const cites = [...new Set([...sentence.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
