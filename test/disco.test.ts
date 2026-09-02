@@ -304,6 +304,15 @@ describe("look", () => {
     assert.ok(ms < 3000, `look took ${ms}ms`);
     assert.equal(s.context.pages().length, 1, "the scratch page is closed again");
   });
+  it("a selector naming one container gives the screen look scoped to it", async () => {
+    const l = await s.look("#s-2");
+    assert.equal(l.scope, "#s-2");
+    assert.match(l.aria!, /button "Open Record 1"/); assert.doesNotMatch(l.aria!, /Load Chart/);
+    assert.ok(l.controls!.length >= 5 && l.controls!.every((c) => /^#record-\d$/.test(c.selector) || c.role !== "button"), JSON.stringify(l.controls!.map((c) => c.selector)));
+    assert.match(formatLook(l), /^look #s-2 on .* controls within it/);
+    const btn = await s.look("#load-chart");
+    assert.equal(btn.scope, undefined, "a control is a match, not a scope");
+  });
   it("a selector: matches with visibility and what is under the pointer; hidden, none, and a parse error", async () => {
     const one = await s.look("#load-chart");
     assert.equal(one.count, 1); assert.equal(one.matches![0].visible, true); assert.equal(one.matches![0].under, null);

@@ -63,7 +63,7 @@ export function formatLook(l: Look): string {
     }
     if ((l.count ?? 0) > (l.matches?.length ?? 0)) L.push(`  … ${l.count! - l.matches!.length} more`);
   } else {
-    L.push(`look ${l.url}  (${l.controls?.length ?? 0} controls${l.shot ? `, numbered in the shot` : ""})${l.shot ? `\n  shot: ${l.shot}` : ""}`);
+    L.push(`look ${l.scope ? `${l.scope} on ` : ""}${l.url}  (${l.controls?.length ?? 0} controls${l.scope ? " within it" : ""}${l.shot ? `, numbered in the shot` : ""})${l.shot ? `\n  shot: ${l.shot}` : ""}`);
     if (l.aria) L.push(l.aria.split("\n").map((x) => "  " + x).join("\n"));
     if (l.controls?.length) {
       L.push("  controls:");

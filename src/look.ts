@@ -21,8 +21,8 @@ export interface Match {
 }
 export interface Look {
   url: string;
-  /** whole-screen look */
-  aria?: string; controls?: Control[];
+  /** whole-screen look — or, when the selector named one container (a form, main, a section), the look scoped to it */
+  aria?: string; controls?: Control[]; scope?: string;
   /** selector look */
   selector?: string; count?: number; matches?: Match[]; error?: string;
   note?: string;
@@ -65,7 +65,7 @@ function pageControls(_el: Element, sel: string) {
     for (const el of Array.from(root.querySelectorAll(sel))) out.push(el);
     for (const host of Array.from(root.querySelectorAll("*"))) if (host.shadowRoot) collect(host.shadowRoot, out);
   };
-  const found: Element[] = []; collect(document, found);
+  const found: Element[] = []; collect(_el && _el !== document.body ? _el : document, found);
   const cssPath = (el: Element): string => {
     const parts: string[] = [];
     for (let e: Element | null = el; e && e !== document.body && parts.length < 5; e = e.parentElement) {
@@ -246,6 +246,16 @@ export async function lookAt(ctx: LookCtx, target?: string | Locator, o: { shot?
   const loc = typeof target === "string" ? page.locator(target) : target;
   let count: number;
   try { count = await loc.count(); } catch (e) { return { url, selector, error: `selector error: ${firstLine(e)}`, note: selectorNote(selector), dialogs, shot: null }; }
+  // one match that is a landmark-style container of controls (main, a form, a section, a dialog, a table): the screen look, scoped to
+  // it — the way past the app chrome. A menu, a list or a div stays a match, so "is it visible?" keeps its answer.
+  if (count === 1) {
+    const container = await loc.first().evaluate((el: Element, sel: string) => el.matches("main,form,section,article,nav,aside,header,footer,dialog,table,fieldset,[role=dialog],[role=alertdialog],[role=region],[role=main],[role=form],[role=tabpanel],[role=navigation],[role=banner],[role=complementary]") && !el.matches(sel) && el.querySelectorAll(sel).length > 0, CONTROLS).catch(() => false);
+    if (container) {
+      const [aria, cs] = await Promise.all([loc.first().ariaSnapshot({ timeout: 5000 }).catch((e: Error) => `(aria snapshot failed: ${firstLine(e)})`), controls(page, loc.first())]);
+      const shot = o.shot === false ? null : await marks(ctx, cs.map((c) => ({ n: c.n, box: c.box })), "look");
+      return { url, scope: selector, aria, controls: cs, dialogs, shot: shot?.path ?? null };
+    }
+  }
   const items = await Promise.all(Array.from({ length: Math.min(count, 10) }, (_, i) => inspect(page, loc.nth(i))));
   const raw = await Promise.all(Array.from({ length: Math.min(count, 10) }, (_, i) => loc.nth(i).evaluate((h: HTMLElement) => {
     const roleOf = () => { const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase(); return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" ? "button" : "textbox") : tag); };
