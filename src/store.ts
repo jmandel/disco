@@ -278,13 +278,20 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; missing: string[] } {
+export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; missing: string[]; unbacked: string[]; uncited: string[] } {
   const readme = join(packDir, "README.md");
-  if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return { cited: 0, copied: [], missing: [] };
-  const ids = [...new Set([...readFileSync(readme, "utf8").matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
-  if (!ids.length) return { cited: 0, copied: [], missing: [] };
+  const none = { cited: 0, copied: [], missing: [], unbacked: [], uncited: [] };
+  if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
+  const text = readFileSync(readme, "utf8");
+  const ids = [...new Set([...text.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
   const st = openStore(storeDir);
   const copied: string[] = [], missing: string[] = [];
+  const evidenceText = (id: string): string | null => {
+    const n = id.slice(4); const parts: string[] = [];
+    for (const f of [`act-${n}.json`, `act-${n}-wire.json`]) { const p = join(packDir, "evidence", f); if (existsSync(p)) parts.push(readFileSync(p, "utf8")); }
+    if (!parts.length) { const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id); if (row?.report) parts.push(row.report); }
+    return parts.length ? parts.join("\n") : null;
+  };
   try {
     for (const id of ids) {
       const n = id.slice(4);
@@ -306,8 +313,21 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       } catch {}
       copied.push(id);
     }
+    // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
+    const unbacked: string[] = [], uncited: string[] = [];
+    const body = text.replace(/```[\s\S]*?```/g, "").replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "");
+    for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
+      const sentence = raw.replace(/\s+/g, " ").trim(); if (!sentence) continue;
+      const cites = [...new Set([...sentence.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
+      const numbers = [...sentence.replace(/\bact:\d+\b/g, "").matchAll(/(?<![\w.\/#-])\d{2,}(?:[.,]\d+)?(?![\w\/-])/g)].map((m) => m[0]);
+      if (!numbers.length) continue;
+      if (!cites.length) { if (uncited.length < 8) uncited.push(sentence.slice(0, 90)); continue; }
+      const texts = cites.map(evidenceText).filter((t): t is string => !!t);
+      if (!texts.length) continue;
+      for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
+    }
+    return { cited: ids.length, copied, missing, unbacked, uncited };
   } finally { st.close(); }
-  return { cited: ids.length, copied, missing };
 }
 
 function safeJson(t: string | null): unknown { if (!t) return t; try { return JSON.parse(t); } catch { return t; } }
