@@ -34,9 +34,26 @@ const CONTROLS = 'button,a,input,select,textarea,summary,[contenteditable],[tabi
 
 /** Runs in the page: every visible interactive control with what look needs to name it and to build a durable selector. */
 function pageControls(_el: Element, sel: string) {
-  const out: Array<{ tag: string; role: string; name: string; id: string; test: string | null; disabled: boolean; offCanvas: boolean; box: { x: number; y: number; w: number; h: number }; css: string }> = [];
-  const docW = Math.max(document.documentElement.scrollWidth, document.documentElement.clientWidth), docH = Math.max(document.documentElement.scrollHeight, document.documentElement.clientHeight);
-  const nameOf = (h: HTMLElement) => (h.getAttribute("aria-label") || (h.getAttribute("aria-labelledby") ? Array.from(h.getAttribute("aria-labelledby")!.split(/\s+/)).map((i) => document.getElementById(i)?.textContent ?? "").join(" ") : "") || (h.id ? (document.querySelector(`label[for="${CSS.escape(h.id)}"]`) as HTMLElement | null)?.innerText : "") || h.closest("label")?.innerText || h.innerText || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || h.getAttribute("alt") || "").trim().replace(/\s+/g, " ").slice(0, 60);
+  const out: Array<{ tag: string; role: string; name: string; weak: boolean; id: string; test: string | null; disabled: boolean; offCanvas: boolean; box: { x: number; y: number; w: number; h: number }; css: string }> = [];
+  // off-canvas = parked left of or above the page, or right of its width (a closed drawer, a slid-out panel); below the fold is not off-canvas
+  const docW = Math.max(document.documentElement.scrollWidth, document.documentElement.clientWidth, document.body?.scrollWidth ?? 0);
+  // text as an accessible name sees it: aria-hidden subtrees skipped, images by alt, nested aria-labels honoured
+  const text = (n: Node): string => {
+    if (n.nodeType === 3) return n.textContent ?? "";
+    if (n.nodeType !== 1) return "";
+    const e = n as HTMLElement;
+    if (e.getAttribute("aria-hidden") === "true") return "";
+    if (e.getAttribute("aria-label")) return " " + e.getAttribute("aria-label") + " ";
+    if (e.tagName === "IMG" || e.tagName === "SVG") return " " + (e.getAttribute("alt") || e.getAttribute("aria-label") || "") + " ";
+    const st = getComputedStyle(e); if (st.display === "none" || st.visibility === "hidden") return "";
+    return Array.from(e.childNodes).map(text).join("");
+  };
+  const norm = (s: string | null | undefined) => (s ?? "").trim().replace(/\s+/g, " ").slice(0, 60);
+  const nameOf = (h: HTMLElement): { name: string; weak: boolean } => {
+    const strong = norm(h.getAttribute("aria-label") || (h.getAttribute("aria-labelledby") ? Array.from(h.getAttribute("aria-labelledby")!.split(/\s+/)).map((i) => document.getElementById(i)?.textContent ?? "").join(" ") : "") || (h.id ? text(document.querySelector(`label[for="${CSS.escape(h.id)}"]`) ?? document.createTextNode("")) : "") || (h.closest("label") ? text(h.closest("label")!) : "") || text(h));
+    if (strong) return { name: strong, weak: false };
+    return { name: norm((h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || h.getAttribute("alt") || ""), weak: true };
+  };
   const roleOf = (h: HTMLElement) => {
     const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase();
     return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" || type === "reset" ? "button" : type === "range" ? "slider" : type === "number" ? "spinbutton" : type === "search" ? "searchbox" : "textbox") : h.isContentEditable ? "textbox" : h.getAttribute("draggable") === "true" ? "draggable" : "clickable");
@@ -69,7 +86,8 @@ function pageControls(_el: Element, sel: string) {
     if (st.visibility === "hidden" || st.display === "none") continue;
     const test = h.getAttribute("data-test") ? `[data-test="${h.getAttribute("data-test")}"]` : h.getAttribute("data-testid") ? `[data-testid="${h.getAttribute("data-testid")}"]` : h.getAttribute("data-cy") ? `[data-cy="${h.getAttribute("data-cy")}"]` : h.getAttribute("data-qa") ? `[data-qa="${h.getAttribute("data-qa")}"]` : null;
     const bx = Math.round(r.left + scrollX), by = Math.round(r.top + scrollY);
-    out.push({ tag: h.tagName.toLowerCase(), role: roleOf(h), name: nameOf(h), id: h.id, test, disabled: (h as HTMLButtonElement).disabled === true || h.getAttribute("aria-disabled") === "true", offCanvas: bx + r.width <= 0 || by + r.height <= 0 || bx >= docW || by >= docH, box: { x: bx, y: by, w: Math.round(r.width), h: Math.round(r.height) }, css: cssPath(h) });
+    const nm = nameOf(h);
+    out.push({ tag: h.tagName.toLowerCase(), role: roleOf(h), name: nm.name, weak: nm.weak, id: h.id, test, disabled: (h as HTMLButtonElement).disabled === true || h.getAttribute("aria-disabled") === "true", offCanvas: bx + r.width <= 0 || by + r.height <= 0 || bx >= docW, box: { x: bx, y: by, w: Math.round(r.width), h: Math.round(r.height) }, css: cssPath(h) });
     if (out.length >= 80) break;
   }
   return out;
@@ -132,8 +150,10 @@ async function durable(page: Page, items: Array<{ role: string; name: string; id
     if (c.id && !/\d{3,}|^:|^r[a-z0-9]{1,3}:|[0-9a-f]{8}-/.test(c.id)) return `#${cssEscape(c.id)}`;
     if (c.name && byRoleName.get(`${c.role}|${c.name}`) === 1) {
       const sel = `role=${c.role}[name="${esc(c.name)}"]`;
-      const n = await page.locator(sel).count().catch(() => 0);
-      if (n === 1) return sel;
+      if ((await page.locator(sel).count().catch(() => 0)) === 1) return sel;
+      // the accessible name may carry an icon's whitespace (" Add ") that the exact form misses: anchor a regex instead
+      const rx = `role=${c.role}[name=/^\\s*${c.name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\s*$/i]`;
+      if ((await page.locator(rx).count().catch(() => 0)) === 1) return rx;
     }
     return c.css;
   }));
@@ -143,6 +163,14 @@ function cssEscape(s: string): string { return s.replace(/([^\w-])/g, "\\$1"); }
 /** Every visible control, numbered, with its durable selector (also the `candidates` of a not-found diagnosis). */
 export async function controls(page: Page, base: Page | Locator = page): Promise<Control[]> {
   const raw = (await (base === page ? page.locator("body") : (base as Locator)).evaluate(pageControls as any, CONTROLS).catch(() => [])) as ReturnType<typeof pageControls>;
+  // a name that came only from a placeholder/value/title is weak: ask Playwright's accessibility view for the real one (bounded to 20 controls)
+  let asked = 0;
+  for (const c of raw) {
+    if (!c.weak || asked >= 20 || !c.css) continue; asked++;
+    const snap = await page.locator(c.css).first().ariaSnapshot({ timeout: 500 }).catch(() => "");
+    const m = snap.split("\n")[0]?.match(/^-\s+([a-z]+)\s+"((?:[^"\\]|\\.)*)"/);
+    if (m && m[2]) { c.name = m[2].slice(0, 60); c.role = m[1]; }
+  }
   const sels = await durable(page, raw);
   return raw.map((c, i) => ({ n: i + 1, selector: sels[i], role: c.role, name: c.name, box: c.box, ...(c.disabled ? { disabled: true } : {}), ...(c.offCanvas ? { offCanvas: true } : {}) }));
 }
@@ -208,7 +236,8 @@ export async function lookAt(ctx: LookCtx, target?: string | Locator, o: { shot?
   const items = await Promise.all(Array.from({ length: Math.min(count, 10) }, (_, i) => inspect(page, loc.nth(i))));
   const raw = await Promise.all(Array.from({ length: Math.min(count, 10) }, (_, i) => loc.nth(i).evaluate((h: HTMLElement) => {
     const roleOf = () => { const tag = h.tagName.toLowerCase(); const type = (h.getAttribute("type") || "").toLowerCase(); return h.getAttribute("role") || (tag === "button" || tag === "summary" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (type === "checkbox" ? "checkbox" : type === "radio" ? "radio" : type === "submit" || type === "button" ? "button" : "textbox") : tag); };
-    const name = (h.getAttribute("aria-label") || (h.id ? (document.querySelector(`label[for="${CSS.escape(h.id)}"]`) as HTMLElement | null)?.innerText : "") || h.innerText || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || "").trim().replace(/\s+/g, " ").slice(0, 60);
+    const text = (n: Node): string => { if (n.nodeType === 3) return n.textContent ?? ""; if (n.nodeType !== 1) return ""; const e = n as HTMLElement; if (e.getAttribute("aria-hidden") === "true") return ""; if (e.getAttribute("aria-label")) return " " + e.getAttribute("aria-label") + " "; if (e.tagName === "IMG" || e.tagName === "SVG") return " " + (e.getAttribute("alt") || "") + " "; return Array.from(e.childNodes).map(text).join(""); };
+    const name = (h.getAttribute("aria-label") || (h.id ? text(document.querySelector(`label[for="${CSS.escape(h.id)}"]`) ?? document.createTextNode("")) : "") || text(h) || (h as HTMLInputElement).placeholder || (h as HTMLInputElement).value || h.getAttribute("title") || "").trim().replace(/\s+/g, " ").slice(0, 60);
     const test = h.getAttribute("data-test") ? `[data-test="${h.getAttribute("data-test")}"]` : h.getAttribute("data-testid") ? `[data-testid="${h.getAttribute("data-testid")}"]` : null;
     const parts: string[] = [];
     for (let e: Element | null = h; e && e !== document.body && parts.length < 5; e = e.parentElement) {

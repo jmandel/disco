@@ -234,7 +234,7 @@ export class Session {
       const remaining = Math.max(0, max - (tRun1 - tDispatch));
       if (!armed.done) await Promise.race([untilP.catch(() => {}), sleep(remaining)]);
       if (armed.done && !armed.error) { returned = "until"; until = { ok: true, elapsedMs: Math.max(0, ms(tDispatch, armed.resolvedAt!)) }; if (armed.resolvedAt! <= tDispatch) until.alreadyTrue = true; if (armed.value !== undefined) until.value = plainValue(armed.value); }
-      else { returned = "max"; until = { ok: false, elapsedMs: ms(tDispatch, performance.now()), error: armed.error ?? `did not hold within max (${max} ms)` }; untilP.catch(() => {}); }
+      else { returned = "max"; until = { ok: false, elapsedMs: ms(tDispatch, performance.now()), error: armed.error ?? `did not hold within max (${max} ms) — until: ${fnSource(opts.until!).replace(/\s+/g, " ").slice(0, 160)}` }; untilP.catch(() => {}); }
     } else {
       const deadline = tDispatch + max;
       let prev = await this.#fingerprint();
@@ -303,7 +303,7 @@ export class Session {
   body(hash: string): string { return this.#read().body(hash); }
   /** The newest JSON body whose URL contains `urlPart` — scoped to an act and/or a method (`json("/api/save", { action: r.action, method: "POST" })` reads back a write even when the app fired GETs afterwards). Waits up to 1 s for a body that is still arriving. */
   async json<T = any>(urlPart: string, scope: { action?: string; method?: string } = {}): Promise<T | null> {
-    const where = ["url LIKE ?", "status IS NOT NULL"]; const args: unknown[] = [`%${urlPart}%`];
+    const where = ["url LIKE ?", "(status IS NOT NULL OR t_end IS NULL)"]; const args: unknown[] = [`%${urlPart}%`];
     if (scope.action) { where.push("action_id=?"); args.push(scope.action); }
     if (scope.method) { where.push("method=?"); args.push(scope.method.toUpperCase()); }
     const q = `SELECT id, url, body_hash, body_state FROM requests WHERE ${where.join(" AND ")} ORDER BY run DESC, t_start DESC LIMIT 50`;
@@ -315,7 +315,10 @@ export class Session {
     const scopeText = `${JSON.stringify(urlPart)}${scope.action ? ` in ${scope.action}` : ""}${scope.method ? ` (${scope.method.toUpperCase()})` : ""}`;
     const t0 = Date.now();
     for (;;) {
-      const every = this.#store.all<{ id: string; url: string; body_hash: string | null; body_state: string }>(q, ...args);
+      const all = this.#store.all<{ id: string; url: string; body_hash: string | null; body_state: string; status: number | null }>(q.replace("SELECT id, url,", "SELECT id, url, status,"), ...args);
+      // a matching request that has not answered yet (started in the act, still in flight) is worth the same 1 s wait as a body still arriving
+      if (all.some((r) => r.status == null) && !all.some((r) => r.status != null) && Date.now() - t0 < 1000) { await sleep(50); continue; }
+      const every = all.filter((r) => r.status != null);
       if (!every.length) {
         const near = this.#store.all<{ method: string; url: string }>(`SELECT method, url FROM requests WHERE status IS NOT NULL ${scope.action ? "AND action_id=?" : ""} AND resource_type IN ('xhr','fetch','document') ORDER BY run DESC, t_start DESC LIMIT 8`, ...(scope.action ? [scope.action] : []));
         throw new Error(`json: no JSON body matched ${scopeText}${near.length ? ` — what did answer: ${near.map((r) => `${r.method} ${pathOf(r.url, null).slice(0, 70)}`).join(", ")}` : " — nothing answered there"}`);

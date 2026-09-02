@@ -136,9 +136,9 @@ async function main() { switch (cmd) {
     const q = args._.slice(1).join(" "); if (!q) fail("usage: disco sql <query>");
     const st = openStore(appStoreDir(currentApp()));
     const rows = st.sql(q);
-    // one row, one column, holding JSON → print that JSON itself (a report, a body), not an array wrapping a string
-    const scalar = json && rows.length === 1 && Object.keys(rows[0]).length === 1 ? (() => { const v = Object.values(rows[0])[0]; if (typeof v !== "string" || !/^[\[{]/.test(v.trim())) return undefined; try { return JSON.parse(v); } catch { return undefined; } })() : undefined;
-    if (json) console.log(JSON.stringify(scalar ?? rows, null, 2));
+    // one shape always: an array of row objects, with text cells that hold JSON (reports, headers, bodies) parsed into it
+    const parsed = json ? rows.map((r: Record<string, unknown>) => Object.fromEntries(Object.entries(r).map(([k, v]) => { if (typeof v === "string" && /^\s*[\[{]/.test(v)) { try { return [k, JSON.parse(v)]; } catch {} } return [k, v]; }))) : rows;
+    if (json) console.log(JSON.stringify(parsed, null, 2));
     else if (!rows.length) console.log("(no rows)");
     else {
       const cols = Object.keys(rows[0]);

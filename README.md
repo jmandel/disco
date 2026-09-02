@@ -71,7 +71,8 @@ act ids are unique across runs. `s.page` is the Playwright `Page`; `s.context`, 
 ### `s.act(label, run, { until?, quiet?, max? }) → Report`
 
 `run(page)` is your code — any Playwright call, a `page.evaluate`, several steps. `label` is what the log calls it.
-Your code runs in Node: use `page.evaluate(() => …)` for the DOM, and for a `fetch` that should carry the page's cookies.
+Your code runs in Node: use `page.evaluate(() => …)` for the DOM, and for a `fetch` that should carry the page's cookies — which is
+also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u).then((r) => r.json()), url))` puts the answer in `value` and on the wire.
 
 | Option | Default | Meaning |
 |---|---|---|

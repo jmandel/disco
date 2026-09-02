@@ -50,8 +50,8 @@ describe("cli", () => {
     assert.equal(bad.code, 2); assert.match(bad.out, /does not parse/);
     const fnlit = disco("act", '(page) => page.click("#noop")');
     assert.equal(fnlit.code, 0, fnlit.out); assert.match(fnlit.out, /returned: quiet/); assert.doesNotMatch(fnlit.out, /value:/);
-    const scalar = disco("sql", "SELECT report FROM actions WHERE id='act:3'", "--json");
-    assert.equal(JSON.parse(scalar.stdout).action, "act:3", scalar.out);
+    const parsed = disco("sql", "SELECT id, report FROM actions WHERE id='act:3'", "--json");
+    const row = JSON.parse(parsed.stdout)[0]; assert.equal(row.id, "act:3"); assert.equal(row.report.action, "act:3", parsed.out);
     const l = disco("look");
     assert.equal(l.code, 0, l.out); assert.match(l.out, /button "Load Chart"/); assert.match(l.out, /#load-chart/); assert.match(l.out, /shot: .*blobs/);
     const l2 = disco("look", "#load-chart");

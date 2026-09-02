@@ -472,6 +472,33 @@ describe("exam B fold-backs", () => {
   });
 });
 
+describe("exam C fold-backs", () => {
+  it("a until that max cuts off names its own code; json waits for a matching request still in flight", async () => {
+    const r = await s.act("race that never settles", async () => {}, { until: () => Promise.race([s.page.locator("#never-a").waitFor({ timeout: 9000 }), s.page.locator("#never-b").waitFor({ timeout: 9000 })]), max: 400 });
+    assert.equal(r.returned, "max");
+    assert.match(r.until!.error!, /did not hold within max \(400 ms\) — until: \(\) => Promise\.race/);
+    await g.ctl.set({ slowMs: 800 });
+    try {
+      const r2 = await s.act("slow, cut short", (p) => p.click("#load-chart"), { max: 300 });
+      assert.equal(r2.returned, "max");
+      const j = await s.json<{ ms: number }>("/api/slow", { action: r2.action });
+      assert.equal(j?.ms, 800);
+    } finally { await g.ctl.reset(); }
+  });
+  it("look names controls as the accessibility tree does: icons skipped, labels over placeholders, below-the-fold is not off-canvas", async () => {
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<span id=\"wrap\"><button><i aria-hidden=\"true\">★</i> Add </button><label for=\"temp\">Temperature</label><input id=\"temp\" type=\"number\" placeholder=\"--.-\"></span>')");
+    const l = await s.look();
+    const c = l.controls!.find((x) => x.name === "Add");
+    assert.ok(c, JSON.stringify(l.controls!.slice(-5)));
+    assert.ok(c!.selector.startsWith("role=button"), c!.selector);
+    assert.equal(await s.page.locator(c!.selector).count(), 1, c!.selector);
+    const t = l.controls!.find((x) => x.selector === "#temp");
+    assert.equal(t?.name, "Temperature", JSON.stringify(t));
+    assert.ok(!l.controls!.some((x) => x.offCanvas && x.box.y > 0 && x.box.x >= 0), "nothing below the fold is off-canvas");
+    await s.page.evaluate("document.getElementById('wrap').remove()");
+  });
+});
+
 describe("the log", () => {
   it("one recorder per browser: a second script session is silent, stamps its windows, and does not duplicate rows", async () => {
     const s2 = await open("t", { appsDir });
