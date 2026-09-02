@@ -57,7 +57,7 @@ export function formatLook(l: Look): string {
     L.push(`look ${l.selector}  ${l.error ? "ERROR" : `${l.count} match${l.count === 1 ? "" : "es"}`}  ${l.url}${l.shot ? `\n  shot: ${l.shot}` : ""}`);
     if (l.error) L.push("  " + l.error);
     for (const m of l.matches ?? []) {
-      L.push(`  ${String(m.n).padStart(2)}  ${m.tag}${m.role !== m.tag ? ` ${m.role}` : ""}${m.name ? ` "${m.name}"` : ""}  ${m.visible ? "visible" : "hidden"} ${m.enabled ? "enabled" : "disabled"}${m.inViewport ? "" : " off-viewport"}  ${box(m.box)}  → ${m.selector}`);
+      L.push(`  ${String(m.n).padStart(2)}  ${m.tag}${m.role !== m.tag ? ` ${m.role}` : ""}${m.name ? ` "${m.name}"` : ""}  ${m.visible ? "visible" : "hidden"} ${m.enabled ? "enabled" : "disabled"}${m.inViewport ? "" : " off-viewport"}${m.state ? ` [${m.state}]` : ""}  ${box(m.box)}  → ${m.selector}`);
       if (m.why) L.push(`      ${m.why}`);
       else if (m.text && m.text !== m.name) L.push(`      text: ${m.text.slice(0, 80)}`);
     }

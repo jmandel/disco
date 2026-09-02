@@ -16,6 +16,8 @@ export interface Match {
   under: string | null;
   /** why a real click could not land, when it could not */
   why?: string;
+  /** ARIA/DOM state a presence check cannot see: checked, selected, expanded, pressed, disabled, value=… */
+  state?: string;
 }
 export interface Look {
   url: string;
@@ -102,10 +104,17 @@ function pageHit(node: Element) {
   const r = node.getBoundingClientRect();
   const x = r.left + r.width / 2, y = r.top + r.height / 2;
   const vw = Math.min(innerWidth, document.documentElement.clientWidth || innerWidth), vh = Math.min(innerHeight, document.documentElement.clientHeight || innerHeight);
-  const out: { tag: string; text: string; box: { x: number; y: number; w: number; h: number } | null; inViewport: boolean; under: string | null; why?: string } = {
+  const st: string[] = [];
+  for (const a of ["checked", "selected", "expanded", "pressed", "current", "invalid", "busy"]) { const v = node.getAttribute(`aria-${a}`); if (v && v !== "false") st.push(v === "true" ? a : `${a}=${v}`); }
+  if (node instanceof HTMLInputElement && (node.type === "checkbox" || node.type === "radio")) st.push(node.checked ? "checked" : "unchecked");
+  else if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node instanceof HTMLSelectElement) { if (node.value) st.push(`value=${JSON.stringify(String(node.value).slice(0, 40))}`); }
+  if (node instanceof HTMLOptionElement && node.selected) st.push("selected");
+  if ((node as HTMLButtonElement).disabled || node.getAttribute("aria-disabled") === "true") st.push("disabled");
+  if (node.getAttribute("aria-hidden") === "true") st.push("aria-hidden");
+  const out: { tag: string; text: string; box: { x: number; y: number; w: number; h: number } | null; inViewport: boolean; under: string | null; why?: string; state?: string } = {
     tag: node.tagName.toLowerCase(), text: (h.innerText || (h as HTMLInputElement).value || "").trim().replace(/\s+/g, " ").slice(0, 80),
     box: r.width || r.height ? { x: Math.round(r.left + scrollX), y: Math.round(r.top + scrollY), w: Math.round(r.width), h: Math.round(r.height) } : null,
-    inViewport: !(r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw), under: null,
+    inViewport: !(r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw), under: null, ...(st.length ? { state: st.join(" ") } : {}),
   };
   if (!out.box) return out;
   if (!out.inViewport) {
@@ -186,6 +195,7 @@ export async function inspect(page: Page, el: Locator): Promise<Omit<Match, "n" 
   ]);
   const out: Omit<Match, "n" | "selector" | "role" | "name"> = { tag: hit.tag, text: hit.text, box: hit.box, visible, enabled, inViewport: hit.inViewport, under: hit.under };
   if (hit.why) out.why = hit.why;
+  if (hit.state) out.state = hit.state;
   return out;
 }
 

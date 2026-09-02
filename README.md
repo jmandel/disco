@@ -118,7 +118,8 @@ Without a selector: `url`, `aria` (the accessibility tree — on a SPA the HTML 
 honest picture), `controls` (`{ n, selector, role, name, box }` — the numbers match the marks in `shot`), `shot`
 (a JPEG path: view it), open `dialogs`. The selector is durable: `data-test`, a stable id, a unique `role=…[name="…"]` (an exact, case-sensitive
 match after whitespace normalisation — unlike `getByRole` without `exact: true`, which is a substring), else a short css path. With a selector or `Locator`: `count`, `matches` (`{ n, selector, tag, role, name, text, box,
-visible, enabled, inViewport, under, why }`), a `note` on known footguns (`:has-text()` is a case-sensitive substring;
+visible, enabled, inViewport, under, why, state }` — `state` is what presence cannot tell you: `checked`, `selected`, `expanded`, `value="…"`, so an
+anchor can assert a state and skip the act), a `note` on known footguns (`:has-text()` is a case-sensitive substring;
 one engine per segment), and `error` when it does not parse. Nothing is written to the page: the marks are drawn on a
 copy of the screenshot in a scratch page.
 
@@ -177,7 +178,7 @@ the docblock above the function, once. Every `close` (a script's or `./disco clo
 `evidence/`: the report (`act-N.json`), its shot, its wire (`act-N-wire.json`: requests with headers and bodies, navigations) and the
 accessibility tree it left behind (`act-N-aria.txt`) — and
 prints what it could not back: cites with no report, a number beside a cite that its evidence does not contain, numbers with no cite,
-and sentences with neither a cite nor an sdk function. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). `sdk.ts` runs its own check:
+and sentences with neither a cite nor an sdk function. `./disco close` does this with no browser up, so it is the lint to run after every README edit. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). `sdk.ts` runs its own check:
 
 ```ts
 // apps/shop/sdk.ts

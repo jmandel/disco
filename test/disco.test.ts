@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startGauntlet, type GauntletHandle } from "./gauntlet.ts";
 import { open, reached, type Session } from "../src/index.ts";
+import { formatLook } from "../src/format.ts";
 
 const appsDir = mkdtempSync(join(process.env.DISCO_TEST_TMP ?? tmpdir(), "disco-apps-"));
 let g: GauntletHandle; let s: Session;
@@ -496,6 +497,16 @@ describe("exam B fold-backs", () => {
     assert.match(text, /… 28 more button "Edit" \(one per row/);
     assert.equal(l.controls!.filter((c) => c.name === "Edit").length, 30, "the data keeps them all");
     await s.page.evaluate("document.getElementById('tbl').remove()");
+  });
+  it("look(selector) reports ARIA state: a selected tab, a checked radio, an input's value", async () => {
+    reached(await s.act("tab a", (p) => p.click("#tab-a"), { until: () => s.page.locator("#tab-a[aria-selected=true]").waitFor() }));
+    assert.match((await s.look("#tab-a")).matches![0].state ?? "", /selected/);
+    assert.ok(!/selected/.test((await s.look("#tab-b")).matches![0].state ?? ""));
+    reached(await s.act("mild", (p) => p.click("label:has-text('Mild')"), { until: () => s.page.locator("#sev-value:has-text('Mild')").waitFor() }));
+    assert.match((await s.look("#sev-mild")).matches![0].state ?? "", /checked/);
+    reached(await s.act("fill", (p) => p.fill("#search", "ada"), { quiet: 50 }));
+    assert.match((await s.look("#search")).matches![0].state ?? "", /value="ada"/);
+    assert.match(formatLook(await s.look("#search")), /\[value="ada"\]/);
   });
   it("a navigating act proposes the nav-event until; a control parked off-canvas is never proposed", async () => {
     const r = reached(await s.act("to login", (p) => p.goto(g.origin + "/login.html")));
