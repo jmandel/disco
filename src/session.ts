@@ -71,6 +71,8 @@ export interface Report<T = unknown> {
   openPages: number;
   /** pasteable until code for what this act caused — each was false before the action */
   proposed: Proposal[];
+  /** hash of the accessibility tree after the act (a blob; `body(hash)` returns it) — what a look right after this act would show, and evidence for what the screen said */
+  aria?: string;
   note?: string;
   window: { t0: number; t1: number };
   timing: { runMs: number; observeMs: number; reportMs: number; totalMs: number };
@@ -263,6 +265,7 @@ export class Session {
     const postStorage = await this.#storage();
     const url = safe(() => page.url(), "");
     const diagnosis = ok ? undefined : await this.#diagnose(runError);
+    const ariaHash = postAria ? store.writeBlob(new TextEncoder().encode(postAria)) : undefined;
     const pageSite = siteNow() || siteOfFirstDocument(store, t0, t1);
     const { requests, static: st, thirdParty, pending, matchedRows } = this.#wire(t0, t1, pageSite);
     const ui = diffAria(preAria, postAria, 40);
@@ -278,6 +281,7 @@ export class Session {
       downloads: store.all<{ url: string }>("SELECT url FROM nav WHERE run=? AND kind='download' AND t BETWEEN ? AND ? ORDER BY seq", store.run, t0, t1 + 1).map((x) => x.url),
       openPages: this.context.pages().filter((p) => !isScratch(p)).length,
       proposed: await selfTest(page, propose(matchedRows, t0, ms(tStart, tDispatch), ui, preAria.split("\n").map((l) => l.trim()), preUrl, url, storage)),
+      ...(ariaHash ? { aria: ariaHash } : {}),
       window: { t0: Math.round(t0), t1: Math.round(t1) },
       timing: { runMs: ms(tDispatch, tRun1), observeMs: ms(tRun1, tObs1), reportMs: 0, totalMs: 0 },
     };

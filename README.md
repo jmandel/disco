@@ -97,6 +97,7 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 | `console` · `dialogs` · `pages` · `downloads` · `openPages` | errors and warnings; native dialogs (accepted, recorded); URLs of popups opened; files the page started downloading; pages open afterwards (more than 1 throttles the driven page) |
 | `proposed` | pasteable `until` code for what this act caused: responses with their `+ms`, roles that appeared (with their new state: `selected`, `expanded`, `checked`), the one that left, the url path, a storage key. **Copy one into the SDK.** |
 | `note` | something true that is not a failure: the click landed but the page blocked; a body the page never read; what an already-true or failed until's target looks like now, and what answered just before the act; lines that only moved |
+| `aria` | hash of the accessibility tree after the act (`s.body(hash)` prints it) — what a `look` right after would show; it travels with the act's evidence, so a screen fact cites the act that produced the screen |
 | `window`, `timing` | `{ t0, t1 }` in the run's clock; `{ runMs, observeMs, reportMs, totalMs }` |
 
 **Diagnoses** (`diagnosis.reason`):
@@ -166,11 +167,14 @@ apps/<app>/
 
 **The rule:** every claim in `README.md` is either backed by a function in `sdk.ts` or cites an act (`act:86`) whose
 report or shot is in `evidence/`; a number without an act id is a guess. Write the README from the evidence files, not from
-memory: a number or a quoted string belongs in a sentence only with the act whose evidence contains it. When a stance requires
+memory: a number or a quoted string belongs in a sentence only with the act whose evidence contains it. A fact about a screen —
+an anchor, a selector, what a menu contains — is either an exported constant in `sdk.ts` (refer to it by name) or cites the act
+that put that screen there: its evidence carries the accessibility tree it left behind. When a stance requires
 a marker and a record has no free-text field for it, the marker goes in the parent record or an attached note — the workflow is
 not skipped. Workflow narrative — precondition, steps, postcondition, side effects, gotchas — lives in
 the docblock above the function, once. Every `close` (a script's or `./disco close`) copies each act the README cites (`act:12`, or a range `act:12-15`) into
-`evidence/`: the report (`act-N.json`), its shot, and its wire (`act-N-wire.json`: requests with headers and bodies, navigations) — and
+`evidence/`: the report (`act-N.json`), its shot, its wire (`act-N-wire.json`: requests with headers and bodies, navigations) and the
+accessibility tree it left behind (`act-N-aria.txt`) — and
 prints what it could not back: cites with no report, a number beside a cite that its evidence does not contain, numbers with no cite,
 and sentences with neither a cite nor an sdk function. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). `sdk.ts` runs its own check:
 
@@ -178,11 +182,13 @@ and sentences with neither a cite nor an sdk function. It reads the number itsel
 // apps/shop/sdk.ts
 import { open, reached, type Session } from "../../src/index.ts";
 export const URL = "https://example.shop/";
+/** Every anchor and selector the README asserts lives here by name; the cold check exercises them and the README refers to `anchors.account`, not to a bare string. */
+export const anchors = { login: "#email", account: "[data-test='account-header']" };
 /** Log in. Precondition: any page. Postcondition: /account. Side effects: none. Verified cold 2026-09-01 (act:14). */
 export async function login(s: Session, user: string, pass: string) {
   reached(await s.act("open login", (p) => p.goto(URL + "login"), { until: () => s.waitFor("nav", (e) => e.url.includes("/login")).then(() => s.page.locator("#email").waitFor()) }));
   reached(await s.act("credentials", async (p) => { await p.fill("#email", user); await p.fill("#password", pass); }, { quiet: 50 }));
-  reached(await s.act("submit", (p) => p.click("#login"), { until: () => s.page.waitForURL((u) => u.pathname.includes("/account")) }));
+  reached(await s.act("submit", (p) => p.click("#login"), { until: () => s.page.waitForURL((u) => u.pathname.includes("/account")).then(() => s.page.locator(anchors.account).waitFor()) }));
   return s.json("/api/me");
 }
 export async function check(s: Session): Promise<number> {

@@ -288,7 +288,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
   const copied: string[] = [], missing: string[] = []; let present = 0;
   const evidenceText = (id: string): string | null => {
     const n = id.slice(4); const parts: string[] = [];
-    for (const f of [`act-${n}.json`, `act-${n}-wire.json`]) { const p = join(packDir, "evidence", f); if (existsSync(p)) parts.push(readFileSync(p, "utf8")); }
+    for (const f of [`act-${n}.json`, `act-${n}-wire.json`, `act-${n}-aria.txt`]) { const p = join(packDir, "evidence", f); if (existsSync(p)) parts.push(readFileSync(p, "utf8")); }
     if (!parts.length) { const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id); if (row?.report) parts.push(row.report); }
     return parts.length ? parts.join("\n") : null;
   };
@@ -303,6 +303,8 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       const rep = JSON.parse(row.report);
       writeFileSync(target, JSON.stringify(rep, null, 2) + "\n");
       try { const shot: string | undefined = rep?.diagnosis?.shot; if (shot && existsSync(shot)) writeFileSync(join(packDir, "evidence", `act-${n}.jpg`), readFileSync(shot)); } catch {}
+      // the accessibility tree the act left behind: what a look right after it showed, so a screen fact can cite the act
+      try { if (rep?.aria) writeFileSync(join(packDir, "evidence", `act-${n}-aria.txt`), st.body(rep.aria)); } catch {}
       // the wire behind the report: the act's requests (request bodies, and response bodies of writes when small) and the navigations in its window
       try {
         const t0 = rep?.window?.t0 ?? 0, t1 = rep?.window?.t1 ?? 0;

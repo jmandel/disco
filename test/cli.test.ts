@@ -87,6 +87,7 @@ describe("cli", () => {
     writeFileSync(join(appsDir, "chk", "sdk.ts"), `
 import { open, reached, type Session } from "${root}/src/index.ts";
 export const URL = ${JSON.stringify(g.origin)};
+export const anchors = { chart: "#load-chart" };
 export async function loadChart(s: Session) {
   reached(await s.act("load chart", (p) => p.click("#load-chart"), { until: () => s.page.waitForResponse((r) => r.url().includes("/api/slow")) }));
   return s.json<{ ms: number }>("/api/slow");
@@ -113,12 +114,13 @@ if (import.meta.main) {
     assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose: nope \(act:\d+\): not-found/);
     // the pack rule is mechanical: close copies cited reports into evidence/ and names cites with nothing behind them
     const failedId = out.match(/nope \((act:\d+)\)/)![1];
-    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (\`act:2\`). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step. See §17 for more. The first two acts are the whole warm-up (act:1-2). The application is a single page whose header never changes between screens.\n\n1. A numbered list item is not a claim by its marker.\n`);
+    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (\`act:2\`). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step. See §17 for more. The first two acts are the whole warm-up (act:1-2). The application is a single page whose header never changes between screens. The shell anchor is anchors.chart and it is visible on every screen of this app.\n\n1. A numbered list item is not a claim by its marker.\n`);
     const c = disco("close", "chk");
     assert.match(c.out, /evidence: README cites 4 acts; copied 3 new/); assert.match(c.out, /NO REPORT for act:999/);
     assert.match(c.out, /sentences with neither an act id nor an sdk function behind them: 2, e\.g\. "The application is a single page/);   // the list item is the second
     const wire2 = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", "act-2-wire.json"), "utf8"));
     assert.ok(wire2.requests.some((r: any) => r.url.includes("/api/slow") && r.response_body && typeof r.response_body.ms === "number"), "read bodies travel with the evidence");
+    assert.match(readFileSync(join(appsDir, "chk", "evidence", "act-2-aria.txt"), "utf8"), /button "Load Chart"/, "the act's accessibility tree travels with the evidence");
     assert.match(c.out, /claim check: act:2 is cited for 4242 but its evidence does not contain it/);
     assert.match(c.out, /uncited numbers .*: 1 sentence, e\.g\. "Six products cost 9999 in total\."/);   // §17, the list marker and the backticked act:2 are not uncited claims
     const ev = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.json`), "utf8"));

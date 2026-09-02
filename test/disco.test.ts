@@ -583,6 +583,13 @@ describe("the log", () => {
       assert.equal(row?.body_state, "error", JSON.stringify(row)); assert.match(row?.error ?? "", /recording ended/);
     } finally { await g.ctl.reset(); }
   });
+  it("every act keeps the accessibility tree it left behind, as a blob the report names", async () => {
+    const r = reached(await s.act("noop", (p) => p.click("#noop")));
+    assert.match(r.aria ?? "", /^[0-9a-f]{64}$/);
+    assert.match(s.body(r.aria!), /button "Load Chart"/);
+    const again = reached(await s.act("noop again", (p) => p.click("#noop")));
+    assert.equal(again.aria, r.aria, "an unchanged screen is the same blob (content-addressed)");
+  });
   it("sql errors name the columns; body returns a blob by prefix", async () => {
     assert.throws(() => s.sql("SELECT id FROM ws_frames"), /no such column: id — ws_frames\(run, seq, t, url, dir, payload, action_id\)/);
     const row = s.sql<{ body_hash: string }>("SELECT body_hash FROM requests WHERE url LIKE '%/api/record/5%' AND body_hash IS NOT NULL LIMIT 1")[0];
