@@ -31,9 +31,10 @@ export interface Shaper {
 /** What the run says is data: string leaves of its JSON API bodies. And what is vocabulary: every word that occurs in the app's
  *  own bundles and documents, plus every JSON key — a value made only of such words ("Outpatient Clinic", "patient") is a label
  *  the app ships, not a record. */
-export function collectValues(st: StoreReader, limit = 400): { values: Set<string>; vocab: Set<string> } {
+export function collectValues(st: StoreReader, limit = 2000): { values: Set<string>; vocab: Set<string> } {
   const values = new Set<string>(), vocab = new Set<string>();
-  const rows = st.sql<{ text: string | null }>("SELECT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('xhr','fetch') AND r.mime LIKE '%json%' AND b.text IS NOT NULL AND b.size <= 262144 ORDER BY r.t_start DESC LIMIT ?", limit);
+  // newest first across runs (t restarts per run), one body per hash: a chart open alone is a hundred JSON answers
+  const rows = st.sql<{ text: string | null }>("SELECT b.text FROM bodies b WHERE b.hash IN (SELECT r.body_hash FROM requests r WHERE r.resource_type IN ('xhr','fetch') AND r.mime LIKE '%json%' AND r.body_hash IS NOT NULL ORDER BY r.run DESC, r.t_start DESC LIMIT ?) AND b.text IS NOT NULL AND b.size <= 262144", limit);
   const add = (v: unknown, depth: number) => {
     if (values.size > 50000 || depth > 12) return;
     if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) values.add(t.toLowerCase()); }
