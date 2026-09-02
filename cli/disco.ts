@@ -112,7 +112,7 @@ async function main() { switch (cmd) {
     console.log(`${app}: ${!info ? "no browser" : info.mode === "launch" ? "browser killed" : "detached"} (the log stays; ${app} remains the default app)`);
     try {
       const ev = syncEvidence(appDir(app), dir);
-      if (ev.cited) console.log(`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} report${ev.copied.length === 1 ? "" : "s"} to apps/${app}/evidence/` : "nothing new to copy"}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`);
+      if (ev.cited) console.log(`evidence: README cites ${ev.cited} act${ev.cited === 1 ? "" : "s"}; ${ev.copied.length ? `copied ${ev.copied.length} new to apps/${app}/evidence/` : "nothing new to copy"}${ev.present ? `, ${ev.present} already there` : ""}${ev.missing.length ? `; NO REPORT for ${ev.missing.join(", ")} — a cite with nothing behind it is a guess` : ""}`);
       for (const u of ev.unbacked) console.log(`  claim check: ${u}`);
       if (ev.uncited.length) console.log(`  uncited numbers (a number without an act id is a guess): ${ev.uncited.length}${ev.uncited.length >= 8 ? "+" : ""} sentence${ev.uncited.length === 1 ? "" : "s"}, e.g. "${ev.uncited[0]}"`);
     } catch {}

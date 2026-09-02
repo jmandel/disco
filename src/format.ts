@@ -67,7 +67,15 @@ export function formatLook(l: Look): string {
     if (l.aria) L.push(l.aria.split("\n").map((x) => "  " + x).join("\n"));
     if (l.controls?.length) {
       L.push("  controls:");
-      for (const c of l.controls) L.push(`  ${String(c.n).padStart(3)}  ${c.selector.padEnd(48).slice(0, 48)}  ${c.role} "${c.name}"${c.disabled ? " (disabled)" : ""}${c.offCanvas ? " (off-canvas: parked outside the page — Playwright calls it visible, a user cannot see it)" : ""}  ${box(c.box)}`);
+      // a data table repeats one control per row: show the first two of each role+name and fold the rest
+      const seen = new Map<string, number>();
+      const folded: Array<{ key: string; n: number }> = [];
+      for (const c of l.controls) {
+        const key = `${c.role} "${c.name}"`; const k = (seen.get(key) ?? 0) + 1; seen.set(key, k);
+        if (k > 2 && c.name) { const f = folded.find((x) => x.key === key); if (f) f.n++; else folded.push({ key, n: 1 }); continue; }
+        L.push(`  ${String(c.n).padStart(3)}  ${c.selector.padEnd(48).slice(0, 48)}  ${key}${c.disabled ? " (disabled)" : ""}${c.offCanvas ? " (off-canvas: parked outside the page — Playwright calls it visible, a user cannot see it)" : ""}  ${box(c.box)}`);
+      }
+      for (const f of folded) L.push(`       … ${f.n} more ${f.key} (one per row — scope the locator to its row, or use nth; look.controls has them all)`);
     }
   }
   if (l.dialogs.length) L.push("  open dialogs: " + l.dialogs.join("; "));

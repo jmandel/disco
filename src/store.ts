@@ -278,14 +278,14 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; missing: string[]; unbacked: string[]; uncited: string[] } {
+export function syncEvidence(packDir: string, storeDir: string): { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[] } {
   const readme = join(packDir, "README.md");
-  const none = { cited: 0, copied: [], missing: [], unbacked: [], uncited: [] };
+  const none = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [] };
   if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
   const text = readFileSync(readme, "utf8");
   const ids = [...new Set([...text.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
   const st = openStore(storeDir);
-  const copied: string[] = [], missing: string[] = [];
+  const copied: string[] = [], missing: string[] = []; let present = 0;
   const evidenceText = (id: string): string | null => {
     const n = id.slice(4); const parts: string[] = [];
     for (const f of [`act-${n}.json`, `act-${n}-wire.json`]) { const p = join(packDir, "evidence", f); if (existsSync(p)) parts.push(readFileSync(p, "utf8")); }
@@ -296,7 +296,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
     for (const id of ids) {
       const n = id.slice(4);
       const target = join(packDir, "evidence", `act-${n}.json`);
-      if (existsSync(target)) continue;
+      if (existsSync(target)) { present++; continue; }
       const row = st.one<{ report: string | null }>("SELECT report FROM actions WHERE id=?", id);
       if (!row?.report) { missing.push(id); continue; }
       mkdirSync(join(packDir, "evidence"), { recursive: true });
@@ -315,7 +315,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
     }
     // the claim behind the cite: a number quoted beside act:N should appear in that act's evidence; a number with no cite is a guess
     const unbacked: string[] = [], uncited: string[] = [];
-    const body = text.replace(/```[\s\S]*?```/g, "").replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "");
+    const body = text.replace(/```[\s\S]*?```/g, "").replace(/`[^`\n]*`/g, "`code`").replace(/^\|.*$/gm, "").replace(/^#.*$/gm, "");
     for (const raw of body.split(/(?<=[.!?])\s+(?=[A-Z`])|\n{2,}/)) {
       const sentence = raw.replace(/\s+/g, " ").trim(); if (!sentence) continue;
       const cites = [...new Set([...sentence.matchAll(/\bact:(\d+)\b/g)].map((m) => `act:${m[1]}`))];
@@ -326,7 +326,7 @@ export function syncEvidence(packDir: string, storeDir: string): { cited: number
       if (!texts.length) continue;
       for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
     }
-    return { cited: ids.length, copied, missing, unbacked, uncited };
+    return { cited: ids.length, copied, present, missing, unbacked, uncited };
   } finally { st.close(); }
 }
 

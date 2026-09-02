@@ -468,6 +468,17 @@ describe("exam B fold-backs", () => {
     }
     assert.ok(checked >= 3, `only ${checked} proposals checked`);
   });
+  it("json refuses an error answer; look folds a table's repeated controls", async () => {
+    reached(await s.act("record 12", (p) => p.evaluate(() => fetch("/api/record/12").then((r) => r.json()))));
+    await assert.rejects(() => s.json("/api/record/12"), /json: the newest match for "\/api\/record\/12" answered 404/);
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<table id=\"tbl\">' + Array.from({ length: 30 }, (_, i) => `<tr><td>row ${i}</td><td><button>Edit</button></td></tr>`).join('') + '</table>')");
+    const l = await s.look();
+    const { formatLook } = await import("../src/format.ts");
+    const text = formatLook(l);
+    assert.match(text, /… 28 more button "Edit" \(one per row/);
+    assert.equal(l.controls!.filter((c) => c.name === "Edit").length, 30, "the data keeps them all");
+    await s.page.evaluate("document.getElementById('tbl').remove()");
+  });
   it("a navigating act proposes the nav-event until; a control parked off-canvas is never proposed", async () => {
     const r = reached(await s.act("to login", (p) => p.goto(g.origin + "/login.html")));
     assert.ok(r.proposed.some((x) => x.code.includes('s.waitFor("nav"') && x.code.includes("/login.html")), JSON.stringify(r.proposed));

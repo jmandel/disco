@@ -335,6 +335,9 @@ export class Session {
       const exactEnd = (u: string) => { const i = u.indexOf(urlPart); const c = u[i + urlPart.length]; return c === undefined || "?#&".includes(c); };
       const rows = !urlPart.endsWith("/") && bounded.some((r) => exactEnd(r.url)) ? bounded.filter((r) => exactEnd(r.url)) : bounded;
       if (!rows.length) return null;
+      // an error answer is not the fact you asked for: say so now, instead of handing back {error} to code that expects a record
+      const newest = rows[0] as any;
+      if (newest.status >= 400) { let snippet = ""; try { snippet = newest.body_hash ? this.body(newest.body_hash).slice(0, 160) : ""; } catch {} throw new Error(`json: the newest match for ${scopeText} answered ${newest.status}${snippet ? ` — ${snippet}` : ""} (read it with sql/body if that error body is what you meant)`); }
       if (rows[0].body_state === "pending" && Date.now() - t0 < 1000) { await sleep(50); continue; }
       const row = rows.find((r) => r.body_hash);
       if (!row) return null;

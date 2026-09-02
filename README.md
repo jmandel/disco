@@ -115,8 +115,8 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 
 Without a selector: `url`, `aria` (the accessibility tree — on a SPA the HTML is an empty shell and this is the only
 honest picture), `controls` (`{ n, selector, role, name, box }` — the numbers match the marks in `shot`), `shot`
-(a JPEG path: view it), open `dialogs`. The selector is durable: `data-test`, a stable id, a unique `role=…[name="…"]`,
-else a short css path. With a selector or `Locator`: `count`, `matches` (`{ n, selector, tag, role, name, text, box,
+(a JPEG path: view it), open `dialogs`. The selector is durable: `data-test`, a stable id, a unique `role=…[name="…"]` (an exact, case-sensitive
+match after whitespace normalisation — unlike `getByRole` without `exact: true`, which is a substring), else a short css path. With a selector or `Locator`: `count`, `matches` (`{ n, selector, tag, role, name, text, box,
 visible, enabled, inViewport, under, why }`), a `note` on known footguns (`:has-text()` is a case-sensitive substring;
 one engine per segment), and `error` when it does not parse. Nothing is written to the page: the marks are drawn on a
 copy of the screenshot in a scratch page.
