@@ -46,9 +46,9 @@ test("HL7 v2: segments and field counts; every field is strong data", () => {
 });
 
 test("form-encoded and multipart: keys stay, values vanish and are strong", () => {
-  assert.deepEqual(shape("username=admin&password=Admin123&remember=on", "application/x-www-form-urlencoded"), { username: "<v>", password: "<v>", remember: "<v>" });
-  const h = harvestBody("username=admin&password=Admin123", "application/x-www-form-urlencoded");
-  assert.ok(h.strong.includes("Admin123") && h.strong.includes("admin"));
+  assert.deepEqual(shape("username=admin&password=pw-for-the-test&remember=on", "application/x-www-form-urlencoded"), { username: "<v>", password: "<v>", remember: "<v>" });
+  const h = harvestBody("username=admin&password=pw-for-the-test", "application/x-www-form-urlencoded");
+  assert.ok(h.strong.includes("pw-for-the-test") && h.strong.includes("admin"));
   const mp = "--XYZ\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhello there\r\n--XYZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"scan.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4 binary\r\n--XYZ--";
   assert.deepEqual(shape(mp, 'multipart/form-data; boundary=XYZ'), { parts: [{ name: "note", size: 11 }, { name: "file", filename: "<name>", contentType: "application/pdf", size: 15 }] });
 });
