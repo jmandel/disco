@@ -90,7 +90,7 @@ also how you verify a write: `s.act("re-read", (p) => p.evaluate((u) => fetch(u)
 | `until` | `{ ok, elapsedMs, alreadyTrue?, error?, value? }` |
 | `diagnosis` | when `run` threw: `reason`, `message`, `selector` (as Playwright named it), `over`, `candidates`, `dialogs`, `shot` |
 | `ui` | `{ added, removed }` lines of the accessibility tree that changed between the start and the end of the window (main frame; iframes appear as nodes) — a toast that came and went inside the window is not in it; the wire or a shot is |
-| `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`, every method alike (an app that reads by POST is read by its paths, not its verbs); `static` folds scripts, styles, images, fonts into a count, `thirdParty` folds other sites (telemetry) out of the wire and `pending`. `(started earlier)` marks a long-poll that answered you |
+| `requests` | the app's own traffic started in the window — `{ id, method, path, status, ms, mime, body (hash), size, state }`; `static` folds scripts, styles, images, fonts into a count, `thirdParty` folds other sites (telemetry) out of the wire and `pending`. `(started earlier)` marks a long-poll that answered you |
 | `pending` | requests started in the window and still in flight when it closed |
 | `storage` | cookie, localStorage and sessionStorage keys that changed — the wire of an app that has no wire |
 | `console` · `dialogs` · `pages` · `downloads` · `openPages` | errors and warnings; native dialogs (accepted, recorded); URLs of popups opened; files the page started downloading; pages open afterwards (more than 1 throttles the driven page) |
@@ -120,9 +120,8 @@ match after whitespace normalisation — unlike `getByRole` without `exact: true
 With a selector or `Locator` naming controls: `count`, `matches` (`{ n, selector, tag, role, name, text, box,
 visible, enabled, inViewport, under, why, state }` — `state` is what presence cannot tell you: `checked`, `selected`, `expanded`, `value="…"`, so an
 anchor can assert a state and skip the act), a `note` on known footguns (`:has-text()` is a case-sensitive substring;
-one engine per segment), and `error` when it does not parse. The shot is a full-page screenshot of the app's page (≤ 4000 px tall; the
-page sees one `resize` event and nothing else) with the numbered boxes drawn on a copy of it in a throwaway tab of the same browser,
-closed at once — nothing is drawn in, or added to, the app's page.
+one engine per segment), and `error` when it does not parse. The marks are drawn on a copy of the screenshot in a throwaway
+tab, never in the app's page.
 
 ### `s.waitFor(kind, pred, timeout?) → event`
 
@@ -178,18 +177,17 @@ postcondition, side effects, gotchas — lives in the docblock above the functio
 
 **Evidence is shapes, never values.** Every `close` (a script's or `./disco close`) copies each act the README cites (`act:12`, or a
 range `act:12-15`) into `evidence/`: the report (`act-N.json`), its wire (`act-N-wire.json`) and the accessibility tree it left behind
-(`act-N-aria.txt`), with URLs as templates (`/patient/<uuid>?q=<v>`), bodies as skeletons in any wire format (JSON keys and types; XML,
-SOAP and CDA as element trees; HL7 v2 as segments; form posts as keys; HTML fragments as outlines; CSV as columns), storage values
-blanked, no headers, no screenshots, and every string that appears as a value in the app's bodies — or looks like an identifier, date,
-email or token — replaced by `<data>`. Labels the app itself defines and your pack relies on (a visit type, a status, an encounter name)
-go in `export const vocab = ["Vitals", "Facility Visit"]` in the sdk: they stay visible in evidence and the data scan stops asking about
-them — a person's name never belongs there. A pack is therefore safe to commit from an environment whose records must stay where they
-are (a customer's system, a clinical sandbox); what it proves is structure and behaviour, and the check re-proves the values live.
+(`act-N-aria.txt`), with URLs as templates (`/patient/<uuid>?q=<v>`), bodies as skeletons (keys and types, in whatever format the app
+speaks), storage values blanked, no headers, no screenshots, and every string that appears as a value in the app's bodies — or looks like
+an identifier, date, email or token — replaced by `<data>`. Labels the app itself defines and your pack relies on (a visit type, a status,
+an encounter name) go in `export const vocab = ["Vitals", "Facility Visit"]` in the sdk: they stay visible in evidence and the data scan
+stops asking about them — a person's name never belongs there. A pack is therefore safe to commit from an environment whose records must
+stay where they are; what it proves is structure and behaviour, and the check re-proves the values live.
 
 **The lint.** `close` also prints what it could not back — cites with no report, a number beside a cite that its evidence does not
-contain, numbers with no cite, sentences with neither a cite nor an sdk function — and names data that slipped into README.md or the sdk
-(every file under `sdk/` counts, for vocab and exports too). `./disco close` does this with no browser up, so it is the lint to run after
-every README edit. It reads the number itself, so quote the report's own numbers (`timing`, `status`, a count from a body). The sdk runs its own check:
+contain, numbers with no cite, sentences with neither a cite nor an sdk function — and names data that slipped into README.md or the sdk.
+`./disco close` does this with no browser up, so it is the lint to run after every README edit. It reads the number itself, so quote the
+report's own numbers (`timing`, `status`, a count from a body). The sdk runs its own check:
 
 ```ts
 // apps/shop/sdk.ts
@@ -206,7 +204,7 @@ export async function login(s: Session, user: string, pass: string) {
 }
 export async function check(s: Session): Promise<number> {
   let failed = 0;
-  for (const [name, fn] of [["login", () => login(s, "qa@example.shop", "qa-password")]] as const) {   // the pack's own test account
+  for (const [name, fn] of [["login", () => login(s, "qa@example.shop", "qa-password")]] as const) {
     try { await fn(); console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}: ${(e as Error).message}`); break; }   // steps share the browser: stop at the first failure instead of paying every later step's max
   }
   return failed;
@@ -217,7 +215,7 @@ if (import.meta.main) { const s = await open("shop", { url: URL }); let f = 1; t
 A write workflow takes the record's fields as parameters (`addOrder(s, { sku, qty })`) and the check supplies marked values,
 so the first real task can call it; reads in the check target records the check created, never someone's real ones. When a stance
 requires a marker and a record has no free-text field for it, the marker goes in the parent record or an attached note — the workflow
-is not skipped. `node apps/shop/sdk.ts` (or `sdk/index.ts`) runs the check and leaves the browser running; while it runs,
+is not skipped. `node apps/shop/sdk.ts` runs the check and leaves the browser running; while it runs,
 `./disco sql "SELECT n, label, ok FROM actions ORDER BY n DESC LIMIT 5"` is its progress bar, and its `close` prints the evidence and claim check. A pack is done when it passes **warm and cold** — once on
 the browser you explored with, then once more after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
 had already done.
@@ -266,6 +264,5 @@ ceilings; `test/budget.test.ts` pins the size of this surface (exports, methods,
 
 No daemon: the browser is the only long-lived process, every client reconnects over CDP. No page instrumentation, which
 is what lets it join a browser you launched with a debugging port. No settlement verdicts: `quiet` is a number you name, and the report
-says whether it was reached. No reading of intent from HTTP verbs: a POST is a request like any other, and whether an act
-wrote anything is a question for the wire and the server, not a line in the report. No selector language of its own, no predicate
-language, no action kinds: you write Playwright, disco observes. v2 (`git log v2`) had all of those; `DECISIONS.md` says why v4 does not.
+says whether it was reached. No selector language of its own, no predicate language, no action kinds: you write
+Playwright, disco observes. v2 (`git log v2`) had all of those; `DECISIONS.md` says why v4 does not.
