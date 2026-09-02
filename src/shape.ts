@@ -28,22 +28,31 @@ export interface Shaper {
   size: number;
 }
 
-/** String leaves of the run's JSON API bodies: the set of things that are data, not chrome. */
-export function collectValues(st: StoreReader, limit = 400): Set<string> {
-  const set = new Set<string>();
+/** What the run says is data: string leaves of its JSON API bodies. And what is vocabulary: every word that occurs in the app's
+ *  own bundles and documents, plus every JSON key — a value made only of such words ("Outpatient Clinic", "patient") is a label
+ *  the app ships, not a record. */
+export function collectValues(st: StoreReader, limit = 400): { values: Set<string>; vocab: Set<string> } {
+  const values = new Set<string>(), vocab = new Set<string>();
   const rows = st.sql<{ text: string | null }>("SELECT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('xhr','fetch') AND r.mime LIKE '%json%' AND b.text IS NOT NULL AND b.size <= 262144 ORDER BY r.t_start DESC LIMIT ?", limit);
   const add = (v: unknown, depth: number) => {
-    if (set.size > 50000 || depth > 12) return;
-    if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) set.add(t.toLowerCase()); }
+    if (values.size > 50000 || depth > 12) return;
+    if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) values.add(t.toLowerCase()); }
     else if (Array.isArray(v)) v.forEach((x) => add(x, depth + 1));
-    else if (v && typeof v === "object") for (const x of Object.values(v as Record<string, unknown>)) add(x, depth + 1);
+    else if (v && typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) { vocab.add(k.toLowerCase()); add(x, depth + 1); }
   };
   for (const r of rows) { try { add(JSON.parse(r.text!), 0); } catch {} }
-  return set;
+  // the app's own words: its scripts and documents (deduplicated by hash; the text column is capped at 512 KB each)
+  const assets = st.sql<{ text: string | null }>("SELECT DISTINCT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('script','document') AND b.text IS NOT NULL LIMIT 400");
+  for (const a of assets) { for (const w of a.text!.toLowerCase().match(/[a-z][a-z'-]{2,}/g) ?? []) { vocab.add(w); if (vocab.size > 400000) break; } }
+  return { values, vocab };
 }
 
-export function makeShaper(values: Set<string>): Shaper {
-  const isData = (p: string) => values.has(strip(p).trim().toLowerCase());
+export function makeShaper(sets: { values: Set<string>; vocab: Set<string> } | Set<string>): Shaper {
+  const values = sets instanceof Set ? sets : sets.values;
+  const vocab = sets instanceof Set ? new Set<string>() : sets.vocab;
+  // a value whose every word the app ships itself is a label, not a record ("outpatient clinic", "patient"); a name is not in any bundle
+  const isLabel = (p: string) => { const words = p.toLowerCase().match(/[a-z][a-z'-]*/g) ?? []; return words.length > 0 && words.every((w) => vocab.has(w)); };
+  const isData = (p: string) => { const q = strip(p).trim().toLowerCase(); return values.has(q) && !isLabel(q); };
   const text = (s: string): string => {
     if (!s) return s;
     const words = patterns(s).split(/(\s+)/);   // keep the whitespace tokens

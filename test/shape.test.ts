@@ -4,6 +4,14 @@ import assert from "node:assert/strict";
 import { makeShaper } from "../src/shape.ts";
 
 const sh = makeShaper(new Set(["barbara miller", "alan turing", "penicillin", "outpatient clinic"]));
+const shv = makeShaper({ values: new Set(["barbara miller", "outpatient clinic", "patient", "female"]), vocab: new Set(["outpatient", "clinic", "patient", "female", "search"]) });
+
+test("vocabulary: a value made of the app's own words is a label, not data", () => {
+  assert.equal(shv.isData("Outpatient Clinic"), false);
+  assert.equal(shv.isData("patient"), false);
+  assert.equal(shv.isData("Barbara Miller"), true);
+  assert.equal(shv.text('radio "Female" · heading "Barbara Miller" · Outpatient Clinic'), 'radio "Female" · heading "<data>" · Outpatient Clinic');
+});
 
 test("json: skeletons keep keys, types and lengths, never values", () => {
   const s = sh.json({ uuid: "0f3c2a1b-1234-4c56-8d9e-a0b1c2d3e4f5", name: { given: ["Barbara"], family: "Miller" }, age: 88, active: true, dob: "1937-06-01", email: "b@example.org", tags: [], results: [{ id: 1 }, { id: 2 }, { id: 3 }] });
