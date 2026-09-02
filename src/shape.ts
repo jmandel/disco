@@ -32,28 +32,32 @@ export interface Shaper {
  *  own bundles and documents, plus every JSON key — a value made only of such words ("Outpatient Clinic", "patient") is a label
  *  the app ships, not a record. */
 const NAME_KEYS = /^(name|display|given|family|prefix|suffix|text|identifier|valueString|valueText|comment|description|note|notes|address\w*|city|country|phone|telecom|email|username|subject)$/i;
-export function collectValues(st: StoreReader, limit = 2000): { values: Set<string>; vocab: Set<string>; strong: Set<string> } {
-  const values = new Set<string>(), vocab = new Set<string>(), strong = new Set<string>();
+export function collectValues(st: StoreReader, limit = 2000): { values: Set<string>; vocab: Set<string>; strong: Set<string>; counts: Map<string, number> } {
+  const values = new Set<string>(), vocab = new Set<string>(), strong = new Set<string>(), counts = new Map<string, number>();
+  let bodies = 0; const seenIn = new Map<string, number>();   // in how many bodies a value occurs: reference data (types, concepts) is everywhere, a record's values are not
   // newest first across runs (t restarts per run), one body per hash: a chart open alone is a hundred JSON answers
   const rows = st.sql<{ text: string | null }>("SELECT b.text FROM bodies b WHERE b.hash IN (SELECT r.body_hash FROM requests r WHERE r.resource_type IN ('xhr','fetch') AND r.mime LIKE '%json%' AND r.body_hash IS NOT NULL ORDER BY r.run DESC, r.t_start DESC LIMIT ?) AND b.text IS NOT NULL AND b.size <= 262144", limit);
   // a string under a name-like key (name, display, given, text, identifier, comment…) is data even if some bundle happens to contain the word
   const add = (v: unknown, depth: number, key = "") => {
     if (values.size > 50000 || depth > 12) return;
-    if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) { values.add(t.toLowerCase()); if (NAME_KEYS.test(key)) strong.add(t.toLowerCase()); } }
+    if (typeof v === "string") { const t = v.trim(); if (t.length >= 4 && t.length <= 80 && !/^[\d\s.,:/-]+$/.test(t)) { const q = t.toLowerCase(); values.add(q); if (NAME_KEYS.test(key)) strong.add(q); if (seenIn.get(q) !== bodies) { seenIn.set(q, bodies); counts.set(q, (counts.get(q) ?? 0) + 1); } } }
     else if (Array.isArray(v)) v.forEach((x) => add(x, depth + 1, key));
     else if (v && typeof v === "object") for (const [k, x] of Object.entries(v as Record<string, unknown>)) { vocab.add(k.toLowerCase()); add(x, depth + 1, k); }
   };
-  for (const r of rows) { try { add(JSON.parse(r.text!), 0); } catch {} }
+  for (const r of rows) { bodies++; try { add(JSON.parse(r.text!), 0); } catch {} }
   // the app's own words: its scripts and documents (deduplicated by hash; the text column is capped at 512 KB each)
   const assets = st.sql<{ text: string | null }>("SELECT DISTINCT b.text FROM requests r JOIN bodies b ON b.hash = r.body_hash WHERE r.resource_type IN ('script','document') AND b.text IS NOT NULL LIMIT 400");
   for (const a of assets) { for (const w of a.text!.toLowerCase().match(/[a-z][a-z'-]{2,}/g) ?? []) { vocab.add(w); if (vocab.size > 400000) break; } }
-  return { values, vocab, strong };
+  return { values, vocab, strong, counts };
 }
 
-export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; strong?: Set<string> } | Set<string>): Shaper {
+export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; strong?: Set<string>; counts?: Map<string, number> } | Set<string>): Shaper {
   const values = sets instanceof Set ? sets : sets.values;
   const vocab = sets instanceof Set ? new Set<string>() : sets.vocab;
   const strong = sets instanceof Set ? new Set<string>() : (sets.strong ?? new Set<string>());
+  const counts = sets instanceof Set ? new Map<string, number>() : (sets.counts ?? new Map<string, number>());
+  // reference data — a visit type, an encounter type, a concept — recurs across many bodies; a record's own values do not. Evidence still blanks it; prose is not nagged about it.
+  const isReference = (p: string) => (counts.get(strip(p).trim().toLowerCase()) ?? 0) >= 5;
   // a value whose every word the app ships itself is a label, not a record ("outpatient clinic", "patient"); a name is not in any bundle
   const isLabel = (p: string) => { const words = p.toLowerCase().match(/[a-z][a-z'-]*/g) ?? []; return words.length > 0 && words.every((w) => vocab.has(w)); };
   const isData = (p: string) => { const q = strip(p).trim().toLowerCase(); return strong.has(q) || (values.has(q) && !isLabel(q)); };
@@ -151,7 +155,7 @@ export function makeShaper(sets: { values: Set<string>; vocab: Set<string>; stro
       const phrases = new Set<string>();
       const words = f.text.split(/\s+/);
       // prose is scanned for values that read as records: two words or more, or a long one — not "admin", "true" or a status word
-      for (let i = 0; i < words.length && phrases.size < 8; i++) for (let n = 4; n >= 1; n--) { if (i + n > words.length) continue; const p = words.slice(i, i + n).join(" "); const q = strip(p); if ((n >= 2 || q.length >= 8) && isData(p)) { phrases.add(q); break; } }
+      for (let i = 0; i < words.length && phrases.size < 8; i++) for (let n = 4; n >= 1; n--) { if (i + n > words.length) continue; const p = words.slice(i, i + n).join(" "); const q = strip(p); if ((n >= 2 || q.length >= 8) && isData(p) && !isReference(p)) { phrases.add(q); break; } }
       const parts: string[] = [];
       if (phrases.size) parts.push(`${phrases.size}${phrases.size >= 8 ? "+" : ""} value${phrases.size === 1 ? "" : "s"} seen in the app's bodies — ${[...phrases].slice(0, 4).map((p) => `"${p}"`).join(", ")}`);
       if (Object.keys(kinds).length) parts.push(Object.entries(kinds).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`).join(", ") + (f.name.endsWith(".ts") ? " (configuration constants, or records?)" : ""));

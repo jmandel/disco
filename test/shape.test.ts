@@ -11,6 +11,12 @@ test("a value under a name-like key is data even when a bundle contains the word
   assert.equal(sh2.isData("nini"), true); assert.equal(sh2.isData("Female"), false);
   assert.equal(sh2.aria('- link "nini":\n- radio "Female"'), '- link "<data>":\n- radio "Female"');
 });
+test("prose scan: reference data that recurs across bodies is not reported; a record's value is", () => {
+  const sh3 = makeShaper({ values: new Set(["facility visit", "barbara miller"]), vocab: new Set(), strong: new Set(["facility visit", "barbara miller"]), counts: new Map([["facility visit", 12], ["barbara miller", 2]]) });
+  const out = sh3.leaks([{ name: "README.md", text: "Start a Facility Visit for Barbara Miller." }]);
+  assert.equal(out.length, 1); assert.match(out[0], /"Barbara Miller"/); assert.doesNotMatch(out[0], /Facility Visit/);
+  assert.equal(sh3.text("Facility Visit for Barbara Miller"), "<data> for <data>", "evidence still blanks both");
+});
 test("vocabulary: a value made of the app's own words is a label, not data", () => {
   assert.equal(shv.isData("Outpatient Clinic"), false);
   assert.equal(shv.isData("patient"), false);
