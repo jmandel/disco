@@ -370,7 +370,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
       for (const num of numbers) { const plain = num.replace(/,/g, ""); if (!texts.some((t) => t.includes(plain) || t.includes(num))) { if (unbacked.length < 8) unbacked.push(`${cites.join("/")} is cited for ${num} but its evidence does not contain it`); } }
     }
     // data that leaked into the prose or the code: the same rules that shape the evidence
-    const files = ["README.md", "sdk.ts"].filter((f) => existsSync(join(packDir, f))).map((f) => ({ name: f, text: readFileSync(join(packDir, f), "utf8") }));
+    const friction = join(packDir, "..", "..", `friction-${app}.md`);   // an exam's friction log sits two levels up; it must be as clean as the pack
+    const files = [["README.md", join(packDir, "README.md")], ["sdk.ts", join(packDir, "sdk.ts")], [`friction-${app}.md`, friction]].filter(([, p]) => existsSync(p)).map(([name, p]) => ({ name, text: readFileSync(p, "utf8") }));
     const leaks = shaper.leaks(files);
     return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide, leaks, storeBytes: dirBytes(storeDir), storeDir, app };
   } finally { st.close(); }
