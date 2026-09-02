@@ -25,7 +25,7 @@ One line each. Adding an option, predicate, command, file or concept requires de
 
 - **A** (surface): gauntlet 22 min / 31 checks / 11 friction; saucedemo 22 / 13 / 10; openmrs read-only 18 / 5 / 9. Judge: claims backed 78 / 87 / 66 %. 30 items → 16 applied, 7 README sentences, 7 rejected.
 - **B** (after A's fold-back): gauntlet 18 / 26 / 9; saucedemo 16 / 12 / 11; openmrs 16 / 7 / 9; expired budget 80 s → 42 s. Judge: 82 / 96 / 90 %; every unseen task done from the pack alone in under a minute (A: 2 / 3 / 7 min). 29 items → applied as above.
-- **C** (after B's): openmrs with writes 20 min / 9 checks (7 verified writes) / 0 s expired / 8 friction; orangehrm (never touched) 18 / 12 (4 writes) / 22 s expired / 11 friction. Fold-back applied; orangehrm re-run against the 10 s expired-budget bar (see memory / git log for the result).
+- **C** (after B's): openmrs with writes 20 min / 9 checks (7 verified writes) / 0 s expired / 8 friction; orangehrm (never touched) 18 / 12 (4 writes) / 22 s expired / 11 friction; judge 96 % / 84 % backed, both unseen write tasks from the pack in 3 min. Fold-back applied; **orangehrm re-run** on it: 16 min / 14 checks / 3 s expired / 7 friction, every cite backed. Then: the next act reports app requests that landed unattributed since the previous one (a debounced write after a window closed); `look` prefers `[name]`/`[placeholder]` over a positional css path for unlabeled inputs.
 
 ## Rejected, and why
 

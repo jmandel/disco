@@ -281,6 +281,9 @@ export class Session {
     };
     const notes: string[] = [];
     if (landedNote) notes.push(landedNote);
+    // what the app did on its own since the previous act (a debounced save that landed after that window closed, a poll): unattributed rows are easy to miss
+    { const prev = store.get<{ t1: number | null }>("SELECT t1 FROM actions WHERE run=? AND n<? ORDER BY n DESC LIMIT 1", store.run, n);
+      if (prev?.t1 != null) { const between = store.all<any>("SELECT method, url, host, status FROM requests WHERE run=? AND action_id IS NULL AND t_start > ? AND t_start < ? AND resource_type IN ('xhr','fetch','document') ORDER BY t_start LIMIT 6", store.run, prev.t1 + 1, t0 - 1).filter((r) => !isThirdParty(r.host, pageSite)); if (between.length) notes.push(`between the previous act and this one the app requested on its own: ${between.map((r) => `${r.method} ${pathOf(r.url, null).slice(0, 60)} ${r.status ?? "…"}`).join(", ")}${between.some((r) => r.method !== "GET") ? " — a write outside any act" : ""}`); } }
     if (returned === "quiet" && !opts.until && tObs1 - tRun1 > quiet + 400) { const domMs = Math.round(lastDom - tRun1), netMs = Math.round(rec.lastActivity((h) => !isThirdParty(h, pageSite)) - (t0 + ms(tStart, tDispatch))); notes.push(`quiet arrived after ${Math.round(tObs1 - tRun1)} ms: the last DOM change was at +${domMs} ms, the last app request event at about +${Math.max(0, netMs)} ms`); }
     if (!ui.added.length && !ui.removed.length && preAria && postAria && preAria !== postAria) notes.push("the accessibility tree changed without additions or removals: lines moved (a sort or a reorder)");
     if (until && (until.alreadyTrue || !until.ok) && opts.until) notes.push(...(await this.#untilNotes(fnSource(opts.until), until, t0)));

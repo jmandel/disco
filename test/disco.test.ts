@@ -485,6 +485,19 @@ describe("exam C fold-backs", () => {
       assert.equal(j?.ms, 800);
     } finally { await g.ctl.reset(); }
   });
+  it("a debounced request that lands after a bare act's window is reported by the next act; unlabeled inputs get a name/placeholder selector", async () => {
+    const r1 = reached(await s.act("type fast", (p) => p.fill("#search", "ad"), { quiet: 40 }));
+    assert.ok(!r1.requests.some((w) => w.path.includes("/api/search")), "the debounced search had not fired inside a 40 ms quiet window");
+    await sleep(600);
+    const r2 = reached(await s.act("noop after", (p) => p.click("#noop")));
+    assert.match(r2.note ?? "", /between the previous act and this one the app requested on its own: GET \/api\/search/);
+    await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<div id=\"uw\"><input name=\"empId\"><input placeholder=\"Type here\"></div>')");
+    const l = await s.look();
+    const sels = l.controls!.map((c) => c.selector);
+    assert.ok(sels.includes('input[name="empId"]'), sels.filter((x) => x.startsWith("input")).join(","));
+    assert.ok(sels.includes('input[placeholder="Type here"]') || sels.includes('role=textbox[name="Type here"]'), sels.filter((x) => /input|textbox/.test(x)).join(","));   // Playwright names a placeholder-only input by its placeholder
+    await s.page.evaluate("document.getElementById('uw').remove()");
+  });
   it("look names controls as the accessibility tree does: icons skipped, labels over placeholders, below-the-fold is not off-canvas", async () => {
     await s.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<span id=\"wrap\"><button><i aria-hidden=\"true\">★</i> Add </button><label for=\"temp\">Temperature</label><input id=\"temp\" type=\"number\" placeholder=\"--.-\"></span>')");
     const l = await s.look();

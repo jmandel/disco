@@ -34,7 +34,7 @@ const CONTROLS = 'button,a,input,select,textarea,summary,[contenteditable],[tabi
 
 /** Runs in the page: every visible interactive control with what look needs to name it and to build a durable selector. */
 function pageControls(_el: Element, sel: string) {
-  const out: Array<{ tag: string; role: string; name: string; weak: boolean; id: string; test: string | null; disabled: boolean; offCanvas: boolean; box: { x: number; y: number; w: number; h: number }; css: string }> = [];
+  const out: Array<{ tag: string; role: string; name: string; weak: boolean; id: string; test: string | null; attr: string | null; disabled: boolean; offCanvas: boolean; box: { x: number; y: number; w: number; h: number }; css: string }> = [];
   // off-canvas = parked left of or above the page, or right of its width (a closed drawer, a slid-out panel); below the fold is not off-canvas
   const docW = Math.max(document.documentElement.scrollWidth, document.documentElement.clientWidth, document.body?.scrollWidth ?? 0);
   // text as an accessible name sees it: aria-hidden subtrees skipped, images by alt, nested aria-labels honoured
@@ -87,7 +87,9 @@ function pageControls(_el: Element, sel: string) {
     const test = h.getAttribute("data-test") ? `[data-test="${h.getAttribute("data-test")}"]` : h.getAttribute("data-testid") ? `[data-testid="${h.getAttribute("data-testid")}"]` : h.getAttribute("data-cy") ? `[data-cy="${h.getAttribute("data-cy")}"]` : h.getAttribute("data-qa") ? `[data-qa="${h.getAttribute("data-qa")}"]` : null;
     const bx = Math.round(r.left + scrollX), by = Math.round(r.top + scrollY);
     const nm = nameOf(h);
-    out.push({ tag: h.tagName.toLowerCase(), role: roleOf(h), name: nm.name, weak: nm.weak, id: h.id, test, disabled: (h as HTMLButtonElement).disabled === true || h.getAttribute("aria-disabled") === "true", offCanvas: bx + r.width <= 0 || by + r.height <= 0 || bx >= docW, box: { x: bx, y: by, w: Math.round(r.width), h: Math.round(r.height) }, css: cssPath(h) });
+    // an unlabeled input still has a stable handle in its name or placeholder — better than a positional css path
+    const attr = h.getAttribute("name") ? `${h.tagName.toLowerCase()}[name="${h.getAttribute("name")}"]` : (h as HTMLInputElement).placeholder ? `${h.tagName.toLowerCase()}[placeholder="${(h as HTMLInputElement).placeholder}"]` : null;
+    out.push({ tag: h.tagName.toLowerCase(), role: roleOf(h), name: nm.name, weak: nm.weak, id: h.id, test, attr, disabled: (h as HTMLButtonElement).disabled === true || h.getAttribute("aria-disabled") === "true", offCanvas: bx + r.width <= 0 || by + r.height <= 0 || bx >= docW, box: { x: bx, y: by, w: Math.round(r.width), h: Math.round(r.height) }, css: cssPath(h) });
     if (out.length >= 80) break;
   }
   return out;
@@ -142,7 +144,7 @@ export function dialogCensus(page: Page): Promise<string[]> {
 function esc(s: string): string { return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"'); }
 
 /** Durable selectors for a list of controls: data-test, a non-generated id, a unique role+name, else a css path. Uniqueness is verified against the live page. */
-async function durable(page: Page, items: Array<{ role: string; name: string; id: string; test: string | null; css: string }>): Promise<string[]> {
+async function durable(page: Page, items: Array<{ role: string; name: string; id: string; test: string | null; css: string; attr?: string | null }>): Promise<string[]> {
   const byRoleName = new Map<string, number>();
   for (const c of items) byRoleName.set(`${c.role}|${c.name}`, (byRoleName.get(`${c.role}|${c.name}`) ?? 0) + 1);
   return Promise.all(items.map(async (c) => {
@@ -155,6 +157,7 @@ async function durable(page: Page, items: Array<{ role: string; name: string; id
       const rx = `role=${c.role}[name=/^\\s*${c.name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\s*$/i]`;
       if ((await page.locator(rx).count().catch(() => 0)) === 1) return rx;
     }
+    if (c.attr && (await page.locator(c.attr).count().catch(() => 0)) === 1) return c.attr;
     return c.css;
   }));
 }
@@ -247,8 +250,9 @@ export async function lookAt(ctx: LookCtx, target?: string | Locator, o: { shot?
       if (sibs.length > 1) p += `:nth-of-type(${sibs.indexOf(e) + 1})`;
       parts.unshift(p);
     }
-    return { role: roleOf(), name, id: h.id, test, css: parts.join(" > ") };
-  }).catch(() => ({ role: "?", name: "", id: "", test: null, css: "" }))));
+    const attr = h.getAttribute("name") ? `${h.tagName.toLowerCase()}[name="${h.getAttribute("name")}"]` : (h as HTMLInputElement).placeholder ? `${h.tagName.toLowerCase()}[placeholder="${(h as HTMLInputElement).placeholder}"]` : null;
+    return { role: roleOf(), name, id: h.id, test, attr, css: parts.join(" > ") };
+  }).catch(() => ({ role: "?", name: "", id: "", test: null, attr: null, css: "" }))));
   const sels = await durable(page, raw);
   const matches: Match[] = items.map((m, i) => ({ n: i + 1, selector: sels[i], role: raw[i].role, name: raw[i].name, ...m }));
   const shot = o.shot === false || !matches.some((m) => m.box) ? null : await marks(ctx, matches.filter((m) => m.box).map((m) => ({ n: m.n, box: m.box! })), "look");
