@@ -118,7 +118,7 @@ if (import.meta.main) {
     assert.match(out, /PASS chart loads/); assert.match(out, /FAIL fails on purpose: nope \(act:\d+\): not-found/);
     // the pack rule is mechanical: close copies cited reports into evidence/ and names cites with nothing behind them
     const failedId = out.match(/nope \((act:\d+)\)/)![1];
-    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (\`act:2\`). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step. See §17 for more. The first two acts are the whole warm-up (act:1-2). The application is a single page whose header never changes between screens. The shell anchor is \`anchors.chart\` and it is visible on every screen of this app. The chart request is the only call this page ever makes.\n\n1. A numbered list item is not a claim by its marker.\n`);
+    writeFileSync(join(appsDir, "chk", "README.md"), `# chk\n\nThe chart loads (\`act:2\`). A missing button is diagnosed (${failedId}). Nothing backs act:999. The slow call took 4242424 ms (act:2). Six products cost 9999 in total. The check passes \`max: 15000\` to that step. See §17 for more. The first two acts are the whole warm-up (act:1-2). The application is a single page whose header never changes between screens. The shell anchor is \`anchors.chart\` and it is visible on every screen of this app. The chart request is the only call this page ever makes.\n\n1. A numbered list item is not a claim by its marker.\n`);
     const c = disco("close", "chk");
     assert.match(c.out, /evidence: README cites 4 acts; .*3 already there/); assert.match(c.out, /NO REPORT for act:999/);   // the script's second run already copied them
     assert.match(c.out, /absolutes with nothing behind them .*: 2, e\.g\. "The application is a single page whose header never changes/);   // "never changes" and "the only call"
@@ -128,7 +128,7 @@ if (import.meta.main) {
     const aria = readFileSync(join(appsDir, "chk", "evidence", "act-2-aria.txt"), "utf8");
     assert.match(aria, /button "Load Chart"/, "control names travel"); assert.doesNotMatch(aria, /- text: "[^<]/, "text lines are blanked");
     assert.match(c.out, /store: [\d.]+ MB .* local only, never committed/);
-    assert.match(c.out, /claim check: act:2 is cited for 4242 but its evidence does not contain it/);
+    assert.match(c.out, /claim check: act:2 is cited for 4242424 but its evidence does not contain it/);
     assert.match(c.out, /uncited numbers .*: 1 sentence, e\.g\. "Six products cost 9999 in total\."/);   // §17, the list marker and the backticked act:2 are not uncited claims
     const ev = JSON.parse(readFileSync(join(appsDir, "chk", "evidence", `act-${failedId.slice(4)}.json`), "utf8"));
     assert.equal(ev.action, failedId); assert.equal(ev.diagnosis.reason, "not-found");
