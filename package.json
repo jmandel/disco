@@ -14,7 +14,8 @@
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "gauntlet": "bun gauntlet/server.ts",
-    "stats": "node scripts/stats.ts"
+    "stats": "node scripts/stats.ts",
+    "export": "node scripts/export.ts"
   },
   "dependencies": {
     "playwright-core": "^1.55.0"

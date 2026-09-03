@@ -218,7 +218,10 @@ requires a marker and a record has no free-text field for it, the marker goes in
 is not skipped. `node apps/shop/sdk.ts` runs the check and leaves the browser running; while it runs,
 `./disco sql "SELECT n, label, ok FROM actions ORDER BY n DESC LIMIT 5"` is its progress bar, and its `close` prints the evidence and claim check. A pack is done when it passes **warm and cold** — once on
 the browser you explored with, then once more after `./disco close shop` on a fresh one. The cold run catches every until that was only true because of what you
-had already done.
+had already done. A workflow reads the screen through Playwright and the server through `json` or `body`, never through `sql`: the log is the
+explorer's, and `close` names a workflow that reads it. `npm run export -- <app> <dir>` writes the pack with a Playwright-only runtime in place of
+disco (`act`, `json`, `body`, `waitFor`, `look(selector)`, `page`; no log, no evidence, a report that says only whether the until held) and runs the
+check there — what passes is what leaves discovery.
 
 ## Method
 

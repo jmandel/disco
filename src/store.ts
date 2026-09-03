@@ -279,7 +279,9 @@ export type StoreReader = ReturnType<typeof openStore>;
 
 /** The pack rule, made mechanical: every `act:N` cited in apps/<app>/README.md gets its report copied to evidence/act-N.json
  *  (the plain report object) and its diagnosis shot to evidence/act-N.jpg, once; cites with no report behind them are returned. */
-export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; absolutes: string[]; wide: string[]; leaks: string[]; storeBytes: number; storeDir: string; app: string };
+export type EvidenceSummary = { cited: number; copied: string[]; present: number; missing: string[]; unbacked: string[]; uncited: string[]; bare: string[]; absolutes: string[]; wide: string[]; leaks: string[]; storeBytes: number; storeDir: string; app: string   /** sdk lines that call sql: workflows that run only under disco */
+  logReads: string[];
+};
 /** The summary as `close` prints it (the CLI's and a script's alike). */
 export function formatEvidence(ev: EvidenceSummary, app: string): string[] {
   const L: string[] = [];
@@ -291,6 +293,7 @@ export function formatEvidence(ev: EvidenceSummary, app: string): string[] {
     if (ev.absolutes.length) L.push(`  absolutes with nothing behind them (only / never / always / identical / exactly — the claims most often wrong): ${ev.absolutes.length}${ev.absolutes.length >= 8 ? "+" : ""}, e.g. "${ev.absolutes[0]}"`);
     if (ev.bare.length) L.push(`  sentences with neither an act id nor an sdk function behind them: ${ev.bare.length}${ev.bare.length >= 8 ? "+" : ""}, e.g. "${ev.bare[0]}" — narrative is fine; a fact there is a guess`);
   }
+    if (ev.logReads.length) L.push(`  the sdk reads the log (sql): ${ev.logReads.slice(0, 4).join(", ")}${ev.logReads.length > 4 ? ", …" : ""} — those workflows run only under disco; a workflow reads the server through json or body`);
   for (const l of ev.leaks) L.push(`  data in the pack: ${l} — the pack is documentation; values belong in the store`);
   if (ev.storeBytes) L.push(`store: ${(ev.storeBytes / 1048576).toFixed(1)} MB of bodies, shots and rows at ${ev.storeDir} — local only, never committed; rm -rf it when the pack is done`);
   return L;
@@ -303,7 +306,7 @@ function dirBytes(dir: string): number { let n = 0; try { for (const e of readdi
 export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary {
   const readme = join(packDir, "README.md");
   const app = packDir.split("/").filter(Boolean).at(-1) ?? "";
-  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], absolutes: [], wide: [], leaks: [], storeBytes: 0, storeDir, app };
+  const none: EvidenceSummary = { cited: 0, copied: [], present: 0, missing: [], unbacked: [], uncited: [], bare: [], absolutes: [], wide: [], leaks: [], logReads: [], storeBytes: 0, storeDir, app };
   if (!existsSync(readme) || !existsSync(join(storeDir, "store.sqlite"))) return none;
   const text = readFileSync(readme, "utf8");
   // a range copies each act; a long one is a check run, not a citation — cap it and say so
@@ -374,7 +377,8 @@ export function syncEvidence(packDir: string, storeDir: string): EvidenceSummary
     const friction = join(packDir, "..", "..", `friction-${app}.md`);   // an exam's friction log sits two levels up; it must be as clean as the pack
     const files = [{ name: "README.md", text }, ...sdk, ...(existsSync(friction) ? [{ name: `friction-${app}.md`, text: readFileSync(friction, "utf8") }] : [])];
     const leaks = shaper.leaks(files);
-    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide, leaks, storeBytes: dirBytes(storeDir), storeDir, app };
+    const logReads = sdk.flatMap((f) => f.text.split("\n").map((l, i) => (/\.sql\s*[<(]/.test(l) && !/^\s*\/\//.test(l) ? `${f.name}:${i + 1}` : null)).filter((x): x is string => !!x));
+    return { cited: ids.length, copied, present, missing, unbacked, uncited, bare, absolutes, wide, leaks, logReads, storeBytes: dirBytes(storeDir), storeDir, app };
   } finally { st.close(); }
 }
 

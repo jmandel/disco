@@ -141,11 +141,12 @@ if (import.meta.main) {
     const pack = join(appsDir, "chk");
     mkdirSync(join(pack, "sdk"), { recursive: true });
     renameSync(join(pack, "sdk.ts"), join(pack, "sdk", "index.ts"));
-    writeFileSync(join(pack, "sdk", "charts.ts"), `export const chartId = "0f3c2a1b-1234-4c56-8d9e-a0b1c2d3e4f5";\nexport async function openChart() { return chartId; }\n`);
+    writeFileSync(join(pack, "sdk", "charts.ts"), `export const chartId = "0f3c2a1b-1234-4c56-8d9e-a0b1c2d3e4f5";\nexport async function openChart() { return chartId; }\nexport function slowCount(s: any) { return s.sql("SELECT count(*) n FROM requests")[0].n; }\n`);
     writeFileSync(join(pack, "README.md"), "# chk\n\nThe chart loads (act:2). The chart opens through openChart on every visit. The header is blue on every page of this app.\n");
     const c = disco("close", "chk");
     assert.match(c.out, /sentences with neither an act id nor an sdk function behind them: 1, e\.g\. "The header is blue/, c.out);
     assert.match(c.out, /sdk\/charts\.ts: 1 uuid/, c.out);
+    assert.match(c.out, /the sdk reads the log \(sql\): sdk\/charts\.ts:3 — those workflows run only under disco/, c.out);
     const r = spawnSync("node", [join(pack, "sdk", "index.ts")], { cwd: root, env: { ...process.env, DISCO_APPS_DIR: appsDir }, encoding: "utf8", timeout: 90000 });
     assert.equal(r.status, 1, r.stdout + r.stderr); assert.match(r.stdout, /PASS chart loads/);
   });
